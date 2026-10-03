@@ -45,6 +45,8 @@ struct ChatConfig {
     /// Input plus output tokens per local calendar day across all chats.
     u64 daily_token_budget = 2'000'000;
     usize max_reply_bytes = 1'500;
+    /// Local time for chat logs and the daily budget boundary (UTC+8).
+    i32 utc_offset_minutes = 480;
 };
 
 struct Config {
