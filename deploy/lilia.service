@@ -1,0 +1,20 @@
+[Unit]
+Description=lilia QQ bot
+Wants=network-online.target napcat.service
+After=network-online.target napcat.service
+ConditionPathExists=%h/.config/lilia/config.json
+
+[Service]
+Type=simple
+# Holds LILIA_ONEBOT_TOKEN and DEEPSEEK_API_KEY; mode 600.
+EnvironmentFile=%h/.config/lilia/secrets.env
+ExecStart=%h/services/lilia/bin/current --config %h/.config/lilia/config.json
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+UMask=0077
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdio>
+#include <cstdlib>
 #include <format>
 #include <string_view>
 #include <utility>
@@ -20,9 +21,17 @@ enum struct Level {
 
 inline Level g_threshold = Level::INFO;
 
+/// systemd sets JOURNAL_STREAM when stderr is connected to the journal.
+inline const bool g_journal = std::getenv("JOURNAL_STREAM") != nullptr;
+
 inline void write(Level level, std::string_view line) {
     if (static_cast<int>(level) > static_cast<int>(g_threshold)) return;
-    std::fprintf(stderr, "<%d>%.*s\n", static_cast<int>(level), static_cast<int>(line.size()), line.data());
+    if (g_journal) {
+        std::fprintf(stderr, "<%d>%.*s\n", static_cast<int>(level), static_cast<int>(line.size()), line.data());
+    } else {
+        const char *label = level == Level::ERROR ? "error" : level == Level::WARN ? "warn" : level == Level::INFO ? "info" : "debug";
+        std::fprintf(stderr, "[%s] %.*s\n", label, static_cast<int>(line.size()), line.data());
+    }
     std::fflush(stderr);
 }
 

@@ -1,0 +1,30 @@
+// Copy to ~/.config/lilia/config.json. Comments are allowed; unknown keys are
+// rejected so typos surface at startup (`lilia --check-config`).
+{
+  "onebot": {
+    // NapCat's OneBot 11 websocket server, published on loopback only.
+    "host": "127.0.0.1",
+    "port": 3001,
+    "access_token": "$LILIA_ONEBOT_TOKEN"
+  },
+  "model": {
+    "base_url": "https://api.deepseek.com/anthropic",
+    "model": "deepseek-flash",
+    "api_key": "$DEEPSEEK_API_KEY",
+    "max_tokens": 2048
+  },
+  "chat": {
+    // Only these groups are logged and answered.
+    "groups": [],
+    "private_users": [],
+    "admins": [],
+    "aliases": ["lilia", "莉莉娅"],
+    "context_messages": 40,
+    "context_bytes": 12000,
+    "min_reply_interval_seconds": 3,
+    "daily_token_budget": 2000000,
+    "max_reply_bytes": 1500,
+    "utc_offset_minutes": 480
+  },
+  "log_level": "info"
+}
