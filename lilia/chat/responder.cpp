@@ -106,19 +106,27 @@ Task<> respond(Responder *r, store::ChatKey chat, std::vector<store::StoredMessa
         .now = now,
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = settings.context_bytes,
+        .web_search = r->config.model.web_search,
     };
     const auto history = build_context(request);
 
+    std::vector<provider::ToolDefinition> tools;
+    if (r->config.model.web_search) tools.push_back({.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"});
+
+    // Only the text after the last thinking / search block is the answer;
+    // earlier text is narration such as "let me search for that".
     std::string answer;
     const provider::StreamCallbacks callbacks{
         .on_item_completed =
             [&answer](const provider::OutputItem &item) {
                 if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
                     for (const auto &part : message->parts) answer += part.text;
+                } else {
+                    answer.clear();
                 }
             },
     };
-    auto completion = co_await r->provider->complete(history, {}, callbacks);
+    auto completion = co_await r->provider->complete(history, tools, callbacks);
 
     store::LlmCall call{.time = now, .chat = chat, .model = r->config.model.model};
     if (completion.has_error()) {

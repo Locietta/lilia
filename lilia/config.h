@@ -26,6 +26,9 @@ struct ModelConfig {
     std::string api_key; ///< secret; usually "$DEEPSEEK_API_KEY"
     u32 max_tokens = 2048;
     std::optional<std::string> reasoning_effort;
+    /// Offer the provider-hosted web_search server tool. A searched answer
+    /// costs tens of thousands of input tokens with DeepSeek.
+    bool web_search = true;
 };
 
 struct ChatConfig {

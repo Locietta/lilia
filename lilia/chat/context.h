@@ -26,6 +26,8 @@ struct ContextRequest {
     i64 now = 0; ///< unix seconds
     i32 utc_offset_minutes = 480;
     usize log_bytes = 12'000;
+    /// The model can search the web (adds usage guidance to the rules).
+    bool web_search = false;
 };
 
 /// "[HH:MM] name(qq): text", with "(你)" marking lilia's own lines.
@@ -42,8 +44,11 @@ i64 local_day_start(i64 unix_seconds, i32 utc_offset_minutes);
 /// and the messages to answer.
 provider::History build_context(const ContextRequest &request);
 
+/// Removes Markdown that QQ shows literally: heading markers and **bold**.
+std::string strip_markdown(std::string_view text);
+
 /// Cleans a model answer for QQ: trims, drops a leading speaker label the
-/// model may copy from the log format, and bounds the length.
+/// model may copy from the log format, strips Markdown and bounds the length.
 std::string clean_reply(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases, usize max_bytes);
 
 } // namespace lilia::chat

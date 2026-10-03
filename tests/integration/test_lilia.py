@@ -45,6 +45,28 @@ def sse(events):
     ).encode()
 
 
+def text_block(index, text):
+    return [
+        (
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {"type": "text", "text": ""},
+            },
+        ),
+        (
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "text_delta", "text": text},
+            },
+        ),
+        ("content_block_stop", {"type": "content_block_stop", "index": index}),
+    ]
+
+
 def start_model_server():
     state = {"bodies": [], "errors": []}
 
@@ -75,26 +97,53 @@ def start_model_server():
                             },
                         },
                     ),
+                    *text_block(0, "我搜一下。"),
                     (
                         "content_block_start",
                         {
                             "type": "content_block_start",
-                            "index": 0,
-                            "content_block": {"type": "text", "text": ""},
+                            "index": 1,
+                            "content_block": {
+                                "type": "server_tool_use",
+                                "id": "srvtoolu_1",
+                                "name": "web_search",
+                                "input": {},
+                            },
                         },
                     ),
                     (
                         "content_block_delta",
                         {
                             "type": "content_block_delta",
-                            "index": 0,
+                            "index": 1,
                             "delta": {
-                                "type": "text_delta",
-                                "text": "lilia：fake reply",
+                                "type": "input_json_delta",
+                                "partial_json": '{"query": "minecraft"}',
                             },
                         },
                     ),
-                    ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+                    ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+                    (
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": 2,
+                            "content_block": {
+                                "type": "web_search_tool_result",
+                                "tool_use_id": "srvtoolu_1",
+                                "content": [
+                                    {
+                                        "type": "web_search_result",
+                                        "url": "https://minecraft.wiki/",
+                                        "title": "Minecraft Wiki",
+                                        "encrypted_content": "x",
+                                    }
+                                ],
+                            },
+                        },
+                    ),
+                    ("content_block_stop", {"type": "content_block_stop", "index": 2}),
+                    *text_block(3, "lilia：**fake** reply"),
                     (
                         "message_delta",
                         {
@@ -284,6 +333,9 @@ def test_reply_and_reconnect(tmp_path):
     body = model_state["bodies"][0]
     assert "lilia" in body["system"], "persona and runtime facts go to the system field"
     assert "测试群" in body["system"]
+    assert {"type": "web_search_20250305", "name": "web_search"} in body.get(
+        "tools", []
+    ), "the hosted web_search tool must be offered"
     last = body["messages"][-1]
     texts = "".join(b.get("text", "") for b in last["content"] if b["type"] == "text")
     assert "你好呀" in texts and "别理我" not in texts
@@ -295,7 +347,7 @@ def test_reply_and_reconnect(tmp_path):
     assert params["message"][1] == {
         "type": "text",
         "data": {"text": "fake reply"},
-    }, "the copied speaker label must be stripped"
+    }, "narration before the search, the speaker label and Markdown must be dropped"
 
     db = sqlite3.connect(data_dir / "lilia.db")
     rows = db.execute(

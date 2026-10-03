@@ -95,6 +95,10 @@ provider::History build_context(const ContextRequest &request) {
              "- 直接给出要发送的内容，不要加时间、昵称或「你:」之类的前缀。\n"
              "- 这是即时聊天，像群友一样自然、简短地说话；不要使用 Markdown 标题、列表或代码块。\n"
              "- 不知道的事情就说不知道，不要编造。";
+    if (request.web_search) {
+        facts += "\n- 你可以用 web_search 联网搜索。只在需要最新信息或核实事实时搜索，闲聊不要搜。"
+                 "搜索后用几句话说结论，需要时附上一个最相关的来源链接，不要逐条罗列搜索结果。";
+    }
     provider::append_developer(history, std::move(facts));
 
     std::unordered_set<i64> trigger_ids;
@@ -130,8 +134,31 @@ provider::History build_context(const ContextRequest &request) {
     return history;
 }
 
+std::string strip_markdown(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    bool line_start = true;
+    for (usize i = 0; i < text.size();) {
+        if (line_start) {
+            // "## heading" -> "heading"
+            usize hashes = 0;
+            while (i + hashes < text.size() && text[i + hashes] == '#') ++hashes;
+            if (hashes > 0 && hashes <= 6 && i + hashes < text.size() && text[i + hashes] == ' ') i += hashes + 1;
+        }
+        if (text.substr(i).starts_with("**") || text.substr(i).starts_with("__")) {
+            i += 2;
+            line_start = false;
+            continue;
+        }
+        line_start = text[i] == '\n';
+        out.push_back(text[i]);
+        ++i;
+    }
+    return out;
+}
+
 std::string clean_reply(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases, usize max_bytes) {
-    auto cleaned = std::string(strip_speaker_label(text, info, aliases));
+    auto cleaned = strip_markdown(strip_speaker_label(text, info, aliases));
     if (cleaned.size() <= max_bytes) return cleaned;
     constexpr std::string_view k_ellipsis = "……";
     auto bounded = bounded_utf8(cleaned, max_bytes > k_ellipsis.size() ? max_bytes - k_ellipsis.size() : 0);

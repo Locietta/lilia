@@ -119,6 +119,8 @@ void test_clean_reply() {
     require(chat::clean_reply("[21:05] lilia(你): 在的", info, aliases, 100) == "在的", "copied log prefix is stripped");
     require(chat::clean_reply("莉莉娅：嗯嗯", info, aliases, 100) == "嗯嗯", "full-width colon label is stripped");
     require(chat::clean_reply("lilia 很开心", info, aliases, 100) == "lilia 很开心", "a name without a colon is content");
+    require(chat::strip_markdown("## 结论\n**26.3** 是最新版，a**b") == "结论\n26.3 是最新版，ab", "headings and bold are stripped");
+    require(chat::strip_markdown("#话题 不是标题") == "#话题 不是标题", "a hash without a space is content");
     const auto bounded = chat::clean_reply(std::string(30, 'a') + "你好你好", info, aliases, 20);
     require(bounded.size() <= 20 && bounded.ends_with("……"), "long replies are bounded with an ellipsis");
 }
