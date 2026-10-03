@@ -26,5 +26,13 @@
     "max_reply_bytes": 1500,
     "utc_offset_minutes": 480
   },
+  "archive": {
+    // Media of allowed chats is copied into <data_dir>/media and kept forever.
+    "enabled": true,
+    "max_file_bytes": 52428800,
+    // NapCat's QQ data dir inside its container, and its host bind mount.
+    "container_qq_dir": "/app/.config/QQ",
+    "host_qq_dir": "~/services/napcat/qq"
+  },
   "log_level": "info"
 }

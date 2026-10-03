@@ -43,6 +43,22 @@ struct LlmCall {
     std::string error; ///< empty on success
 };
 
+/// One archived (or failed) media segment of a stored message.
+struct MediaRecord {
+    ChatKey chat;
+    i64 message_id = 0;
+    i64 segment_index = 0;
+    std::string kind;   ///< archive::to_string(MediaKind)
+    std::string status; ///< "stored", "failed" or "too_large"
+    std::string sha1;   ///< content hash; empty unless stored
+    std::string path;   ///< relative to the data directory; empty unless stored
+    i64 bytes = 0;
+    std::string name;   ///< original file name, when known
+    std::string source; ///< url or napcat path the bytes came from
+    std::string error;
+    i64 time = 0;
+};
+
 struct Store {
     static Result<Store> open(const std::filesystem::path &path);
     static Result<Store> open_memory();
@@ -60,6 +76,11 @@ struct Store {
 
     /// Input plus output tokens of every call at or after `since` (unix seconds).
     Result<u64> tokens_since(i64 since);
+
+    Result<void> add_media(const MediaRecord &media);
+
+    /// Media rows of one message, in segment order.
+    Result<std::vector<MediaRecord>> message_media(const ChatKey &chat, i64 message_id);
 
     Database database;
 };

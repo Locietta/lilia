@@ -9,6 +9,7 @@
 
 #include <lighter/async/runtime/task.h>
 
+#include <lilia/archive/archiver.h>
 #include <lilia/config.h>
 #include <lilia/onebot/session.h>
 #include <lilia/provider/provider.h>
@@ -50,6 +51,8 @@ struct Responder {
     std::filesystem::path persona_path;
     std::string persona;
     Spawn spawn;
+    /// Archives media of allowed chats; null when archiving is disabled.
+    archive::Archiver *archiver = nullptr;
 
     std::shared_ptr<onebot::Session> session;
     onebot::LoginInfo self;

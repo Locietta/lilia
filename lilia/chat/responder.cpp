@@ -238,6 +238,7 @@ void Responder::on_event(onebot::Event event) {
 
     auto stored = to_stored(*message);
     if (auto added = store.add_message(stored); added.has_error()) log::error("cannot store message: {}", added.error().message());
+    if (archiver && !archive::collect_media(message->message).empty()) spawn(archiver->archive(session, stored, message->message));
     auto &state = chats[stored.chat];
     if (message->is_group()) {
         if (message->group_name && !message->group_name->empty()) state.name = *message->group_name;

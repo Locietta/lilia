@@ -32,6 +32,17 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     generated are merged into the next reply.
   - Guards: a minimum interval between replies and a daily token budget,
     counted from `llm_calls`.
+- **`archive/`**: copies the media of allowed chats (pictures, stickers,
+  voice, video, files) into `<data_dir>/media/<sha1[:2]>/<sha1><ext>`.
+  - **Why:** the QQ client cache on the host is pruned after a few days, and
+    Tencent's download links expire.
+  - **Sources, in order:** the segment's `url`; a container `path` mapped
+    through NapCat's bind mount; `get_group_file_url`; `get_file`.
+  - **Bookkeeping:** content addressing deduplicates files. The extension
+    comes from magic bytes, and each segment gets a row in the `media` table,
+    including failures and `too_large` (default cap 50 MB).
+  - **Concurrency:** at most two messages are archived at a time; media from
+    other chats is never fetched.
 - **`store/`**: SQLite in WAL mode. Only allow-listed chats are stored; the bot
   account is also a member of unrelated groups.
 - **`main`**:

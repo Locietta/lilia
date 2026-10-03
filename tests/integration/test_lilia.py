@@ -12,6 +12,7 @@ one llm_calls row, and nothing from the ignored group.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
@@ -28,7 +29,10 @@ SELF_ID = 10001
 GROUP = 555
 IGNORED_GROUP = 999
 TRIGGER_ID = -12345
+MEDIA_ID = 4242
 TOKEN = "onebot-test-token"
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
+VOICE_BYTES = b"#!AMR\n" + bytes(range(32))
 API_KEY = "test-key"
 
 
@@ -68,11 +72,20 @@ def text_block(index, text):
 
 
 def start_model_server():
-    state = {"bodies": [], "errors": []}
+    state = {"bodies": [], "errors": [], "gets": []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def do_GET(self):
+            # Stands in for Tencent's media CDN.
+            state["gets"].append(self.path)
+            self.send_response(200)
+            self.send_header("content-type", "image/png")
+            self.send_header("content-length", str(len(PNG_BYTES)))
+            self.end_headers()
+            self.wfile.write(PNG_BYTES)
 
         def do_POST(self):
             try:
@@ -166,7 +179,7 @@ def start_model_server():
     return server, state
 
 
-def group_event(group_id, message_id, text):
+def group_event(group_id, message_id, text, segments=None):
     return json.dumps(
         {
             "self_id": SELF_ID,
@@ -181,7 +194,8 @@ def group_event(group_id, message_id, text):
                 "card": "",
                 "role": "member",
             },
-            "message": [
+            "message": segments
+            or [
                 {"type": "at", "data": {"qq": str(SELF_ID), "name": "lilia"}},
                 {"type": "text", "data": {"text": text}},
             ],
@@ -196,8 +210,10 @@ def group_event(group_id, message_id, text):
 
 
 class FakeNapCat:
-    def __init__(self):
+    def __init__(self, media_port):
+        self.media_port = media_port
         self.port = None
+        self.file_requests = []
         self.connections = 0
         self.errors = []
         self.sent = []
@@ -236,23 +252,63 @@ class FakeNapCat:
             # lilia only handles messages once it knows its own id; give the
             # login response a moment to be processed.
             await asyncio.sleep(0.3)
-            await ws.send(group_event(IGNORED_GROUP, 1, " 别理我"))
-            await ws.send(group_event(GROUP, TRIGGER_ID, " 你好呀"))
-
-            request = json.loads(await asyncio.wait_for(ws.recv(), 20))
-            self.sent.append(request)
-            assert request["action"] == "send_group_msg", request
+            media = f"http://127.0.0.1:{self.media_port}"
+            ignored = [
+                {"type": "at", "data": {"qq": str(SELF_ID)}},
+                {"type": "text", "data": {"text": " 别理我"}},
+                {
+                    "type": "image",
+                    "data": {"file": "s.png", "url": f"{media}/secret.png"},
+                },
+            ]
+            await ws.send(group_event(IGNORED_GROUP, 1, "", ignored))
+            # Media without a trigger: archived, not answered. The picture has a
+            # direct url; the voice clip must be resolved through get_file.
             await ws.send(
-                json.dumps(
-                    {
-                        "status": "ok",
-                        "retcode": 0,
-                        "data": {"message_id": 777},
-                        "echo": request["echo"],
-                    }
+                group_event(
+                    GROUP,
+                    MEDIA_ID,
+                    "",
+                    [
+                        {
+                            "type": "image",
+                            "data": {
+                                "file": "p.png",
+                                "url": f"{media}/img.png",
+                                "sub_type": 0,
+                            },
+                        },
+                        {"type": "record", "data": {"file": "voice.amr"}},
+                    ],
                 )
             )
-            # No second reply may follow (the ignored group must stay silent).
+            await ws.send(group_event(GROUP, TRIGGER_ID, " 你好呀"))
+
+            # Answer requests in whatever order lilia sends them.
+            while not (self.sent and self.file_requests):
+                request = json.loads(await asyncio.wait_for(ws.recv(), 20))
+                if request["action"] == "send_group_msg":
+                    self.sent.append(request)
+                    data = {"message_id": 777}
+                elif request["action"] == "get_file":
+                    self.file_requests.append(request)
+                    data = {
+                        "file": "/app/.config/QQ/nt_qq_t/nt_data/Ptt/voice.amr",
+                        "file_name": "voice.amr",
+                    }
+                else:
+                    self.errors.append(f"unexpected action {request['action']}")
+                    data = None
+                await ws.send(
+                    json.dumps(
+                        {
+                            "status": "ok",
+                            "retcode": 0,
+                            "data": data,
+                            "echo": request["echo"],
+                        }
+                    )
+                )  # No second reply may follow (the ignored group must stay silent).
             try:
                 extra = await asyncio.wait_for(ws.recv(), 2)
                 self.errors.append(f"unexpected extra request: {extra}")
@@ -283,10 +339,14 @@ class FakeNapCat:
 
 def test_reply_and_reconnect(tmp_path):
     model, model_state = start_model_server()
-    napcat = FakeNapCat()
+    napcat = FakeNapCat(model.server_port)
     napcat.start()
 
     data_dir = tmp_path / "data"
+    qq_dir = tmp_path / "qq"
+    voice_path = qq_dir / "nt_qq_t" / "nt_data" / "Ptt" / "voice.amr"
+    voice_path.parent.mkdir(parents=True)
+    voice_path.write_bytes(VOICE_BYTES)
     config = tmp_path / "config.json"
     config.write_text(
         json.dumps(
@@ -301,6 +361,10 @@ def test_reply_and_reconnect(tmp_path):
                     "api_key": "$LILIA_TEST_KEY",
                 },
                 "chat": {"groups": [GROUP], "min_reply_interval_seconds": 0},
+                "archive": {
+                    "container_qq_dir": "/app/.config/QQ",
+                    "host_qq_dir": str(qq_dir),
+                },
                 "data_dir": str(data_dir),
                 "log_level": "debug",
             }
@@ -354,6 +418,7 @@ def test_reply_and_reconnect(tmp_path):
         "SELECT chat_id, message_id, from_self, text FROM messages ORDER BY id"
     ).fetchall()
     assert rows == [
+        (GROUP, MEDIA_ID, 0, "[图片][语音]"),
         (GROUP, TRIGGER_ID, 0, "@lilia 你好呀"),
         (GROUP, 777, 1, "fake reply"),
     ], rows
@@ -361,4 +426,39 @@ def test_reply_and_reconnect(tmp_path):
         "SELECT chat_id, input_tokens, output_tokens, request_id, error FROM llm_calls"
     ).fetchall()
     assert calls == [(GROUP, 10, 12, "req_test", "")], calls
+
+    media = db.execute(
+        "SELECT chat_id, message_id, segment_index, kind, status, sha1, path, bytes, error "
+        "FROM media ORDER BY segment_index"
+    ).fetchall()
     db.close()
+    png_sha1 = hashlib.sha1(PNG_BYTES).hexdigest()
+    voice_sha1 = hashlib.sha1(VOICE_BYTES).hexdigest()
+    assert media == [
+        (
+            GROUP,
+            MEDIA_ID,
+            0,
+            "image",
+            "stored",
+            png_sha1,
+            f"media/{png_sha1[:2]}/{png_sha1}.png",
+            len(PNG_BYTES),
+            "",
+        ),
+        (
+            GROUP,
+            MEDIA_ID,
+            1,
+            "voice",
+            "stored",
+            voice_sha1,
+            f"media/{voice_sha1[:2]}/{voice_sha1}.amr",
+            len(VOICE_BYTES),
+            "",
+        ),
+    ], media
+    assert (data_dir / media[0][6]).read_bytes() == PNG_BYTES
+    assert (data_dir / media[1][6]).read_bytes() == VOICE_BYTES
+    assert napcat.file_requests[0]["params"] == {"file": "voice.amr"}
+    assert model_state["gets"] == ["/img.png"], "only allowed-group media is fetched"

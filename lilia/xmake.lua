@@ -6,7 +6,7 @@ target("lilia-core")
     set_kind("static")
     -- public, so the generated <xmake/version/lilia.hpp> reaches dependents
     add_rules("utils.version.cpp")
-    add_files("config.cpp", "chat/*.cpp", "net/*.cpp", "onebot/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "store/*.cpp", "tools/*.cpp")
+    add_files("config.cpp", "archive/*.cpp", "chat/*.cpp", "net/*.cpp", "onebot/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "store/*.cpp", "tools/*.cpp")
     add_deps("lighter")
     add_packages("sqlite3")
     add_packages("ngcpp-proxy", {public = true})

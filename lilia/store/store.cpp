@@ -7,7 +7,8 @@ namespace lilia::store {
 
 namespace {
 
-constexpr int k_schema_version = 1;
+// 2: media table.
+constexpr int k_schema_version = 2;
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -40,6 +41,25 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     error TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS llm_calls_by_time ON llm_calls (time);
+
+CREATE TABLE IF NOT EXISTS media (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    segment_index INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    sha1 TEXT NOT NULL,
+    path TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL,
+    error TEXT NOT NULL,
+    time INTEGER NOT NULL,
+    UNIQUE (chat_type, chat_id, message_id, segment_index)
+);
+CREATE INDEX IF NOT EXISTS media_by_sha1 ON media (sha1);
 )sql";
 
 Result<Store> initialize(Result<Database> opened, bool file_backed) {
@@ -153,6 +173,59 @@ Result<u64> Store::tokens_since(i64 since) {
     auto row = statement->step();
     if (row.has_error()) return lighter::outcome_error(std::move(row).error());
     return static_cast<u64>(*row ? statement->column_int(0) : 0);
+}
+
+Result<void> Store::add_media(const MediaRecord &media) {
+    // A retry after a failure replaces the earlier row for the same segment.
+    auto statement =
+        database.prepare("INSERT OR REPLACE INTO media (chat_type, chat_id, message_id, segment_index, kind, status, sha1, "
+                         "path, bytes, name, source, error, time) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, media.chat.type);
+    statement->bind(2, media.chat.id);
+    statement->bind(3, media.message_id);
+    statement->bind(4, media.segment_index);
+    statement->bind(5, media.kind);
+    statement->bind(6, media.status);
+    statement->bind(7, media.sha1);
+    statement->bind(8, media.path);
+    statement->bind(9, media.bytes);
+    statement->bind(10, media.name);
+    statement->bind(11, media.source);
+    statement->bind(12, media.error);
+    statement->bind(13, media.time);
+    return statement->run();
+}
+
+Result<std::vector<MediaRecord>> Store::message_media(const ChatKey &chat, i64 message_id) {
+    auto statement = database.prepare("SELECT segment_index, kind, status, sha1, path, bytes, name, source, error, time FROM media "
+                                      "WHERE chat_type = ?1 AND chat_id = ?2 AND message_id = ?3 ORDER BY segment_index");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, message_id);
+
+    std::vector<MediaRecord> media;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        media.push_back({
+            .chat = chat,
+            .message_id = message_id,
+            .segment_index = statement->column_int(0),
+            .kind = statement->column_text(1),
+            .status = statement->column_text(2),
+            .sha1 = statement->column_text(3),
+            .path = statement->column_text(4),
+            .bytes = statement->column_int(5),
+            .name = statement->column_text(6),
+            .source = statement->column_text(7),
+            .error = statement->column_text(8),
+            .time = statement->column_int(9),
+        });
+    }
+    return media;
 }
 
 } // namespace lilia::store

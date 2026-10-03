@@ -52,10 +52,21 @@ struct ChatConfig {
     i32 utc_offset_minutes = 480;
 };
 
+struct ArchiveConfig {
+    /// Copy media of allowed chats into <data_dir>/media.
+    bool enabled = true;
+    u64 max_file_bytes = 50ull * 1024 * 1024;
+    /// NapCat's QQ data directory inside its container and where that
+    /// directory is bind-mounted on the host (paths from get_file are mapped).
+    std::string container_qq_dir = "/app/.config/QQ";
+    std::string host_qq_dir = "~/services/napcat/qq";
+};
+
 struct Config {
     OneBotConfig onebot;
     ModelConfig model;
     ChatConfig chat;
+    ArchiveConfig archive;
     /// Database and persona location; empty means the platform default.
     std::string data_dir;
     std::string log_level = "info";

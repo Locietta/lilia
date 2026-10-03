@@ -104,6 +104,9 @@ Result<Config> load_config(const std::filesystem::path &path) {
     } else if (config->data_dir.starts_with("~/")) {
         config->data_dir = (home_directory() / config->data_dir.substr(2)).string();
     }
+    if (config->archive.host_qq_dir.starts_with("~/")) {
+        config->archive.host_qq_dir = (home_directory() / config->archive.host_qq_dir.substr(2)).string();
+    }
     return config;
 }
 

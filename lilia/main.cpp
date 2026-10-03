@@ -14,6 +14,7 @@
 #include <lighter/async/io/loop.h>
 #include <lighter/async/runtime/interrupt.h>
 
+#include <lilia/archive/archiver.h>
 #include <lilia/chat/responder.h>
 #include <lilia/config.h>
 #include <lilia/log.h>
@@ -103,6 +104,8 @@ Task<int> run_app(const Config &config) {
     lighter::TaskGroup tasks(lighter::EventLoop::current());
     chat::Responder responder(config, *store, std::move(provider), data_dir / "persona.md",
                               [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    archive::Archiver archiver(config.archive, data_dir, *store);
+    if (config.archive.enabled) responder.archiver = &archiver;
     if (auto loaded = responder.reload_persona(); loaded.has_error()) {
         log::error("{}", loaded.error().message());
         co_return 1;
