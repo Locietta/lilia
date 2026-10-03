@@ -1,0 +1,13 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# clangd
+.cache
+.clice
+
+build*/
+dist/
+.xmake/
+
+__pycache__/

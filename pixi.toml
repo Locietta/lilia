@@ -1,0 +1,52 @@
+[workspace]
+authors = ["Locietta <locietta@gmail.com>"]
+channels = ["conda-forge"]
+name = "lilia"
+platforms = ["win-64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+setup-hooks = "python scripts/setup_hooks.py"
+format = "python scripts/format.py"
+format-check = "python scripts/format.py --check ."
+configure = "xmake f -m releasedbg --sanitizers=n -y" # we use releasedbg for development and testing
+configure-release = "xmake f -m release --sanitizers=n -y"
+configure-sanitize = "xmake f -m releasedbg --sanitizers=y -y"
+build = "xmake build -y"
+test-unit = "xmake test"
+test-integration = { cmd = "python -m pytest tests/integration -v", depends-on = [
+  "build",
+] }
+test-all = { cmd = "xmake test && python -m pytest tests/integration -v", depends-on = [
+  "build",
+] }
+deploy-cachy = "python scripts/deploy_cachy.py"
+test-remote-linux = "python scripts/test_remote_linux.py"
+test-remote-linux-release = "python scripts/test_remote_linux.py --mode release"
+test-remote-linux-sanitize = "python scripts/test_remote_linux.py --mode sanitize"
+
+[dependencies]
+python = ">=3.14"
+ninja = "*"
+cmake = ">=4.4.0"
+clang-format = "==22.1.8"
+ruff = "==0.16.1"
+prettier = "==3.9.3"
+taplo = "==0.10.0"
+pytest = ">=8"
+websockets = ">=15" # fake OneBot server in integration tests
+# C dependencies. These are C ABI only, so the MSVC-built Windows builds link
+# fine from GCC; see lighter/xmake.lua for the libuv import-library caveat.
+libuv = ">=1.52.1,<2"
+libcurl = ">=8.21.0,<9"
+libiconv = ">=1.18,<2"
+
+# GCC 16 is the only toolchain currently shipping P2996 static reflection
+# (-freflection) and P2900 contracts, which this project depends on.
+[target.win-64.dependencies]
+gcc_win-64 = "16.2.*"
+gxx_win-64 = "16.2.*"
+
+[target.linux-64.dependencies]
+gcc = "16.2.*"
+gxx = "16.2.*"
