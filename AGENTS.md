@@ -13,7 +13,7 @@ Compiler toolchain, C dependencies and python packages are managed by pixi:
 
 C++ dependencies should be managed by xmake. Project headers must remain platform-neutral; include Windows SDK and POSIX headers only from implementation units.
 
-`lighter/` is vendored from liminal with `git subtree` and is read-only here: change it in liminal first, then `git subtree pull`. The files copied from liminal's provider layer are listed in `docs/dev/provenance.md`.
+`lighter` (coroutine runtime, HTTP, codecs) is an xmake package from `Locietta/lighter`, pinned through the recipe in the `xmake` submodule (`Locietta/xmake-repo`). Change lighter in its own repository; to build lilia against a local lighter checkout, set `LIGHTER_SOURCE_DIR` and run `pixi run xmake require -f -y lighter`. The files copied from liminal's provider layer are listed in `docs/dev/provenance.md`.
 
 Never print or commit secrets: the OneBot access token and model API keys live only in `~/.config/lilia/secrets.env` on the host. Chat logs in the database are private conversations of real people; do not dump them into transcripts beyond what a task needs.
 

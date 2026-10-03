@@ -1,30 +1,22 @@
 # Code taken from liminal
 
-## `lighter/` (git subtree)
+## lighter (xmake package)
 
-Vendored on 2026-10-03 from liminal `main` at `d520ce6` (split commit `b7c1208`):
+From 2026-10-03 to the switch the same day, `lighter/` was vendored from liminal
+`main` at `d520ce6` with `git subtree`. It is now its own repository,
+[Locietta/lighter](https://github.com/Locietta/lighter) (MIT, history preserved
+from liminal). lilia consumes it as the xmake package `lighter 2026.10.03`; the
+recipe lives in `Locietta/xmake-repo` (`packages/l/lighter`), our `xmake`
+submodule.
 
-```powershell
-# in a throwaway clone of liminal, so the real repository is untouched
-git subtree split --prefix=lighter main -b lighter-export
-# in lilia
-git subtree add --squash --prefix=lighter <clone> lighter-export
-```
-
-Treat `lighter/` as read-only. To pick up changes, repeat the split on a fresh
-clone and run `git subtree pull --squash --prefix=lighter <clone> lighter-export`.
-Changes needed by lilia go into liminal first.
-
-Candidates to upstream into lighter:
-
-- `lilia/net/websocket.*` and `lilia/net/codec.*`: a websocket client over
-  `lighter::Tcp`, plus base64 and SHA-1.
-- Awaiting a `Task<T>` whose error channel is `void` copies `T`
-  (`Outcome<T, void, void>::value()` returns by value for lvalues), so a
-  move-only `T` does not compile. Tests work around it with `shared_ptr`.
-
-Plan: move lighter into its own repository once lilia needs its first change to
-it, then consume it from both projects as a submodule or an xmake package.
+- Change lighter in its own repository, release a new version (tag plus
+  `add_versions` in the recipe), then bump the `xmake` submodule and the
+  `add_requires` version here.
+- For local co-development set `LIGHTER_SOURCE_DIR` to a lighter checkout and
+  run `pixi run xmake require -f -y lighter`; unset it to return to the pin.
+- Candidates to move into lighter: `lilia/net/websocket.*` and
+  `lilia/net/codec.*` (websocket client, base64, SHA-1). The
+  `Outcome<T, void, void>` copy limitation is listed in lighter's README.
 
 ## Provider layer (copied, renamed `liminal::` to `lilia::`)
 

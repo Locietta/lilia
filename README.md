@@ -7,8 +7,9 @@ endpoint (DeepSeek by default) when someone @-mentions it, replies to it or
 calls it by name.
 
 Built with C++26 on the same toolchain as [liminal](https://github.com/Locietta/liminal):
-GCC 16.2 from Pixi, xmake, and liminal's `lighter` runtime (vendored with
-`git subtree`, see [docs/dev/provenance.md](docs/dev/provenance.md)).
+GCC 16.2 from Pixi, xmake, and the [lighter](https://github.com/Locietta/lighter)
+runtime as an xmake package (see [docs/dev/provenance.md](docs/dev/provenance.md)).
+Set `LIGHTER_SOURCE_DIR` to build against a local lighter checkout.
 
 ## Build and test
 
