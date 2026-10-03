@@ -98,8 +98,7 @@ std::string response(std::string_view echo, std::string_view data) {
 }
 
 lighter::Task<> fake_napcat(lighter::Tcp::Acceptor listener) {
-    auto owned = co_await FakeWsPeer::accept(listener);
-    auto &peer = *owned;
+    auto peer = co_await FakeWsPeer::accept(listener);
     listener = {};
     require(peer.has_header("Authorization: Bearer token-123"), "access token must be sent as a bearer header");
 

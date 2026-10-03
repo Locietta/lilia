@@ -1,6 +1,6 @@
 includes("xmake/rules/*.lua")
 
-add_requires("lighter 2026.10.03", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
+add_requires("lighter 0.2.0", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
 
 target("lilia-core")
     set_kind("static")

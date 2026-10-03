@@ -5,7 +5,7 @@
 From 2026-10-03 to the switch the same day, `lighter/` was vendored from liminal
 `main` at `d520ce6` with `git subtree`. It is now its own repository,
 [Locietta/lighter](https://github.com/Locietta/lighter) (MIT, history preserved
-from liminal). lilia consumes it as the xmake package `lighter 2026.10.03`; the
+from liminal). lilia consumes it as the xmake package `lighter 0.2.0` (semver; `0.1.0` was first published as `2026.10.03`); the
 recipe lives in `Locietta/xmake-repo` (`packages/l/lighter`), our `xmake`
 submodule.
 
@@ -15,8 +15,10 @@ submodule.
 - For local co-development set `LIGHTER_SOURCE_DIR` to a lighter checkout and
   run `pixi run xmake require -f -y lighter`; unset it to return to the pin.
 - Candidates to move into lighter: `lilia/net/websocket.*` and
-  `lilia/net/codec.*` (websocket client, base64, SHA-1). The
-  `Outcome<T, void, void>` copy limitation is listed in lighter's README.
+  `lilia/net/codec.*` (websocket client, base64, SHA-1).
+- lighter 0.2.0 fixed `Outcome<T, void, void>::value()` copying its value, so a
+  `Task<T>` with a move-only `T` now works; the test helper's `shared_ptr`
+  workaround was removed.
 
 ## Provider layer (copied, renamed `liminal::` to `lilia::`)
 

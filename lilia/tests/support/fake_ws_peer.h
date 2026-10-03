@@ -1,6 +1,5 @@
 #pragma once
 
-#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -44,13 +43,10 @@ struct FakeWsPeer {
     std::string buffer;
     std::string request_head;
 
-    /// Shared ownership because awaiting a Task<T> without an error channel
-    /// copies T (lighter Outcome<T, void, void>::value() on an lvalue).
-    static lighter::Task<std::shared_ptr<FakeWsPeer>> accept(lighter::Tcp::Acceptor &listener) {
+    static lighter::Task<FakeWsPeer> accept(lighter::Tcp::Acceptor &listener) {
         auto accepted = co_await listener.accept();
         require(static_cast<bool>(accepted), "failed to accept the test connection");
-        auto owned = std::make_shared<FakeWsPeer>(FakeWsPeer{.connection = std::move(*accepted)});
-        auto &peer = *owned;
+        FakeWsPeer peer{.connection = std::move(*accepted)};
 
         while (peer.buffer.find("\r\n\r\n") == std::string::npos) {
             auto chunk = co_await peer.connection.read();
@@ -66,7 +62,7 @@ struct FakeWsPeer {
         const auto key = peer.request_head.substr(key_pos + 19, peer.request_head.find("\r\n", key_pos) - key_pos - 19);
         co_await peer.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
                             net::ws::accept_key(key) + "\r\n\r\n");
-        co_return owned;
+        co_return std::move(peer);
     }
 
     bool has_header(std::string_view line) const { return request_head.find("\r\n" + std::string(line) + "\r\n") != std::string::npos; }
