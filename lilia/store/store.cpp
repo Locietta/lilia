@@ -1,0 +1,158 @@
+#include "store.h"
+
+#include <algorithm>
+#include <utility>
+
+namespace lilia::store {
+
+namespace {
+
+constexpr int k_schema_version = 1;
+
+constexpr std::string_view k_schema = R"sql(
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    sender_id INTEGER NOT NULL,
+    sender_name TEXT NOT NULL,
+    time INTEGER NOT NULL,
+    segments TEXT NOT NULL,
+    text TEXT NOT NULL,
+    from_self INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (chat_type, chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS messages_by_chat_time ON messages (chat_type, chat_id, time, id);
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INTEGER PRIMARY KEY,
+    time INTEGER NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    stop TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    error TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS llm_calls_by_time ON llm_calls (time);
+)sql";
+
+Result<Store> initialize(Result<Database> opened, bool file_backed) {
+    if (opened.has_error()) return lighter::outcome_error(std::move(opened).error());
+    Store store{.database = std::move(*opened)};
+
+    if (file_backed) {
+        auto wal = store.database.execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+        if (wal.has_error()) return lighter::outcome_error(std::move(wal).error());
+    }
+
+    auto version = store.database.prepare("PRAGMA user_version");
+    if (version.has_error()) return lighter::outcome_error(std::move(version).error());
+    auto row = version->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    const auto current = *row ? version->column_int(0) : 0;
+    if (current > k_schema_version) {
+        return lighter::outcome_error(Error::storage("database schema version " + std::to_string(current) + " is newer than this build"));
+    }
+
+    auto created = store.database.execute(k_schema);
+    if (created.has_error()) return lighter::outcome_error(std::move(created).error());
+    auto stamped = store.database.execute("PRAGMA user_version = " + std::to_string(k_schema_version));
+    if (stamped.has_error()) return lighter::outcome_error(std::move(stamped).error());
+    return store;
+}
+
+} // namespace
+
+Result<Store> Store::open(const std::filesystem::path &path) { return initialize(Database::open(path), true); }
+
+Result<Store> Store::open_memory() { return initialize(Database::open_memory(), false); }
+
+Result<void> Store::add_message(const StoredMessage &message) {
+    auto statement = database.prepare("INSERT OR IGNORE INTO messages (chat_type, chat_id, message_id, sender_id, sender_name, time, "
+                                      "segments, text, from_self) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, message.chat.type);
+    statement->bind(2, message.chat.id);
+    statement->bind(3, message.message_id);
+    statement->bind(4, message.sender_id);
+    statement->bind(5, message.sender_name);
+    statement->bind(6, message.time);
+    statement->bind(7, message.segments_json);
+    statement->bind(8, message.text);
+    statement->bind(9, i64{message.from_self ? 1 : 0});
+    return statement->run();
+}
+
+Result<std::vector<StoredMessage>> Store::recent_messages(const ChatKey &chat, usize limit) {
+    auto statement = database.prepare("SELECT message_id, sender_id, sender_name, time, segments, text, from_self FROM messages "
+                                      "WHERE chat_type = ?1 AND chat_id = ?2 ORDER BY time DESC, id DESC LIMIT ?3");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, static_cast<i64>(limit));
+
+    std::vector<StoredMessage> messages;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        messages.push_back({
+            .chat = chat,
+            .message_id = statement->column_int(0),
+            .sender_id = statement->column_int(1),
+            .sender_name = statement->column_text(2),
+            .time = statement->column_int(3),
+            .segments_json = statement->column_text(4),
+            .text = statement->column_text(5),
+            .from_self = statement->column_int(6) != 0,
+        });
+    }
+    std::ranges::reverse(messages);
+    return messages;
+}
+
+Result<bool> Store::is_own_message(const ChatKey &chat, i64 message_id) {
+    auto statement =
+        database.prepare("SELECT 1 FROM messages WHERE chat_type = ?1 AND chat_id = ?2 AND message_id = ?3 AND from_self = 1 LIMIT 1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, message_id);
+    return statement->step();
+}
+
+Result<void> Store::add_llm_call(const LlmCall &call) {
+    auto statement = database.prepare("INSERT INTO llm_calls (time, chat_type, chat_id, model, input_tokens, output_tokens, "
+                                      "cache_read_tokens, cache_write_tokens, stop, request_id, error) "
+                                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, call.time);
+    statement->bind(2, call.chat.type);
+    statement->bind(3, call.chat.id);
+    statement->bind(4, call.model);
+    statement->bind(5, static_cast<i64>(call.input_tokens));
+    statement->bind(6, static_cast<i64>(call.output_tokens));
+    statement->bind(7, static_cast<i64>(call.cache_read_tokens));
+    statement->bind(8, static_cast<i64>(call.cache_write_tokens));
+    statement->bind(9, call.stop);
+    statement->bind(10, call.request_id);
+    statement->bind(11, call.error);
+    return statement->run();
+}
+
+Result<u64> Store::tokens_since(i64 since) {
+    auto statement = database.prepare("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM llm_calls WHERE time >= ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, since);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    return static_cast<u64>(*row ? statement->column_int(0) : 0);
+}
+
+} // namespace lilia::store
