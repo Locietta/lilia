@@ -26,6 +26,11 @@ struct ModelConfig {
     std::string api_key; ///< secret; usually "$DEEPSEEK_API_KEY"
     u32 max_tokens = 2048;
     std::optional<std::string> reasoning_effort;
+    /// Decides whether and how lilia speaks; small and fast is enough.
+    std::string planner_model = "deepseek-flash";
+    u32 planner_max_tokens = 400;
+    /// Let the model think before answering (slower; off by default).
+    bool thinking = false;
     /// Offer the provider-hosted web_search server tool. A searched answer
     /// costs tens of thousands of input tokens with DeepSeek.
     bool web_search = true;
@@ -38,13 +43,25 @@ struct ChatConfig {
     std::vector<i64> private_users;
     /// May use /lilia admin commands.
     std::vector<i64> admins;
-    /// Calling the bot by any of these names (case-insensitive) triggers a reply.
+    /// lilia's name in the persona and prompts.
+    std::string name = "莉莉娅";
+    /// Calling the bot by any of these names (case-insensitive) addresses her.
     std::vector<std::string> aliases = {"lilia", "莉莉娅"};
     /// Recent messages rendered into the model context.
     usize context_messages = 40;
     /// Byte budget for the rendered chat log; older lines are dropped first.
     usize context_bytes = 12'000;
-    u32 min_reply_interval_seconds = 3;
+    /// 0..1, how readily she joins a conversation nobody addressed her in.
+    /// The planner looks every ceil(1/talk_value) messages; 0 disables.
+    double talk_value = 0.3;
+    /// After she speaks, every new message is considered for this long.
+    i64 conversation_window_seconds = 300;
+    /// Wait for a burst of messages to end before deciding.
+    u32 debounce_seconds = 3;
+    /// Chance that one reply uses a random alternative style (e.g. one word).
+    double alt_style_probability = 0.15;
+    /// Typing-delay speed for multi-message replies; 0 sends immediately.
+    double typing_speed = 1.0;
     /// Input plus output tokens per local calendar day across all chats.
     u64 daily_token_budget = 2'000'000;
     usize max_reply_bytes = 1'500;

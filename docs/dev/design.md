@@ -22,18 +22,29 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     call with `DISCONNECTED`.
   - Segments keep their data as `glz::generic_i64`, so ids stay exact and
     unknown segment types survive.
-- **`chat/`**:
-  - `trigger` decides whether a message needs an answer: an @-mention, a reply
-    to lilia's own message, an alias, or an allowed private chat.
-  - `context` lowers the persona, runtime facts and a byte-bounded recent log
-    into SYSTEM / DEVELOPER / USER items.
-  - `Responder` stores every message from allowed chats and runs at most one
-    reply worker per chat. Triggers that arrive while a reply is being
-    generated are merged into the next reply.
-  - Guards: a minimum interval between replies and a daily token budget,
-    counted from `llm_calls`.
-- **`archive/`**: copies the media of allowed chats (pictures, stickers,
-  voice, video, files) into `<data_dir>/media/<sha1[:2]>/<sha1><ext>`.
+- **`chat/`**: one turn per decision, modelled on MaiBot's planner/replyer split.
+  - `flow` is the cheap gate. Being addressed (@, a reply to lilia, her
+    name, an allowed private chat) always opens it. For `conversation_window_seconds`
+    after she speaks every new message opens it. Otherwise it opens every
+    `ceil(1/talk_value)` messages. Two silent decisions in a row back off
+    (15 s doubling to 5 min) unless a burst of 6 messages arrives.
+  - The worker waits for the burst to settle (`debounce_seconds`, 2 s when
+    addressed, 15 s at most).
+  - The planner (`prompts/planner.md`, `planner_model`, thinking off) sees the
+    numbered log with the new messages marked and must call `reply(target,
+quote, style, search, intent)` or `stay_silent(reason)`. If she was
+    addressed, silence is overridden.
+  - The writer (`prompts/persona.md` + `prompts/writer.md`) sees the log as
+    turns (her lines are assistant turns) plus the planner's style and
+    intent; `alt_style_probability` swaps in a one-off style. Web search is
+    offered only when the planner asks for it.
+  - `delivery` splits the reply into at most 3 messages (one per line, long
+    lines after sentence ends, no final "。") and sleeps a typing delay
+    before each. Only the first message quotes, and only when the planner asks.
+  - `lilia replay <chat.jsonl>` runs the same ingest and turn code on a
+    recorded or synthetic log without NapCat and prints every decision;
+    `scripts/replay-remote.sh` runs it on cachy with the live keys.- **`archive/`**: copies the media of allowed chats (pictures, stickers,
+    voice, video, files) into `<data_dir>/media/<sha1[:2]>/<sha1><ext>`.
   - **Why:** the QQ client cache on the host is pruned after a few days, and
     Tencent's download links expire.
   - **Sources, in order:** the segment's `url`; a container `path` mapped
@@ -56,27 +67,27 @@ latency is negligible at this scale.
 
 ## Roadmap
 
-2. **Tools.**
-   - A tool-round loop in `Responder` (the provider already speaks
-     `tool_use` / `tool_result`).
-   - First tools: cachy service status and allow-listed start/stop
-     (`systemctl --user` through `lighter::Process`, with admin checks and
-     confirmation), and web search through a self-hosted SearXNG plus a
-     fetch-and-extract tool.
-   - An MCP client so tools can live out of process.
-3. **Memory and persona.**
-   - Periodic summarization of chat logs into memories (people, events,
-     running jokes).
-   - Retrieval scored by relevance plus recency decay plus importance: FTS5
-     with a trigram tokenizer first, embeddings later.
-   - Persona revisions that are proposed by reflection and approved or rolled
-     back by an admin, keeping every version.
-4. **Emotes.**
-   - Collect stickers (image `sub_type` 1 and `mface`), deduplicated by hash
-     with their surrounding context.
-   - Tag them with an image-capable model (`deepseek-flash` or MiniMax M3); this
-     needs an `ImagePart` in the provider history.
-   - A `send_emote` tool.
-5. **Feeds.** Pixiv rankings first (RSSHub or the Pixiv API), with NSFW
-   filtering before anything is posted. Twitter/X only through a throwaway
-   account.
+1. **Reply pipeline (done 2026-10-07).** Gate, debounce, planner and writer,
+   multi-message delivery, persona v2, replay tool.
+2. **Memory (next).** References: MaiBot's A_Memorix and person profiles,
+   and AIRI's #2748 trust labels.
+   - Summaries of chat that scrolls out of context, with recall cues.
+   - Incremental facts, entities and per-person profiles. Facts must quote
+     the person; never store lilia's own lines, jokes, rumours, or
+     relationships inferred from sharing a group. Record who said what.
+   - A `recall` planner tool: FTS5 trigram first, embeddings later. Rank by
+     relevance plus recency plus use; reinforce on use, decay otherwise;
+     private memories never reach groups.
+3. **lilia's own style.** Expression learning ("当[情境]时，可以[说法]"
+   with counts, selected per reply) from the allowed groups. Persona
+   revisions proposed by reflection and approved by an admin, with every
+   version kept.
+4. **Stickers (later).**
+   - Learn stickers from every group the account is in.
+   - Keep the image (deduplicated by hash) and a short usage note written
+     by a vision model from the surrounding messages, then drop the other
+     groups' text.
+   - Pick by tags first, embeddings once the collection is large; send
+     through a `send_sticker` planner tool.
+
+Not planned now: server-management tools, art feeds.

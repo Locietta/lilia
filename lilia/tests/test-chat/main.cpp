@@ -4,6 +4,8 @@
 #include <vector>
 
 #include <lilia/chat/context.h>
+#include <lilia/chat/delivery.h>
+#include <lilia/chat/flow.h>
 #include <lilia/chat/trigger.h>
 #include <lilia/onebot/message.h>
 #include <lilia/tests/support/fake_ws_peer.h>
@@ -86,32 +88,133 @@ void test_time() {
     require(chat::local_day_start(t, 0) == 1'790'985'600, "midnight at UTC");
 }
 
-void test_context() {
-    const i64 t = 1'791'032'700;
-    chat::ContextRequest request{
-        .persona = "PERSONA",
-        .info = {.chat = {.type = "group", .id = k_group}, .chat_name = "测试群", .self_id = k_self, .self_name = "lilia"},
-        .recent = {stored(1, t - 300, "a", std::string(60, 'x')), stored(2, t - 240, "b", "second"),
-                   stored(3, t - 180, "lilia", "我在", true), stored(4, t - 60, "c", "@lilia 你好")},
-        .triggers = {stored(4, t - 60, "c", "@lilia 你好")},
-        .now = t,
-        .utc_offset_minutes = 480,
-        .log_bytes = 90,
-    };
-    const auto history = chat::build_context(request);
-    require(history.size() == 3, "system, developer and one user turn");
-    require(history[0].role == provider::Role::SYSTEM && text_of(history[0]) == "PERSONA", "persona is the system prompt");
-    require(history[1].role == provider::Role::DEVELOPER && text_of(history[1]).find("测试群") != std::string::npos,
-            "runtime facts name the chat");
-
-    const auto user = text_of(history[2]);
-    require(user.find("second") != std::string::npos && user.find("(你): 我在") != std::string::npos, "recent lines are rendered");
-    require(user.find(std::string(60, 'x')) == std::string::npos, "the oldest line is dropped first when over budget");
-    require(user.find("[21:04] c(20004): @lilia 你好") != std::string::npos, "trigger is rendered with time and id");
-    require(user.find("你好") == user.rfind("你好"), "the trigger appears once, not also in the log");
-    require(user.find("second") < user.find("我在"), "log stays in chronological order");
+chat::ChatInfo group_info() {
+    return {.chat = {.type = "group", .id = k_group}, .chat_name = "测试群", .name = "莉莉娅", .self_id = k_self, .self_name = "闭锁"};
 }
 
+provider::ToolCallItem tool_call(std::string name, std::string json) {
+    provider::ToolCallItem item{.call = {.id = "toolu_1", .name = std::move(name)}};
+    require(!glz::read_json(item.call.input, json), "test tool input must parse");
+    return item;
+}
+
+void test_planner() {
+    const i64 t = 1'791'032'700;
+    const auto request = chat::build_planner_request({
+        .prompt = "PLANNER",
+        .info = group_info(),
+        .recent = {stored(101, t - 300, "a", std::string(60, 'x')), stored(102, t - 240, "b", "second"),
+                   stored(103, t - 180, "闭锁", "我在", true), stored(104, t - 60, "c", "有人看新番吗")},
+        .fresh = {104},
+        .addressed = false,
+        .now = t,
+        .log_bytes = 110,
+    });
+    require(request.history.size() == 2 && text_of(request.history[0]) == "PLANNER", "planner prompt is the system prompt");
+    const auto user = text_of(request.history[1]);
+    require(user.find(std::string(60, 'x')) == std::string::npos, "the oldest line is dropped first when over budget");
+    require(request.ids == std::vector<i64>({102, 103, 104}), "ids map #n to message ids in order");
+    require(user.find("#3 [21:04] c(20104): 有人看新番吗") != std::string::npos, "lines are numbered");
+    require(user.find("以下是新消息") < user.find("#3 "), "the new messages are marked");
+    require(user.find("以下是新消息") > user.find("#2 "), "old lines come before the marker");
+    require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");
+    require(request.tools.size() == 2 && request.tools[0].name == "reply" && request.tools[1].name == "stay_silent", "two tools");
+
+    using provider::OutputItem;
+    const auto reply = chat::parse_plan(
+        {OutputItem(
+            tool_call("reply", R"({"target":"#3 c: 有人看新番吗","quote":true,"style":"normal","search":false,"intent":"安利一部"})"))},
+        request.ids);
+    require(reply.reply && reply.target == 104 && reply.quote && reply.style == chat::ReplyStyle::NORMAL && reply.intent == "安利一部",
+            "reply arguments are read; a target with trailing text still parses");
+    const auto silent = chat::parse_plan({OutputItem(tool_call("stay_silent", R"({"reason":"和她无关"})"))}, request.ids);
+    require(!silent.reply && silent.reason == "和她无关", "stay_silent carries its reason");
+    require(!chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#9","style":"short","intent":"x"})"))}, request.ids).reply,
+            "an out-of-range target is silence");
+    require(!chat::parse_plan({}, request.ids).reply, "no tool call is silence");
+}
+
+void test_writer() {
+    const i64 t = 1'791'032'700;
+    const auto history = chat::build_writer_history({
+        .persona = "PERSONA",
+        .rules = "RULES",
+        .info = group_info(),
+        .recent = {stored(201, t - 300, "闭锁", "早", true), stored(202, t - 240, "b", "第三集作画崩了"), stored(203, t - 200, "c", "确实"),
+                   stored(204, t - 180, "闭锁", "崩成ppt了", true), stored(205, t - 60, "b", "莉莉娅你追吗")},
+        .target = stored(205, t - 60, "b", "莉莉娅你追吗"),
+        .plan = {.reply = true, .target = 205, .style = chat::ReplyStyle::SHORT, .intent = "说在追"},
+        .now = t,
+        .log_bytes = 10'000,
+    });
+    using provider::Role;
+    require(history.size() == 7, "system, developer, then user/assistant turns");
+    require(history[0].role == Role::SYSTEM && text_of(history[0]) == "PERSONA", "persona is the system prompt");
+    require(history[1].role == Role::DEVELOPER && text_of(history[1]).find("RULES") != std::string::npos &&
+                text_of(history[1]).find("一两个词") != std::string::npos,
+            "rules and the style instruction are developer text");
+    require(history[2].role == Role::USER && text_of(history[2]) == "（更早的聊天记录略）",
+            "a log starting with her own line gets a user stub");
+    require(history[3].role == Role::ASSISTANT && text_of(history[3]) == "早", "her lines are assistant turns without labels");
+    require(history[4].role == Role::USER && text_of(history[4]) == "b: 第三集作画崩了\nc: 确实", "consecutive lines share a turn");
+    require(history[5].role == Role::ASSISTANT && text_of(history[5]) == "崩成ppt了", "assistant turn");
+    const auto last = text_of(history[6]);
+    require(history[6].role == Role::USER && last.starts_with("b: 莉莉娅你追吗\n\n【轮到你说话了"), "the note ends the last user turn");
+    require(last.find("说在追") != std::string::npos, "the intent reaches the writer");
+}
+
+void test_flow() {
+    chat::FlowSettings settings{.talk_value = 0.25, .window_seconds = 300};
+    chat::Flow flow;
+    require(!chat::should_plan(flow, settings, 1000), "nothing to plan");
+    for (i64 i = 1; i <= 3; ++i) flow.unseen.push_back(stored(i, 1000, "a", "x"));
+    require(!chat::should_plan(flow, settings, 1000), "below ceil(1/talk_value) messages");
+    flow.unseen.push_back(stored(4, 1000, "a", "x"));
+    require(chat::should_plan(flow, settings, 1000), "four messages at talk_value 0.25");
+
+    flow.unseen.resize(1);
+    flow.addressed = 1;
+    require(chat::should_plan(flow, settings, 1000), "being addressed always plans");
+    flow.addressed.reset();
+
+    chat::note_spoke(flow, 1000);
+    require(chat::should_plan(flow, settings, 1200), "inside the conversation window every message counts");
+    require(!chat::should_plan(flow, settings, 1400), "the window closes");
+
+    chat::note_silent(flow, 2000);
+    require(flow.backoff_until == 0, "one silent decision does not back off");
+    chat::note_silent(flow, 2000);
+    require(flow.backoff_until == 2015, "two in a row back off 15s");
+    chat::note_silent(flow, 2000);
+    require(flow.backoff_until == 2030, "the backoff doubles");
+    flow.unseen.assign(5, stored(9, 2000, "a", "x"));
+    require(!chat::should_plan(flow, settings, 2010), "backoff holds below the burst size");
+    flow.unseen.push_back(stored(10, 2000, "a", "x"));
+    require(chat::should_plan(flow, settings, 2010), "a burst bypasses the backoff");
+    chat::note_spoke(flow, 2020);
+    require(flow.silent_streak == 0 && flow.backoff_until == 0, "speaking resets the backoff");
+
+    chat::FlowSettings shy{.talk_value = 0};
+    chat::Flow quiet;
+    quiet.unseen.assign(20, stored(1, 1000, "a", "x"));
+    require(!chat::should_plan(quiet, shy, 1000), "talk_value 0 only reacts when addressed");
+}
+
+void test_bubbles() {
+    require(chat::split_bubbles("好耶。\n\n我也在追") == std::vector<std::string>({"好耶", "我也在追"}), "one bubble per line, no period");
+    require(chat::split_bubbles("一\n二\n三\n四") == std::vector<std::string>({"一", "二", "三 四"}), "extra lines merge into the last");
+    const std::string paragraph = "这一集的作画确实有点崩，尤其是打斗那段。不过剧情推进得还挺快的！下周应该会好一点吧？反正我会接着看";
+    const auto pieces = chat::split_bubbles(paragraph);
+    require(pieces.size() == 3 && pieces[0] == "这一集的作画确实有点崩，尤其是打斗那段" && pieces[1] == "不过剧情推进得还挺快的！",
+            "a long line splits after sentence ends");
+    require(chat::split_bubbles("啊？？真的假的").size() == 1, "short lines stay whole");
+    require(chat::split_bubbles("  \n ").empty(), "blank text has no bubbles");
+
+    std::mt19937 rng(7);
+    require(chat::typing_delay("在", 1.0, rng) == std::chrono::milliseconds(600), "short bubbles take the minimum");
+    require(chat::typing_delay(std::string(300, 'a'), 1.0, rng) == std::chrono::milliseconds(6000), "long bubbles are capped");
+    require(chat::typing_delay("在", 0.0, rng) == std::chrono::milliseconds(0), "speed 0 sends immediately");
+}
 void test_clean_reply() {
     const chat::ChatInfo info{.self_id = k_self, .self_name = "lilia"};
     const std::vector<std::string> aliases{"莉莉娅"};
@@ -131,7 +234,10 @@ int main() {
     try {
         test_triggers();
         test_time();
-        test_context();
+        test_planner();
+        test_writer();
+        test_flow();
+        test_bubbles();
         test_clean_reply();
         return 0;
     } catch (const std::exception &e) {

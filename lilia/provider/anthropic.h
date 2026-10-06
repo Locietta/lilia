@@ -28,6 +28,9 @@ struct ClientOptions {
     std::string base_url = "https://api.anthropic.com";
     std::string model;
     std::optional<std::string> reasoning_effort;
+    /// Send `thinking: {"type": "disabled"}` when no reasoning effort is set.
+    /// DeepSeek's Anthropic endpoint thinks by default otherwise.
+    bool disable_thinking = false;
     u32 max_tokens = 8192;
     usize max_retries = 2;
     std::chrono::milliseconds initial_retry_delay{500};

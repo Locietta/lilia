@@ -11,17 +11,29 @@
     "base_url": "https://api.deepseek.com/anthropic",
     "model": "deepseek-flash",
     "api_key": "$DEEPSEEK_API_KEY",
-    "max_tokens": 2048
+    "max_tokens": 2048,
+    // Decides whether and how she speaks (one tool call per turn).
+    "planner_model": "deepseek-flash",
+    "planner_max_tokens": 400,
+    // Thinking makes replies slower; off sends thinking: {"type": "disabled"}.
+    "thinking": false,
+    "web_search": true
   },
   "chat": {
     // Only these groups are logged and answered.
     "groups": [],
     "private_users": [],
     "admins": [],
+    "name": "莉莉娅",
     "aliases": ["lilia", "莉莉娅"],
+    // How readily she joins conversations nobody addressed her in (0 = never).
+    "talk_value": 0.3,
+    "conversation_window_seconds": 300,
+    "debounce_seconds": 3,
+    "alt_style_probability": 0.15,
+    "typing_speed": 1.0,
     "context_messages": 40,
     "context_bytes": 12000,
-    "min_reply_interval_seconds": 3,
     "daily_token_budget": 2000000,
     "max_reply_bytes": 1500,
     "utc_offset_minutes": 480

@@ -97,77 +97,11 @@ def start_model_server():
                 state["errors"].append(str(error))
                 self.send_error(500, str(error))
                 return
-            data = sse(
-                [
-                    (
-                        "message_start",
-                        {
-                            "type": "message_start",
-                            "message": {
-                                "id": "msg_1",
-                                "model": "fake-model",
-                                "usage": {"input_tokens": 10},
-                            },
-                        },
-                    ),
-                    *text_block(0, "我搜一下。"),
-                    (
-                        "content_block_start",
-                        {
-                            "type": "content_block_start",
-                            "index": 1,
-                            "content_block": {
-                                "type": "server_tool_use",
-                                "id": "srvtoolu_1",
-                                "name": "web_search",
-                                "input": {},
-                            },
-                        },
-                    ),
-                    (
-                        "content_block_delta",
-                        {
-                            "type": "content_block_delta",
-                            "index": 1,
-                            "delta": {
-                                "type": "input_json_delta",
-                                "partial_json": '{"query": "minecraft"}',
-                            },
-                        },
-                    ),
-                    ("content_block_stop", {"type": "content_block_stop", "index": 1}),
-                    (
-                        "content_block_start",
-                        {
-                            "type": "content_block_start",
-                            "index": 2,
-                            "content_block": {
-                                "type": "web_search_tool_result",
-                                "tool_use_id": "srvtoolu_1",
-                                "content": [
-                                    {
-                                        "type": "web_search_result",
-                                        "url": "https://minecraft.wiki/",
-                                        "title": "Minecraft Wiki",
-                                        "encrypted_content": "x",
-                                    }
-                                ],
-                            },
-                        },
-                    ),
-                    ("content_block_stop", {"type": "content_block_stop", "index": 2}),
-                    *text_block(3, "lilia：**fake** reply"),
-                    (
-                        "message_delta",
-                        {
-                            "type": "message_delta",
-                            "delta": {"stop_reason": "end_turn"},
-                            "usage": {"output_tokens": 12},
-                        },
-                    ),
-                    ("message_stop", {"type": "message_stop"}),
-                ]
-            )
+            tools = [tool.get("name") for tool in body.get("tools", [])]
+            if "reply" in tools:
+                data = planner_answer(body)
+            else:
+                data = writer_answer()
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
             self.send_header("request-id", "req_test")
@@ -177,6 +111,137 @@ def start_model_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, state
+
+
+def message_start(input_tokens):
+    return (
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_1",
+                "model": "fake-model",
+                "usage": {"input_tokens": input_tokens},
+            },
+        },
+    )
+
+
+def message_end(stop_reason, output_tokens):
+    return [
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason},
+                "usage": {"output_tokens": output_tokens},
+            },
+        ),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+
+
+def planner_answer(body):
+    """Replies to the line that says 你好呀, by its #number."""
+    log = body["messages"][-1]["content"][0]["text"]
+    target = next(
+        line.split(" ", 1)[0] for line in log.splitlines() if "你好呀" in line
+    )
+    arguments = {
+        "target": target,
+        "quote": False,
+        "style": "short",
+        "search": False,
+        "intent": "打个招呼",
+    }
+    return sse(
+        [
+            message_start(5),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "reply",
+                        "input": {},
+                    },
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": json.dumps(arguments, ensure_ascii=False),
+                    },
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            *message_end("tool_use", 3),
+        ]
+    )
+
+
+def writer_answer():
+    """Narration, a server-side search, then the answer."""
+    return sse(
+        [
+            message_start(10),
+            *text_block(0, "我搜一下。"),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_1",
+                        "name": "web_search",
+                        "input": {},
+                    },
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 1,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": '{"query": "minecraft"}',
+                    },
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 2,
+                    "content_block": {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_1",
+                        "content": [
+                            {
+                                "type": "web_search_result",
+                                "url": "https://minecraft.wiki/",
+                                "title": "Minecraft Wiki",
+                                "encrypted_content": "x",
+                            }
+                        ],
+                    },
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 2}),
+            *text_block(3, "莉莉娅：**fake** reply。"),
+            *message_end("end_turn", 12),
+        ]
+    )
 
 
 def group_event(group_id, message_id, text, segments=None):
@@ -360,7 +425,7 @@ def test_reply_and_reconnect(tmp_path):
                     "model": "fake-model",
                     "api_key": "$LILIA_TEST_KEY",
                 },
-                "chat": {"groups": [GROUP], "min_reply_interval_seconds": 0},
+                "chat": {"groups": [GROUP], "debounce_seconds": 0, "typing_speed": 0},
                 "archive": {
                     "container_qq_dir": "/app/.config/QQ",
                     "host_qq_dir": str(qq_dir),
@@ -393,25 +458,27 @@ def test_reply_and_reconnect(tmp_path):
     assert not napcat.errors, f"{napcat.errors}\n{output}"
     assert not model_state["errors"], model_state["errors"]
 
-    assert len(model_state["bodies"]) == 1, "exactly one model call"
-    body = model_state["bodies"][0]
-    assert "lilia" in body["system"], "persona and runtime facts go to the system field"
-    assert "测试群" in body["system"]
-    assert {"type": "web_search_20250305", "name": "web_search"} in body.get(
-        "tools", []
-    ), "the hosted web_search tool must be offered"
-    last = body["messages"][-1]
+    assert len(model_state["bodies"]) == 2, "one planner and one writer call"
+    planner, writer = model_state["bodies"]
+    assert [tool["name"] for tool in planner["tools"]] == ["reply", "stay_silent"]
+    assert (
+        "莉莉娅" in planner["system"]
+        and "测试群" in planner["messages"][-1]["content"][0]["text"]
+    )
+    assert planner.get("thinking") == {"type": "disabled"}, "thinking is off by default"
+    log = planner["messages"][-1]["content"][0]["text"]
+    assert "你好呀" in log and "[图片][语音]" in log and "别理我" not in log
+    assert "tools" not in writer, "no search unless the planner asks for it"
+    assert "莉莉娅" in writer["system"] and "测试群" in writer["system"]
+    last = writer["messages"][-1]
     texts = "".join(b.get("text", "") for b in last["content"] if b["type"] == "text")
-    assert "你好呀" in texts and "别理我" not in texts
-
+    assert "你好呀" in texts and "打个招呼" in texts and "别理我" not in texts
     assert len(napcat.sent) == 1
     params = napcat.sent[0]["params"]
     assert params["group_id"] == GROUP
-    assert params["message"][0] == {"type": "reply", "data": {"id": str(TRIGGER_ID)}}
-    assert params["message"][1] == {
-        "type": "text",
-        "data": {"text": "fake reply"},
-    }, "narration before the search, the speaker label and Markdown must be dropped"
+    assert params["message"] == [{"type": "text", "data": {"text": "fake reply"}}], (
+        "no quote; narration, speaker label, Markdown and the final period are dropped"
+    )
 
     db = sqlite3.connect(data_dir / "lilia.db")
     rows = db.execute(
@@ -425,7 +492,9 @@ def test_reply_and_reconnect(tmp_path):
     calls = db.execute(
         "SELECT chat_id, input_tokens, output_tokens, request_id, error FROM llm_calls"
     ).fetchall()
-    assert calls == [(GROUP, 10, 12, "req_test", "")], calls
+    assert calls == [(GROUP, 5, 3, "req_test", ""), (GROUP, 10, 12, "req_test", "")], (
+        calls
+    )
 
     media = db.execute(
         "SELECT chat_id, message_id, segment_index, kind, status, sha1, path, bytes, error "

@@ -22,6 +22,9 @@ submodule.
 
 ## Provider layer (copied, renamed `liminal::` to `lilia::`)
 
+Local changes since the copy: `anthropic::ClientOptions::disable_thinking`
+sends `thinking: {"type": "disabled"}` (DeepSeek thinks by default).
+
 From liminal `main` at `d520ce6`, keeping the relative paths so fixes can be
 ported in either direction:
 

@@ -19,7 +19,7 @@
 #include <lilia/config.h>
 #include <lilia/log.h>
 #include <lilia/onebot/session.h>
-#include <lilia/provider/anthropic.h>
+#include <lilia/replay.h>
 #include <lilia/store/store.h>
 
 namespace {
@@ -28,7 +28,12 @@ using namespace lilia;
 using lighter::Task;
 using namespace std::chrono_literals;
 
-void print_usage(FILE *output) { std::fputs("usage: lilia [--config <path>] [--check-config] | --version | --help\n", output); }
+void print_usage(FILE *output) {
+    std::fputs("usage: lilia [--config <path>] [--check-config]\n"
+               "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>]\n"
+               "       lilia --version | --help\n",
+               output);
+}
 
 void print_version() {
     std::printf("lilia %.*s (%.*s%s)\n", static_cast<int>(xmake::version::version.size()), xmake::version::version.data(),
@@ -93,16 +98,9 @@ Task<int> run_app(const Config &config) {
         co_return 1;
     }
 
-    auto provider = pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
-        .auth = provider::api_key_auth(config.model.api_key, false),
-        .base_url = config.model.base_url,
-        .model = config.model.model,
-        .reasoning_effort = config.model.reasoning_effort,
-        .max_tokens = config.model.max_tokens,
-    });
-
     lighter::TaskGroup tasks(lighter::EventLoop::current());
-    chat::Responder responder(config, *store, std::move(provider), data_dir / "persona.md",
+    chat::Responder responder(config, *store, make_provider(config.model, config.model.planner_model, config.model.planner_max_tokens),
+                              make_provider(config.model, config.model.model, config.model.max_tokens), data_dir / "persona.md",
                               [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     archive::Archiver archiver(config.archive, data_dir, *store);
     if (config.archive.enabled) responder.archiver = &archiver;
@@ -111,8 +109,8 @@ Task<int> run_app(const Config &config) {
         co_return 1;
     }
 
-    log::info("lilia {} starting; data in {}; {} allowed group(s); model {}", xmake::version::version, data_dir.string(),
-              config.chat.groups.size(), config.model.model);
+    log::info("lilia {} starting; data in {}; {} allowed group(s); writer {}, planner {}", xmake::version::version, data_dir.string(),
+              config.chat.groups.size(), config.model.model, config.model.planner_model);
     tasks.spawn(supervise(config, responder));
     co_await tasks.join();
     co_return 0;
@@ -122,8 +120,15 @@ Task<int> run_app(const Config &config) {
 
 int main(int argc, char **argv) {
     std::optional<std::filesystem::path> config_path;
+    std::optional<std::filesystem::path> replay_log;
+    std::optional<std::filesystem::path> persona_path;
     bool check_only = false;
-    for (int i = 1; i < argc; ++i) {
+    int first = 1;
+    if (argc > 2 && std::string_view(argv[1]) == "replay") {
+        replay_log = argv[2];
+        first = 3;
+    }
+    for (int i = first; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--help" || arg == "-h") {
             print_usage(stdout);
@@ -137,6 +142,8 @@ int main(int argc, char **argv) {
             check_only = true;
         } else if (arg == "--config" && i + 1 < argc) {
             config_path = argv[++i];
+        } else if (arg == "--persona" && replay_log && i + 1 < argc) {
+            persona_path = argv[++i];
         } else {
             print_usage(stderr);
             return 2;
@@ -161,7 +168,7 @@ int main(int argc, char **argv) {
         log::error("cannot watch process signals: {}", interrupts.error().message());
         return 1;
     }
-    auto app = lighter::with_token(run_app(*config), interrupts->token());
+    auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path) : run_app(*config), interrupts->token());
     loop.schedule(app);
     loop.run();
 
