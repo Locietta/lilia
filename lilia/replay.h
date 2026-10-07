@@ -10,8 +10,10 @@
 
 namespace lilia {
 
-/// Anthropic-compatible clients for the planner and the writer.
+/// Anthropic-compatible clients. The planner must call a tool; the searcher
+/// uses the planner's model with the hosted web_search tool.
 provider::Provider make_planner(const ModelConfig &model);
+provider::Provider make_searcher(const ModelConfig &model);
 provider::Provider make_writer(const ModelConfig &model);
 
 /// Feeds a JSONL chat log through the real gate, planner and writer (no

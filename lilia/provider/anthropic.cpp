@@ -95,6 +95,10 @@ struct MessageRequest {
         std::string effort;
     };
 
+    struct ToolChoice {
+        std::string type;
+    };
+
     std::string model;
     u32 max_tokens = 8192;
     std::optional<std::string> system;
@@ -103,6 +107,7 @@ struct MessageRequest {
     bool stream = true;
     std::optional<Thinking> thinking;
     std::optional<OutputConfig> output_config;
+    std::optional<ToolChoice> tool_choice;
 };
 
 struct Model {
@@ -898,6 +903,7 @@ Result<std::string> encode_complete_request(const provider::History &history, co
             }
         }
         request.tools = std::move(encoded_tools);
+        if (options.require_tool) request.tool_choice = wire::MessageRequest::ToolChoice{.type = "any"};
     }
     if (options.reasoning_effort) {
         request.thinking = wire::MessageRequest::Thinking{};

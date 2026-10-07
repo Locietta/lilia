@@ -466,6 +466,7 @@ def test_reply_and_reconnect(tmp_path):
         and "测试群" in planner["messages"][-1]["content"][0]["text"]
     )
     assert planner.get("thinking") == {"type": "disabled"}, "thinking is off by default"
+    assert planner.get("tool_choice") == {"type": "any"}, "the planner must call a tool"
     log = planner["messages"][-1]["content"][0]["text"]
     assert "你好呀" in log and "[图片][语音]" in log and "别理我" not in log
     assert "tools" not in writer, "no search unless the planner asks for it"

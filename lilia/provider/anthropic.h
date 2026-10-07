@@ -31,6 +31,9 @@ struct ClientOptions {
     /// Send `thinking: {"type": "disabled"}` when no reasoning effort is set.
     /// DeepSeek's Anthropic endpoint thinks by default otherwise.
     bool disable_thinking = false;
+    /// Send `tool_choice: {"type": "any"}` whenever tools are offered, so
+    /// the model must call one of them.
+    bool require_tool = false;
     u32 max_tokens = 8192;
     usize max_retries = 2;
     std::chrono::milliseconds initial_retry_delay{500};

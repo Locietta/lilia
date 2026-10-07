@@ -70,13 +70,14 @@ std::string clock(i64 t) { return std::format("{:02}:{:02}", t / 60, t % 60); }
 namespace {
 
 provider::Provider make_client(const ModelConfig &model, const std::string &base_url, const std::string &api_key, const std::string &name,
-                               u32 max_tokens) {
+                               u32 max_tokens, bool require_tool = false) {
     return pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
         .auth = provider::api_key_auth(api_key, false),
         .base_url = base_url,
         .model = name,
         .reasoning_effort = model.reasoning_effort,
         .disable_thinking = !model.thinking,
+        .require_tool = require_tool,
         .max_tokens = max_tokens,
     });
 }
@@ -84,7 +85,11 @@ provider::Provider make_client(const ModelConfig &model, const std::string &base
 } // namespace
 
 provider::Provider make_planner(const ModelConfig &model) {
-    return make_client(model, model.base_url, model.api_key, model.planner_model, model.planner_max_tokens);
+    return make_client(model, model.base_url, model.api_key, model.planner_model, model.planner_max_tokens, true);
+}
+
+provider::Provider make_searcher(const ModelConfig &model) {
+    return make_client(model, model.base_url, model.api_key, model.planner_model, 1'200);
 }
 
 provider::Provider make_writer(const ModelConfig &model) {
@@ -120,7 +125,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     }
 
     lighter::TaskGroup tasks(lighter::EventLoop::current());
-    chat::Responder responder(config, *store, make_planner(config.model), make_writer(config.model),
+    chat::Responder responder(config, *store, make_planner(config.model), make_searcher(config.model), make_writer(config.model),
                               persona.value_or(std::filesystem::path(config.data_dir) / "persona.md"),
                               [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (auto loaded = responder.reload_persona(); loaded.has_error()) {

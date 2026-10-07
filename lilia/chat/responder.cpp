@@ -206,11 +206,11 @@ Task<> handle_admin(Responder *r, store::StoredMessage command, std::string argu
 
 std::string_view default_persona() { return embedded(xmake::persona_md); }
 
-Responder::Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider writer,
-                     std::filesystem::path persona_path, Spawn spawn)
+Responder::Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher,
+                     provider::Provider writer, std::filesystem::path persona_path, Spawn spawn)
     : now([] { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }),
-      config(config), store(store), planner(std::move(planner)), writer(std::move(writer)), persona_path(std::move(persona_path)),
-      persona(default_persona()), spawn(std::move(spawn)) {}
+      config(config), store(store), planner(std::move(planner)), searcher(std::move(searcher)), writer(std::move(writer)),
+      persona_path(std::move(persona_path)), persona(default_persona()), spawn(std::move(spawn)) {}
 
 void Responder::attach(std::shared_ptr<onebot::Session> live, onebot::LoginInfo login) {
     session = std::move(live);
@@ -364,7 +364,18 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(rng)) {
         style_override = k_alt_styles[std::uniform_int_distribution<usize>(0, k_alt_styles.size() - 1)(rng)];
     }
-    const bool search = plan.search && config.model.web_search;
+    std::string reference;
+    if (plan.search && config.model.web_search) {
+        // A dedicated call: writers asked to search "if needed" often don't.
+        const auto search_history = build_search_history(info, *target, plan, started, settings.utc_offset_minutes);
+        const std::vector<provider::ToolDefinition> search_tools{{.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"}};
+        if (const auto found =
+                co_await call_model(this, searcher, config.model.planner_model, "search", chat, search_history, search_tools)) {
+            reference = clean_reply(final_text(*found), info, {}, 2'000);
+        }
+        log::info("search for {} returned {} bytes", describe(chat), reference.size());
+        log::debug("search reference: {}", reference);
+    }
     const auto history = build_writer_history({
         .persona = persona,
         .rules = std::string(embedded(xmake::writer_md)),
@@ -376,12 +387,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .now = started,
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = settings.context_bytes,
-        .web_search = search,
+        .reference = reference,
     });
-    std::vector<provider::ToolDefinition> tools;
-    if (search) tools.push_back({.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"});
-
-    const auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, tools);
+    const auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, {});
     if (!written) co_return;
     const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
                         plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :

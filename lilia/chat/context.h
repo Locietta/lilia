@@ -73,8 +73,14 @@ struct WriterInput {
     i64 now = 0;
     i32 utc_offset_minutes = 480;
     usize log_bytes = 12'000;
-    bool web_search = false;
+    /// Facts from the search step; the writer picks one point from them.
+    std::string reference;
 };
+
+/// The search step: one call with only the web_search tool, asked to
+/// summarise what it finds about the target message in a few sentences.
+provider::History build_search_history(const ChatInfo &info, const store::StoredMessage &target, const Plan &plan, i64 now,
+                                       i32 utc_offset_minutes);
 
 /// SYSTEM persona; DEVELOPER facts, rules and style; then the chat log as
 /// alternating turns (lilia's own lines are assistant turns) ending with a

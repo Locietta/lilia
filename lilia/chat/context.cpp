@@ -248,10 +248,6 @@ provider::History build_writer_history(const WriterInput &input) {
     developer += input.rules;
     developer += "\n";
     developer += input.style_override.empty() ? style_instruction(input.plan.style) : std::string_view(input.style_override);
-    if (input.web_search) {
-        developer +=
-            "\n这次先用 web_search 查一下再说话。查完只挑最关键的一点，用一句大白话说出来，不报数字、日期和来源，不贴链接，除非别人要。";
-    }
     provider::append_developer(history, std::move(developer));
 
     const auto turn_text = [](const store::StoredMessage &message) {
@@ -271,13 +267,35 @@ provider::History build_writer_history(const WriterInput &input) {
     }
 
     std::string note = std::format("【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
-    if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
-    note += "】\n现在，你说：";
+    if (!input.reference.empty()) {
+        // The planner's intent predates the search; after it she knows.
+        note += std::format("。你刚去查过了，情况如下：{}\n"
+                            "你已经知道是怎么回事了，不要再问真假或者出处。挑最关键的一点或者你的看法，用一句大白话说，"
+                            "不报数字、日期和来源，不贴链接，别照抄】",
+                            input.reference);
+    } else {
+        if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
+        note += "】";
+    }
+    note += "\n现在，你说：";
     if (history.size() > 2 && history.back().role == provider::Role::USER) {
         std::get<provider::TextPart>(history.back().parts.back()).text += "\n\n" + note;
     } else {
         provider::append_user(history, std::move(note));
     }
+    return history;
+}
+
+provider::History build_search_history(const ChatInfo &info, const store::StoredMessage &target, const Plan &plan, i64 now,
+                                       i32 utc_offset_minutes) {
+    provider::History history;
+    provider::append_system(history, std::format("你是搜索助手。现在是 {}。用 web_search 搜索最新信息，然后用三四句中文客观总结查到的要点"
+                                                 "（发生了什么、什么时候、关键细节和争议），不评论，不用 Markdown。",
+                                                 format_local_time(now, utc_offset_minutes)));
+    std::string user = std::format("群聊里{}说：「{}」", display_name(target), target.text);
+    if (!plan.intent.empty()) user += std::format("\n{}想知道的：{}", info.name, plan.intent);
+    user += "\n请先搜索再总结。";
+    provider::append_user(history, std::move(user));
     return history;
 }
 

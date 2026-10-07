@@ -35,7 +35,7 @@ struct Responder {
     /// Observes every turn decision (replay output, tests).
     using PlanObserver = std::move_only_function<void(const store::ChatKey &, const Plan &, const std::vector<std::string> &)>;
 
-    Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider writer,
+    Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher, provider::Provider writer,
               std::filesystem::path persona_path, Spawn spawn);
 
     void attach(std::shared_ptr<onebot::Session> session, onebot::LoginInfo login);
@@ -76,6 +76,7 @@ struct Responder {
     const Config &config;
     store::Store &store;
     provider::Provider planner;
+    provider::Provider searcher;
     provider::Provider writer;
     std::filesystem::path persona_path;
     std::string persona;
