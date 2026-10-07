@@ -99,8 +99,7 @@ Task<int> run_app(const Config &config) {
     }
 
     lighter::TaskGroup tasks(lighter::EventLoop::current());
-    chat::Responder responder(config, *store, make_provider(config.model, config.model.planner_model, config.model.planner_max_tokens),
-                              make_provider(config.model, config.model.model, config.model.max_tokens), data_dir / "persona.md",
+    chat::Responder responder(config, *store, make_planner(config.model), make_writer(config.model), data_dir / "persona.md",
                               [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     archive::Archiver archiver(config.archive, data_dir, *store);
     if (config.archive.enabled) responder.archiver = &archiver;

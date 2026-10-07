@@ -383,7 +383,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
     const auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, tools);
     if (!written) co_return;
-    const auto bubbles = split_bubbles(clean_reply(final_text(*written), info, settings.aliases, settings.max_reply_bytes));
+    const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
+                        plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
+                                                                                     settings.long_reply_chars;
+    const auto bubbles =
+        split_bubbles(fit_length(clean_reply(final_text(*written), info, settings.aliases, settings.max_reply_bytes), budget));
     if (bubbles.empty()) {
         log::warn("writer returned an empty reply for {}", describe(chat));
         co_return;

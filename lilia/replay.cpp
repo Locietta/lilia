@@ -67,15 +67,29 @@ std::string clock(i64 t) { return std::format("{:02}:{:02}", t / 60, t % 60); }
 
 } // namespace
 
-provider::Provider make_provider(const ModelConfig &model, const std::string &model_name, u32 max_tokens) {
+namespace {
+
+provider::Provider make_client(const ModelConfig &model, const std::string &base_url, const std::string &api_key, const std::string &name,
+                               u32 max_tokens) {
     return pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
-        .auth = provider::api_key_auth(model.api_key, false),
-        .base_url = model.base_url,
-        .model = model_name,
+        .auth = provider::api_key_auth(api_key, false),
+        .base_url = base_url,
+        .model = name,
         .reasoning_effort = model.reasoning_effort,
         .disable_thinking = !model.thinking,
         .max_tokens = max_tokens,
     });
+}
+
+} // namespace
+
+provider::Provider make_planner(const ModelConfig &model) {
+    return make_client(model, model.base_url, model.api_key, model.planner_model, model.planner_max_tokens);
+}
+
+provider::Provider make_writer(const ModelConfig &model) {
+    return make_client(model, model.writer_base_url.empty() ? model.base_url : model.writer_base_url,
+                       model.writer_api_key.empty() ? model.api_key : model.writer_api_key, model.model, model.max_tokens);
 }
 
 Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona) {
@@ -106,8 +120,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     }
 
     lighter::TaskGroup tasks(lighter::EventLoop::current());
-    chat::Responder responder(config, *store, make_provider(config.model, config.model.planner_model, config.model.planner_max_tokens),
-                              make_provider(config.model, config.model.model, config.model.max_tokens),
+    chat::Responder responder(config, *store, make_planner(config.model), make_writer(config.model),
                               persona.value_or(std::filesystem::path(config.data_dir) / "persona.md"),
                               [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (auto loaded = responder.reload_persona(); loaded.has_error()) {

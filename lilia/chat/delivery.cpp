@@ -55,6 +55,54 @@ std::string drop_trailing_period(std::string text) {
 
 } // namespace
 
+std::string fit_length(std::string_view text, usize max_code_points) {
+    static constexpr std::array<std::string_view, 10> k_breaks{"。", "！", "？", "，", "；", "!", "?", ",", ";", "\n"};
+    std::string out;
+    usize used = 0;
+    usize clause_start = 0;
+    for (usize i = 0; i <= text.size();) {
+        usize width = 0;
+        if (i < text.size()) {
+            for (const auto mark : k_breaks) {
+                if (text.substr(i).starts_with(mark)) {
+                    width = mark.size();
+                    break;
+                }
+            }
+        }
+        if (i < text.size() && width == 0) {
+            ++i;
+            continue;
+        }
+        const auto clause = text.substr(clause_start, i + width - clause_start);
+        const auto size = count_code_points(clause);
+        if (used + size > max_code_points) {
+            if (out.empty()) {
+                // Cut the first clause at a code point boundary.
+                usize kept = 0;
+                usize bytes = 0;
+                while (bytes < clause.size() && kept < max_code_points) {
+                    ++bytes;
+                    while (bytes < clause.size() && (static_cast<unsigned char>(clause[bytes]) & 0xC0) == 0x80) ++bytes;
+                    ++kept;
+                }
+                out = clause.substr(0, bytes);
+            }
+            break;
+        }
+        out += clause;
+        used += size;
+        if (i >= text.size()) break;
+        i += width;
+        clause_start = i;
+    }
+    // A clause cut off mid-list should not end on a comma.
+    while (out.ends_with("，") || out.ends_with(",") || out.ends_with("；") || out.ends_with(";") || out.ends_with("\n")) {
+        out.resize(out.size() - (out.ends_with("，") || out.ends_with("；") ? std::string_view("，").size() : 1));
+    }
+    return out;
+}
+
 usize count_code_points(std::string_view text) {
     return static_cast<usize>(std::ranges::count_if(text, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; }));
 }

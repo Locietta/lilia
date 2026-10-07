@@ -82,8 +82,8 @@ Result<Config> load_config(const std::filesystem::path &path) {
     auto config = parse_config(buffer.str());
     if (config.has_error()) return config;
 
-    if (!config->onebot.access_token.empty() && !is_reference(config->onebot.access_token) ||
-        !config->model.api_key.empty() && !is_reference(config->model.api_key)) {
+    const auto literal = [](const std::string &secret) { return !secret.empty() && !is_reference(secret); };
+    if (literal(config->onebot.access_token) || literal(config->model.api_key) || literal(config->model.writer_api_key)) {
         auto checked = check_private(path);
         if (checked.has_error()) return lighter::outcome_error(std::move(checked).error());
     }
@@ -95,6 +95,10 @@ Result<Config> load_config(const std::filesystem::path &path) {
     auto key = resolve_secret(config->model.api_key, "model.api_key");
     if (key.has_error()) return lighter::outcome_error(std::move(key).error());
     config->model.api_key = *std::move(key);
+
+    auto writer_key = resolve_secret(config->model.writer_api_key, "model.writer_api_key");
+    if (writer_key.has_error()) return lighter::outcome_error(std::move(writer_key).error());
+    config->model.writer_api_key = *std::move(writer_key);
     if (config->model.api_key.empty()) {
         return lighter::outcome_error(Error::config("model.api_key is required", ErrorCode::AUTH_NOT_CONFIGURED));
     }

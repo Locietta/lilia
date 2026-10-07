@@ -159,7 +159,8 @@ void test_writer() {
     require(history[4].role == Role::USER && text_of(history[4]) == "b: 第三集作画崩了\nc: 确实", "consecutive lines share a turn");
     require(history[5].role == Role::ASSISTANT && text_of(history[5]) == "崩成ppt了", "assistant turn");
     const auto last = text_of(history[6]);
-    require(history[6].role == Role::USER && last.starts_with("b: 莉莉娅你追吗\n\n【轮到你说话了"), "the note ends the last user turn");
+    require(history[6].role == Role::USER && last.starts_with("b: 莉莉娅你追吗\n\n【你要回应b的这条") && last.ends_with("现在，你说："),
+            "the note ends the last user turn");
     require(last.find("说在追") != std::string::npos, "the intent reaches the writer");
 }
 
@@ -209,6 +210,15 @@ void test_bubbles() {
             "a long line splits after sentence ends");
     require(chat::split_bubbles("啊？？真的假的").size() == 1, "short lines stay whole");
     require(chat::split_bubbles("  \n ").empty(), "blank text has no bubbles");
+
+    require(chat::fit_length("短的就不动", 30) == "短的就不动", "short text is untouched");
+    require(chat::fit_length("这集作画不错，打戏很顶，剧情也推进了，下周还看", 12) == "这集作画不错，打戏很顶",
+            "whole clauses that fit are kept");
+    require(chat::fit_length("一二三四五六七八九十", 4) == "一二三四", "an overlong first clause is cut by characters");
+    require(chat::fit_length("第一行\n第二行很长很长很长", 6) == "第一行", "newlines are breaks too");
+    require(chat::strip_asides("好耶（笑）真不错(指C++)和(C++)") == "好耶真不错和(C++)", "CJK asides are removed, code stays");
+    require(chat::strip_asides("没写完（笑") == "没写完（笑", "an unclosed bracket stays");
+    require(chat::strip_asides("其实——也还行") == "其实，也还行", "a dash becomes a comma");
 
     std::mt19937 rng(7);
     require(chat::typing_delay("在", 1.0, rng) == std::chrono::milliseconds(600), "short bubbles take the minimum");

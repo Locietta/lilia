@@ -96,6 +96,10 @@ std::string fill_template(std::string_view text, const std::vector<std::pair<std
 /// Removes Markdown that QQ shows literally: heading markers and **bold**.
 std::string strip_markdown(std::string_view text);
 
+/// Removes bracketed asides containing CJK text ("（笑" stays without a
+/// closing bracket) and turns "——" into a comma.
+std::string strip_asides(std::string_view text);
+
 /// Cleans a model answer for QQ: trims, drops a leading speaker label the
 /// model may copy from the log format, strips Markdown and bounds the length.
 std::string clean_reply(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases, usize max_bytes);

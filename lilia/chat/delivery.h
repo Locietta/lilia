@@ -17,6 +17,12 @@ using namespace lighter::types;
 /// merged into the last bubble. A trailing "。" is dropped from each bubble.
 std::vector<std::string> split_bubbles(std::string_view text, usize max_bubbles = 3);
 
+/// Keeps whole clauses (split after "。！？!?，,；;" and newlines) from the
+/// start of `text` while they fit in `max_code_points`; a first clause that
+/// is already too long is cut. Model replies tend to run long, so this is the
+/// hard limit behind the style budget in the prompt.
+std::string fit_length(std::string_view text, usize max_code_points);
+
 /// Characters (UTF-8 code points) in `text`.
 usize count_code_points(std::string_view text);
 

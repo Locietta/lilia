@@ -10,8 +10,9 @@
 
 namespace lilia {
 
-/// Anthropic-compatible client for one model of the configured endpoint.
-provider::Provider make_provider(const ModelConfig &model, const std::string &model_name, u32 max_tokens);
+/// Anthropic-compatible clients for the planner and the writer.
+provider::Provider make_planner(const ModelConfig &model);
+provider::Provider make_writer(const ModelConfig &model);
 
 /// Feeds a JSONL chat log through the real gate, planner and writer (no
 /// NapCat, in-memory store, no delays) and prints every decision. Each line:

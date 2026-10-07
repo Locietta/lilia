@@ -31,6 +31,10 @@ struct ModelConfig {
     u32 planner_max_tokens = 400;
     /// Let the model think before answering (slower; off by default).
     bool thinking = false;
+    /// Optional separate endpoint for the writer (`model`), e.g. MiniMax for
+    /// style while the planner stays on `base_url`. Empty means the same.
+    std::string writer_base_url;
+    std::string writer_api_key; ///< secret; e.g. "$MINIMAX_API_KEY"
     /// Offer the provider-hosted web_search server tool. A searched answer
     /// costs tens of thousands of input tokens with DeepSeek.
     bool web_search = true;
@@ -65,6 +69,10 @@ struct ChatConfig {
     /// Input plus output tokens per local calendar day across all chats.
     u64 daily_token_budget = 2'000'000;
     usize max_reply_bytes = 1'500;
+    /// Hard limits (characters) per planner style; whole clauses are kept.
+    usize short_reply_chars = 30;
+    usize normal_reply_chars = 60;
+    usize long_reply_chars = 160;
     /// Local time for chat logs and the daily budget boundary (UTC+8).
     i32 utc_offset_minutes = 480;
 };

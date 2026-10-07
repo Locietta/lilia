@@ -100,9 +100,9 @@ std::optional<usize> parse_target(std::string_view text) {
 
 std::string_view style_instruction(ReplyStyle style) {
     switch (style) {
-        case ReplyStyle::SHORT: return "这次说得短一点：一两个词或者一句短话。";
-        case ReplyStyle::NORMAL: return "这次说两三句就好。";
-        case ReplyStyle::LONG: return "这次可以认真展开说，但仍然是聊天的口吻，不要写成文章或清单。";
+        case ReplyStyle::SHORT: return "这次就一句话，十几个字以内，一两个词也行。";
+        case ReplyStyle::NORMAL: return "这次一两句话，加起来四十个字以内。";
+        case ReplyStyle::LONG: return "这次可以多说几句把事情讲清楚，但还是聊天的口气，一百个字以内。";
     }
     return "";
 }
@@ -249,7 +249,8 @@ provider::History build_writer_history(const WriterInput &input) {
     developer += "\n";
     developer += input.style_override.empty() ? style_instruction(input.plan.style) : std::string_view(input.style_override);
     if (input.web_search) {
-        developer += "\n这次可以用 web_search 查一下。查完用自己的话说一两句结论，需要的话带上一个最相关的链接，不要罗列搜索结果。";
+        developer +=
+            "\n这次先用 web_search 查一下再说话。查完只挑最关键的一点，用一句大白话说出来，不报数字、日期和来源，不贴链接，除非别人要。";
     }
     provider::append_developer(history, std::move(developer));
 
@@ -269,9 +270,9 @@ provider::History build_writer_history(const WriterInput &input) {
         history.push_back({.role = role, .parts = {provider::TextPart{.text = turn_text(message)}}});
     }
 
-    std::string note = std::format("【轮到你说话了。你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
+    std::string note = std::format("【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
     if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
-    note += "】";
+    note += "】\n现在，你说：";
     if (history.size() > 2 && history.back().role == provider::Role::USER) {
         std::get<provider::TextPart>(history.back().parts.back()).text += "\n\n" + note;
     } else {
@@ -303,8 +304,34 @@ std::string strip_markdown(std::string_view text) {
     return out;
 }
 
+std::string strip_asides(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (usize i = 0; i < text.size();) {
+        const bool full = text.substr(i).starts_with("（");
+        if (full || text[i] == '(') {
+            const auto open = full ? std::string_view("（").size() : 1;
+            const auto close = text.find(full ? "）" : ")", i + open);
+            const auto inner = close == std::string_view::npos ? std::string_view{} : text.substr(i + open, close - i - open);
+            // Only asides that contain CJK text, like MaiBot; "(C++)" stays.
+            const bool cjk = std::ranges::any_of(inner, [](char c) { return static_cast<unsigned char>(c) >= 0xE3; });
+            if (close != std::string_view::npos && cjk) {
+                i = close + (full ? std::string_view("）").size() : 1);
+                continue;
+            }
+        }
+        if (text.substr(i).starts_with("——")) {
+            out += "，";
+            i += std::string_view("——").size();
+            continue;
+        }
+        out.push_back(text[i++]);
+    }
+    return out;
+}
+
 std::string clean_reply(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases, usize max_bytes) {
-    auto cleaned = strip_markdown(strip_speaker_label(text, info, aliases));
+    auto cleaned = strip_asides(strip_markdown(strip_speaker_label(text, info, aliases)));
     if (cleaned.size() <= max_bytes) return cleaned;
     constexpr std::string_view k_ellipsis = "……";
     auto bounded = bounded_utf8(cleaned, max_bytes > k_ellipsis.size() ? max_bytes - k_ellipsis.size() : 0);
