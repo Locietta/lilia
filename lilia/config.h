@@ -76,9 +76,9 @@ struct ChatConfig {
     u64 daily_token_budget = 2'000'000;
     usize max_reply_bytes = 1'500;
     /// Hard limits (characters) per planner style; whole clauses are kept.
-    usize short_reply_chars = 30;
-    usize normal_reply_chars = 60;
-    usize long_reply_chars = 160;
+    usize short_reply_chars = 20;
+    usize normal_reply_chars = 40;
+    usize long_reply_chars = 300;
     /// Local time for chat logs and the daily budget boundary (UTC+8).
     i32 utc_offset_minutes = 480;
 };

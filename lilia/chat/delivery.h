@@ -12,10 +12,16 @@ namespace lilia::chat {
 
 using namespace lighter::types;
 
-/// Splits a cleaned reply into at most `max_bubbles` QQ messages: one per
-/// line, long lines broken after sentence-ending punctuation, extra pieces
-/// merged into the last bubble. A trailing "。" is dropped from each bubble.
+/// Splits a cleaned reply into at most `max_bubbles` QQ messages, the way
+/// people type: one per line; a long line becomes one message per sentence,
+/// and a long sentence is broken at commas (or spaces between CJK clauses).
+/// Extra pieces merge with their shortest neighbour. Bubbles do not end in
+/// "。" or a comma.
 std::vector<std::string> split_bubbles(std::string_view text, usize max_bubbles = 3);
+
+/// The whole text as one message (lines kept, blank lines dropped); empty
+/// when there is nothing to send.
+std::vector<std::string> whole_message(std::string_view text);
 
 /// Keeps whole clauses (split after "。！？!?，,；;", newlines and spaces) from the
 /// start of `text` while they fit in `max_code_points`; a first clause that

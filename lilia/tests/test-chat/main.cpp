@@ -209,7 +209,24 @@ void test_bubbles() {
     require(pieces.size() == 3 && pieces[0] == "这一集的作画确实有点崩，尤其是打斗那段" && pieces[1] == "不过剧情推进得还挺快的！",
             "a long line splits after sentence ends");
     require(chat::split_bubbles("啊？？真的假的").size() == 1, "short lines stay whole");
+    require(chat::split_bubbles("骂的又不是你，圈内撕版权和抢饭碗呗，个人小项目拿它当草稿参考又没啥") ==
+                std::vector<std::string>({"骂的又不是你", "圈内撕版权和抢饭碗呗", "个人小项目拿它当草稿参考又没啥"}),
+            "a long sentence breaks at commas, without the comma");
+    require(chat::split_bubbles("工具就是工具 拿来提高效率没问题 最烦的是拿ai图装成自己画的") ==
+                std::vector<std::string>({"工具就是工具", "拿来提高效率没问题", "最烦的是拿ai图装成自己画的"}),
+            "spaces between CJK clauses break too");
+    require(chat::split_bubbles("好耶，我也在追，作画真的好") == std::vector<std::string>({"好耶，我也在追，作画真的好"}),
+            "a short line with commas stays one message");
+    require(chat::split_bubbles("use godot for a small demo project instead").size() == 1, "spaces in English do not split");
+    require(
+        chat::split_bubbles("一，二，三，四，五，六，七，八，九，十，十一，十二，十三，十四，十五，十六，十七，十八，十九，二十").size() ==
+            3,
+        "comma pieces of one sentence merge back to at most three");
     require(chat::split_bubbles("  \n ").empty(), "blank text has no bubbles");
+    require(chat::whole_message(" 第一段很长，很长很长很长很长很长很长很长。\n\n第二段 \n") ==
+                std::vector<std::string>({"第一段很长，很长很长很长很长很长很长很长。\n第二段"}),
+            "a long reply stays one message with its lines");
+    require(chat::whole_message(" \n ").empty(), "nothing to send");
 
     require(chat::fit_length("短的就不动", 30) == "短的就不动", "short text is untouched");
     require(chat::fit_length("这集作画不错，打戏很顶，剧情也推进了，下周还看", 12) == "这集作画不错，打戏很顶",

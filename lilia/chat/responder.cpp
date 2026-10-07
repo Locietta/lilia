@@ -433,8 +433,10 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
                         plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
                                                                                      settings.long_reply_chars;
-    const auto bubbles = split_bubbles(fit_length(
-        clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes), budget));
+    const auto reply = fit_length(
+        clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes), budget);
+    // A long reply is on purpose (an explanation, a copypasta): one message.
+    const auto bubbles = plan.style == ReplyStyle::LONG && style_override.empty() ? whole_message(reply) : split_bubbles(reply);
     if (bubbles.empty()) {
         log::warn("writer returned an empty reply for {}", describe(chat));
         co_return;
