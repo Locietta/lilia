@@ -207,16 +207,17 @@ Task<> handle_admin(Responder *r, store::StoredMessage command, std::string argu
 std::string_view default_persona() { return embedded(xmake::persona_md); }
 
 std::vector<std::string> sample_habits(store::Store &store, usize count, std::mt19937 &rng) {
-    auto all = store.expressions(500);
-    if (all.has_error() || count == 0) return {};
-    // The most learned few, then a random spread of the rest.
-    const usize top = std::min<usize>({all->size(), count / 3});
-    std::vector<store::Expression> picked(all->begin(), all->begin() + static_cast<std::ptrdiff_t>(top));
-    std::vector<store::Expression> rest(all->begin() + static_cast<std::ptrdiff_t>(top), all->end());
-    std::ranges::shuffle(rest, rng);
-    for (auto &expression : rest) {
-        if (picked.size() >= count) break;
-        picked.push_back(std::move(expression));
+    if (count == 0) return {};
+    // The most learned few, then a random spread of the rest of the pool.
+    const usize top = count / 3;
+    std::vector<store::Expression> picked;
+    if (top > 0) {
+        auto best = store.expressions(top);
+        if (best.has_error()) return {};
+        picked = *std::move(best);
+    }
+    if (auto rest = store.random_expressions(top, count - picked.size()); rest.has_value()) {
+        for (auto &expression : *rest) picked.push_back(std::move(expression));
     }
     std::ranges::shuffle(picked, rng);
     std::vector<std::string> habits;
@@ -432,8 +433,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
                         plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
                                                                                      settings.long_reply_chars;
-    const auto bubbles =
-        split_bubbles(fit_length(clean_reply(final_text(*written), info, settings.aliases, settings.max_reply_bytes), budget));
+    const auto bubbles = split_bubbles(fit_length(
+        clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes), budget));
     if (bubbles.empty()) {
         log::warn("writer returned an empty reply for {}", describe(chat));
         co_return;

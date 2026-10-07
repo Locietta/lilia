@@ -394,4 +394,41 @@ std::string clean_reply(std::string_view text, const ChatInfo &info, const std::
     return bounded;
 }
 
+std::string strip_transcript(std::string_view text, const std::vector<store::StoredMessage> &recent) {
+    const auto after_colon = [](std::string_view rest) -> std::optional<std::string_view> {
+        if (rest.starts_with(':')) return trim(rest.substr(1));
+        if (rest.starts_with("：")) return trim(rest.substr(std::string_view("：").size()));
+        return std::nullopt;
+    };
+    std::string out;
+    while (!text.empty()) {
+        const auto newline = text.find('\n');
+        auto line = trim(text.substr(0, newline));
+        text = newline == std::string_view::npos ? std::string_view{} : text.substr(newline + 1);
+        bool labelled = false;
+        // "10001:" — a QQ number used as a label.
+        const auto digits = line.find_first_not_of("0123456789");
+        if (digits >= 5 && digits != std::string_view::npos) {
+            if (const auto rest = after_colon(line.substr(digits))) {
+                line = *rest;
+                labelled = true;
+            }
+        }
+        for (const auto &message : recent) {
+            if (labelled || message.from_self) continue;
+            const auto name = display_name(message);
+            if (name.empty() || !line.starts_with(name)) continue;
+            if (const auto rest = after_colon(line.substr(name.size()))) {
+                line = *rest;
+                labelled = true;
+            }
+        }
+        if (line.empty()) continue;
+        if (labelled && std::ranges::any_of(recent, [&](const store::StoredMessage &m) { return trim(m.text) == line; })) continue;
+        if (!out.empty()) out += '\n';
+        out += line;
+    }
+    return out;
+}
+
 } // namespace lilia::chat

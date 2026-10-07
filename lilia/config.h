@@ -101,8 +101,9 @@ struct LearningConfig {
     std::vector<i64> exclude_groups;
     /// Lines buffered per group before one learning call.
     usize batch_messages = 30;
-    /// Oldest patterns beyond this are dropped (lowest count first).
-    usize max_expressions = 1'000;
+    /// Patterns beyond this are dropped (lowest count first); 0 keeps all.
+    /// A pattern is a short row, so the pool is allowed to grow.
+    usize max_expressions = 0;
     /// Patterns offered to the planner per turn.
     usize candidates = 15;
 };

@@ -116,4 +116,9 @@ std::string strip_asides(std::string_view text);
 /// model may copy from the log format, strips Markdown and bounds the length.
 std::string clean_reply(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases, usize max_bytes);
 
+/// The writer sometimes continues the transcript ("昵称: 内容") instead of
+/// answering. Strips other speakers' labels and a bare "12345:" from reply
+/// lines, and drops lines that only repeat a message in `recent`.
+std::string strip_transcript(std::string_view text, const std::vector<store::StoredMessage> &recent);
+
 } // namespace lilia::chat

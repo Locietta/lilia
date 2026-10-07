@@ -249,25 +249,46 @@ Result<void> Store::learn_expression(std::string_view situation, std::string_vie
     return statement->run();
 }
 
+namespace {
+
+/// SQLite treats a negative LIMIT as no limit.
+i64 sql_limit(usize limit) { return limit == 0 ? -1 : static_cast<i64>(limit); }
+
+Result<std::vector<Expression>> read_expressions(Statement &statement) {
+    std::vector<Expression> rows;
+    for (;;) {
+        auto row = statement.step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        rows.push_back({
+            .id = statement.column_int(0),
+            .situation = statement.column_text(1),
+            .style = statement.column_text(2),
+            .count = statement.column_int(3),
+            .last_active = statement.column_int(4),
+        });
+    }
+    return rows;
+}
+
+} // namespace
+
+Result<std::vector<Expression>> Store::random_expressions(usize skip_top, usize limit) {
+    auto statement =
+        database.prepare("SELECT id, situation, style, count, last_active FROM expressions WHERE id NOT IN "
+                         "(SELECT id FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1) ORDER BY RANDOM() LIMIT ?2");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, static_cast<i64>(skip_top));
+    statement->bind(2, sql_limit(limit));
+    return read_expressions(*statement);
+}
+
 Result<std::vector<Expression>> Store::expressions(usize limit) {
     auto statement =
         database.prepare("SELECT id, situation, style, count, last_active FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, static_cast<i64>(limit));
-    std::vector<Expression> rows;
-    for (;;) {
-        auto row = statement->step();
-        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
-        if (!*row) break;
-        rows.push_back({
-            .id = statement->column_int(0),
-            .situation = statement->column_text(1),
-            .style = statement->column_text(2),
-            .count = statement->column_int(3),
-            .last_active = statement->column_int(4),
-        });
-    }
-    return rows;
+    statement->bind(1, sql_limit(limit));
+    return read_expressions(*statement);
 }
 
 Result<void> Store::prune_expressions(usize keep) {

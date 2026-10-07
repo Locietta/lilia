@@ -179,8 +179,9 @@ Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
             log::error("cannot store expression: {}", added.error().message());
         }
     }
-    if (auto pruned = store.prune_expressions(config.max_expressions); pruned.has_error()) {
-        log::error("cannot prune expressions: {}", pruned.error().message());
+    if (config.max_expressions > 0) {
+        if (auto pruned = store.prune_expressions(config.max_expressions); pruned.has_error())
+            log::error("cannot prune expressions: {}", pruned.error().message());
     }
     log::info("learned {} expression(s) from {} lines", learned.size(), lines.size());
     co_return std::move(learned);

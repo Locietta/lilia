@@ -236,6 +236,11 @@ void test_clean_reply() {
     require(chat::clean_reply("lilia 很开心", info, aliases, 100) == "lilia 很开心", "a name without a colon is content");
     require(chat::strip_markdown("## 结论\n**26.3** 是最新版，a**b") == "结论\n26.3 是最新版，ab", "headings and bold are stripped");
     require(chat::strip_markdown("#话题 不是标题") == "#话题 不是标题", "a hash without a space is content");
+    const std::vector<store::StoredMessage> recent{stored(1, 0, "Locietta", "@莉莉娅 玩游戏吗？"), stored(2, 0, "闭锁", "啥", true)};
+    require(chat::strip_transcript("Locietta: 啥游戏", recent) == "啥游戏", "another speaker's label is stripped");
+    require(chat::strip_transcript("Locietta: @莉莉娅 玩游戏吗？\n10001:", recent).empty(), "an echoed transcript is dropped");
+    require(chat::strip_transcript("@莉莉娅 玩游戏吗？\n12:30 开始", recent) == "@莉莉娅 玩游戏吗？\n12:30 开始",
+            "unlabelled lines and short numbers are content");
     const auto bounded = chat::clean_reply(std::string(30, 'a') + "你好你好", info, aliases, 20);
     require(bounded.size() <= 20 && bounded.ends_with("……"), "long replies are bounded with an ellipsis");
 }

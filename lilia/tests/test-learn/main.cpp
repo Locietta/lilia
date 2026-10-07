@@ -81,13 +81,20 @@ void test_store_and_sampling() {
     require(rows.has_value() && rows->size() == 21, "one row per style");
     require((*rows)[0].style == "用\"笑死\"" && (*rows)[0].count == 2 && (*rows)[0].situation == "觉得很好笑",
             "a repeated style counts up and keeps the newest situation");
-    require(store->prune_expressions(5).has_value(), "prune");
-    require(store->expressions(100)->size() == 5, "pruned to the most counted");
+    require(store->expressions(0)->size() == 21, "limit 0 lists everything");
+    auto random = store->random_expressions(1, 0);
+    require(random.has_value() && random->size() == 20 &&
+                std::ranges::none_of(*random, [](const store::Expression &e) { return e.style == "用\"笑死\""; }),
+            "random picks skip the top patterns");
 
     std::mt19937 rng(3);
     const auto habits = chat::sample_habits(*store, 3, rng);
     require(habits.size() == 3, "sample size");
     require(std::ranges::contains(habits, std::string("当觉得很好笑时，可以用\"笑死\"")), "the most counted pattern is always offered");
+    require(chat::sample_habits(*store, 2, rng).size() == 2, "fewer than three candidates are all random");
+
+    require(store->prune_expressions(5).has_value(), "prune");
+    require(store->expressions(100)->size() == 5, "pruned to the most counted");
 }
 
 void test_planner_habits() {
