@@ -78,10 +78,14 @@ latency is negligible at this scale.
    - A `recall` planner tool: FTS5 trigram first, embeddings later. Rank by
      relevance plus recency plus use; reinforce on use, decay otherwise;
      private memories never reach groups.
-3. **lilia's own style.** Expression learning ("当[情境]时，可以[说法]"
-   with counts, selected per reply) from the allowed groups. Persona
-   revisions proposed by reflection and approved by an admin, with every
-   version kept.
+3. **lilia's own style.**
+   - Expression learning (done 2026-10-07, `learn/`). Every group the
+     account is in feeds an in-memory buffer; batches of 30 lines become
+     "当[情境]时，可以[说法]" patterns with counts, and the text is dropped.
+     Other groups are read-only. The planner picks up to two of about 15
+     candidates per reply.
+   - Next: persona revisions proposed by reflection and approved by an admin,
+     with every version kept.
 4. **Stickers (later).**
    - Learn stickers from every group the account is in.
    - Keep the image (deduplicated by hash) and a short usage note written
