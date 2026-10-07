@@ -23,10 +23,10 @@ std::vector<std::string> split_bubbles(std::string_view text, usize max_bubbles 
 /// when there is nothing to send.
 std::vector<std::string> whole_message(std::string_view text);
 
-/// Keeps whole clauses (split after "。！？!?，,；;", newlines and spaces) from the
-/// start of `text` while they fit in `max_code_points`; a first clause that
-/// is already too long is cut. Model replies tend to run long, so this is the
-/// hard limit behind the style budget in the prompt.
+/// Keeps whole sentences (ending in "。！？!?" or a newline) from the start of
+/// `text` while they fit in `max_code_points`. A sentence is never cut: the
+/// first one is kept even when it alone is longer. This is a safety net
+/// behind the style budget in the prompt, not a way to shorten replies.
 std::string fit_length(std::string_view text, usize max_code_points);
 
 /// Characters (UTF-8 code points) in `text`.
