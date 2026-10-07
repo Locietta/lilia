@@ -50,7 +50,16 @@ std::vector<std::string> split_sentences(std::string_view line) {
     return pieces;
 }
 
-/// Breaks after "，,；;" and after a space that follows CJK text (keeping the
+/// A space between two non-ASCII characters ("工具就是工具 拿来") separates
+/// clauses; one next to a Latin word ("用 AI 出图") does not.
+bool clause_space(std::string_view text, usize i) {
+    if (text[i] != ' ' || i == 0 || i + 1 >= text.size()) return false;
+    // A continuation byte before means the previous character was multi-byte;
+    // a lead byte after means the next one is.
+    return (static_cast<unsigned char>(text[i - 1]) & 0xC0) == 0x80 && static_cast<unsigned char>(text[i + 1]) >= 0xC0;
+}
+
+/// Breaks after "，,；;" and after a space between CJK clauses (keeping the
 /// separator), then packs the clauses greedily into chunks of `limit` code
 /// points; a single longer clause stays whole.
 std::vector<std::string> split_clauses(std::string_view sentence, usize limit) {
@@ -62,8 +71,7 @@ std::vector<std::string> split_clauses(std::string_view sentence, usize limit) {
         for (const auto mark : k_marks) {
             if (sentence.substr(i).starts_with(mark)) width = mark.size();
         }
-        // A continuation byte before the space means the previous character was not ASCII.
-        if (width == 0 && sentence[i] == ' ' && i > 0 && (static_cast<unsigned char>(sentence[i - 1]) & 0xC0) == 0x80) width = 1;
+        if (width == 0 && clause_space(sentence, i)) width = 1;
         if (width == 0) {
             ++i;
             continue;
@@ -109,9 +117,9 @@ std::string finish(std::string_view text) {
 } // namespace
 
 std::string fit_length(std::string_view text, usize max_code_points) {
-    // Spaces too: netizen-style replies often separate clauses with them.
-    static constexpr std::array<std::string_view, 11> k_breaks{"。", "！", "？", "，", "；", "!", "?", ",", ";", "\n", " "};
+    static constexpr std::array<std::string_view, 10> k_breaks{"。", "！", "？", "，", "；", "!", "?", ",", ";", "\n"};
     std::string out;
+    std::string whole_sentences; ///< `out` as of its last sentence end
     usize used = 0;
     usize clause_start = 0;
     for (usize i = 0; i <= text.size();) {
@@ -123,6 +131,7 @@ std::string fit_length(std::string_view text, usize max_code_points) {
                     break;
                 }
             }
+            if (width == 0 && clause_space(text, i)) width = 1;
         }
         if (i < text.size() && width == 0) {
             ++i;
@@ -141,11 +150,18 @@ std::string fit_length(std::string_view text, usize max_code_points) {
                     ++kept;
                 }
                 out = clause.substr(0, bytes);
+            } else if (!whole_sentences.empty()) {
+                // Ending on a full sentence beats trailing off mid-thought.
+                out = std::move(whole_sentences);
             }
             break;
         }
         out += clause;
         used += size;
+        if (clause.ends_with("。") || clause.ends_with("！") || clause.ends_with("？") || clause.ends_with("!") || clause.ends_with("?") ||
+            clause.ends_with("\n")) {
+            whole_sentences = out;
+        }
         if (i >= text.size()) break;
         i += width;
         clause_start = i;

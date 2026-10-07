@@ -72,6 +72,9 @@ struct Responder {
         std::string name;
         bool busy = false;
         i64 budget_notice_day = -1;
+        /// Someone called her while she answered another message; the next
+        /// turn must answer this one.
+        std::optional<i64> owed;
     };
 
     const Config &config;

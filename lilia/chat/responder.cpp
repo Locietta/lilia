@@ -321,6 +321,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     auto &state = chats[chat];
     auto fresh = std::exchange(state.flow.unseen, {});
     const auto addressed = std::exchange(state.flow.addressed, std::nullopt);
+    const auto owed = std::exchange(state.owed, std::nullopt);
     if (fresh.empty()) co_return;
 
     const auto &settings = config.chat;
@@ -370,6 +371,10 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         // Ignoring someone who called her reads as broken, not as a choice.
         log::info("planner stayed silent although addressed ({}); replying anyway", plan.reason);
         plan = {.reply = true, .target = *addressed};
+    }
+    if (owed && owed == addressed && plan.target != *owed) {
+        log::info("planner picked {} again; answering the owed {}", plan.target, *owed);
+        plan.target = *owed;
     }
     if (!plan.reply) {
         log::info("{} stays silent: {}", describe(chat), plan.reason);
@@ -430,6 +435,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     });
     const auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, {});
     if (!written) co_return;
+    log::debug("writer raw: {}", final_text(*written));
     const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
                         plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
                                                                                      settings.long_reply_chars;
@@ -451,6 +457,16 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (!co_await send_and_record(this, chat, std::move(message))) break;
     }
     note_spoke(state.flow, now());
+
+    // One target per turn: if someone called her while she answered another
+    // message, take another turn for them (the worker loop runs it next).
+    if (addressed && plan.target != *addressed) {
+        if (const auto it = std::ranges::find(fresh, *addressed, &store::StoredMessage::message_id); it != fresh.end()) {
+            state.flow.unseen.insert(state.flow.unseen.begin(), *it);
+            if (!state.flow.addressed) state.flow.addressed = *addressed;
+            state.owed = *addressed;
+        }
+    }
 }
 
 } // namespace lilia::chat

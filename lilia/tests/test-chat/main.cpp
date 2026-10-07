@@ -217,6 +217,10 @@ void test_bubbles() {
             "spaces between CJK clauses break too");
     require(chat::split_bubbles("好耶，我也在追，作画真的好") == std::vector<std::string>({"好耶，我也在追，作画真的好"}),
             "a short line with commas stays one message");
+    require(chat::split_bubbles("独立游戏小成本用 AI 出图挺好的，真不用太在意那些骂声") ==
+                std::vector<std::string>({"独立游戏小成本用 AI 出图挺好的", "真不用太在意那些骂声"}),
+            "spaces around Latin words are not breaks");
+    require(chat::fit_length("小成本用 AI 出图挺好的", 10) == "小成本用 AI 出图", "nor are they cut points");
     require(chat::split_bubbles("use godot for a small demo project instead").size() == 1, "spaces in English do not split");
     require(
         chat::split_bubbles("一，二，三，四，五，六，七，八，九，十，十一，十二，十三，十四，十五，十六，十七，十八，十九，二十").size() ==
@@ -233,6 +237,7 @@ void test_bubbles() {
             "whole clauses that fit are kept");
     require(chat::fit_length("一二三四五六七八九十", 4) == "一二三四", "an overlong first clause is cut by characters");
     require(chat::fit_length("第一行\n第二行很长很长很长", 6) == "第一行", "newlines are breaks too");
+    require(chat::fit_length("刚手滑了。其实我想说的是，想法挺好，做起来难", 15) == "刚手滑了。", "a cut ends on a whole sentence");
     require(chat::fit_length("工具就是工具 拿来提高效率没问题 最烦的是拿ai图装成自己画的", 18) == "工具就是工具 拿来提高效率没问题",
             "spaces are clause breaks, so nothing is cut mid-word");
     require(chat::strip_asides("好耶（笑）真不错(指C++)和(C++)") == "好耶真不错和(C++)", "CJK asides are removed, code stays");

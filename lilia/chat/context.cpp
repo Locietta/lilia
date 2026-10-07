@@ -112,8 +112,8 @@ std::optional<usize> parse_target(std::string_view text) {
 
 std::string_view style_instruction(ReplyStyle style) {
     switch (style) {
-        case ReplyStyle::SHORT: return "这次就一句话，十个字左右，一两个词也行。";
-        case ReplyStyle::NORMAL: return "这次一两句话，加起来三十个字以内。";
+        case ReplyStyle::SHORT: return "这次就一句短话，一两个词也行。";
+        case ReplyStyle::NORMAL: return "这次一两句话。";
         case ReplyStyle::LONG: return "这次是有意发一整条长消息，可以分几行把事情讲清楚，还是聊天的口气，三百字以内。";
     }
     return "";

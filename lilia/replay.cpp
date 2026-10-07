@@ -215,7 +215,11 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             .sender = {.user_id = line.uid, .nickname = line.name},
             .message = to_segments(line.text, names),
         };
-        if (const auto chat = responder.ingest(event)) co_await responder.run_turn(*chat);
+        if (const auto chat = responder.ingest(event)) {
+            co_await responder.run_turn(*chat);
+            // Someone she has not answered yet gets the next turn right away, as in turn_worker.
+            if (responder.chats[*chat].owed) co_await responder.run_turn(*chat);
+        }
     }
     co_await tasks.join();
     co_return 0;
