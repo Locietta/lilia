@@ -15,6 +15,7 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/flow.h>
 #include <lilia/config.h>
+#include <lilia/learn/learner.h>
 #include <lilia/onebot/session.h>
 #include <lilia/provider/provider.h>
 #include <lilia/store/store.h>
@@ -83,6 +84,8 @@ struct Responder {
     Spawn spawn;
     /// Archives media of allowed chats; null when archiving is disabled.
     archive::Archiver *archiver = nullptr;
+    /// Learns expressions from every group (read-only); null when disabled.
+    learn::Learner *learner = nullptr;
     std::mt19937 rng{std::random_device{}()};
 
     std::shared_ptr<onebot::Session> session;
@@ -92,5 +95,9 @@ struct Responder {
 
 /// Built-in persona used until the data directory has a persona.md.
 std::string_view default_persona();
+
+/// Learned patterns offered to the planner: about a third the most counted,
+/// the rest random, shuffled; rendered "当X时，可以Y".
+std::vector<std::string> sample_habits(store::Store &store, usize count, std::mt19937 &rng);
 
 } // namespace lilia::chat

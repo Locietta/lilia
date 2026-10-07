@@ -7,8 +7,8 @@ namespace lilia::store {
 
 namespace {
 
-// 2: media table.
-constexpr int k_schema_version = 2;
+// 2: media table. 3: expressions table.
+constexpr int k_schema_version = 3;
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS media (
     UNIQUE (chat_type, chat_id, message_id, segment_index)
 );
 CREATE INDEX IF NOT EXISTS media_by_sha1 ON media (sha1);
+
+CREATE TABLE IF NOT EXISTS expressions (
+    id INTEGER PRIMARY KEY,
+    situation TEXT NOT NULL,
+    style TEXT NOT NULL UNIQUE,
+    count INTEGER NOT NULL DEFAULT 1,
+    first_seen INTEGER NOT NULL,
+    last_active INTEGER NOT NULL
+);
 )sql";
 
 Result<Store> initialize(Result<Database> opened, bool file_backed) {
@@ -92,6 +101,12 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
 Result<Store> Store::open(const std::filesystem::path &path) { return initialize(Database::open(path), true); }
 
 Result<Store> Store::open_memory() { return initialize(Database::open_memory(), false); }
+
+Result<Store> Store::open_readonly(const std::filesystem::path &path) {
+    auto database = Database::open_readonly(path);
+    if (database.has_error()) return lighter::outcome_error(std::move(database).error());
+    return Store{.database = *std::move(database)};
+}
 
 Result<void> Store::add_message(const StoredMessage &message) {
     auto statement = database.prepare("INSERT OR IGNORE INTO messages (chat_type, chat_id, message_id, sender_id, sender_name, time, "
@@ -194,6 +209,46 @@ Result<void> Store::add_media(const MediaRecord &media) {
     statement->bind(11, media.source);
     statement->bind(12, media.error);
     statement->bind(13, media.time);
+    return statement->run();
+}
+
+Result<void> Store::learn_expression(std::string_view situation, std::string_view style, i64 now) {
+    auto statement =
+        database.prepare("INSERT INTO expressions (situation, style, count, first_seen, last_active) VALUES (?1, ?2, 1, ?3, ?3) "
+                         "ON CONFLICT (style) DO UPDATE SET situation = ?1, count = count + 1, last_active = ?3");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, situation);
+    statement->bind(2, style);
+    statement->bind(3, now);
+    return statement->run();
+}
+
+Result<std::vector<Expression>> Store::expressions(usize limit) {
+    auto statement =
+        database.prepare("SELECT id, situation, style, count, last_active FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, static_cast<i64>(limit));
+    std::vector<Expression> rows;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        rows.push_back({
+            .id = statement->column_int(0),
+            .situation = statement->column_text(1),
+            .style = statement->column_text(2),
+            .count = statement->column_int(3),
+            .last_active = statement->column_int(4),
+        });
+    }
+    return rows;
+}
+
+Result<void> Store::prune_expressions(usize keep) {
+    auto statement = database.prepare(
+        "DELETE FROM expressions WHERE id NOT IN (SELECT id FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, static_cast<i64>(keep));
     return statement->run();
 }
 

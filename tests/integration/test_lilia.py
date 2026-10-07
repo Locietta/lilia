@@ -100,6 +100,8 @@ def start_model_server():
             tools = [tool.get("name") for tool in body.get("tools", [])]
             if "reply" in tools:
                 data = planner_answer(body)
+            elif "record_expressions" in tools:
+                data = learner_answer()
             else:
                 data = writer_answer()
             self.send_response(200)
@@ -183,6 +185,47 @@ def planner_answer(body):
             ),
             ("content_block_stop", {"type": "content_block_stop", "index": 0}),
             *message_end("tool_use", 3),
+        ]
+    )
+
+
+def learner_answer():
+    """One pattern citing line 2, plus one citing a line that does not exist."""
+    arguments = {
+        "items": [
+            {"situation": "觉得离谱", "style": '用"笑死 这也行"', "source": "2"},
+            {"situation": "编造的", "style": "不存在的行", "source": "7"},
+        ]
+    }
+    return sse(
+        [
+            message_start(8),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "record_expressions",
+                        "input": {},
+                    },
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": json.dumps(arguments, ensure_ascii=False),
+                    },
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            *message_end("tool_use", 4),
         ]
     )
 
@@ -327,6 +370,16 @@ class FakeNapCat:
                 },
             ]
             await ws.send(group_event(IGNORED_GROUP, 1, "", ignored))
+            # A second line from the ignored group completes a learning batch
+            # (batch_messages is 2): lilia learns from it but stays read-only.
+            await ws.send(
+                group_event(
+                    IGNORED_GROUP,
+                    2,
+                    "",
+                    [{"type": "text", "data": {"text": "笑死 这也行"}}],
+                )
+            )
             # Media without a trigger: archived, not answered. The picture has a
             # direct url; the voice clip must be resolved through get_file.
             await ws.send(
@@ -426,6 +479,7 @@ def test_reply_and_reconnect(tmp_path):
                     "api_key": "$LILIA_TEST_KEY",
                 },
                 "chat": {"groups": [GROUP], "debounce_seconds": 0, "typing_speed": 0},
+                "learning": {"batch_messages": 2},
                 "archive": {
                     "container_qq_dir": "/app/.config/QQ",
                     "host_qq_dir": str(qq_dir),
@@ -458,8 +512,16 @@ def test_reply_and_reconnect(tmp_path):
     assert not napcat.errors, f"{napcat.errors}\n{output}"
     assert not model_state["errors"], model_state["errors"]
 
-    assert len(model_state["bodies"]) == 2, "one planner and one writer call"
-    planner, writer = model_state["bodies"]
+    def offered(body):
+        return [tool.get("name") for tool in body.get("tools", [])]
+
+    learners = [b for b in model_state["bodies"] if "record_expressions" in offered(b)]
+    turns = [b for b in model_state["bodies"] if b not in learners]
+    assert len(learners) == 1, "one learning batch from the ignored group"
+    learned_from = learners[0]["messages"][-1]["content"][0]["text"]
+    assert learned_from == "1. 群友1: 别理我\n2. 群友1: 笑死 这也行\n", learned_from
+    assert len(turns) == 2, "one planner and one writer call"
+    planner, writer = turns
     assert [tool["name"] for tool in planner["tools"]] == ["reply", "stay_silent"]
     assert (
         "莉莉娅" in planner["system"]
@@ -490,8 +552,14 @@ def test_reply_and_reconnect(tmp_path):
         (GROUP, TRIGGER_ID, 0, "@lilia 你好呀"),
         (GROUP, 777, 1, "fake reply"),
     ], rows
+    learned = db.execute("SELECT situation, style, count FROM expressions").fetchall()
+    assert learned == [("觉得离谱", '用"笑死 这也行"', 1)], learned
+    assert db.execute(
+        "SELECT count(*) FROM llm_calls WHERE chat_type = 'learn'"
+    ).fetchone() == (1,)
     calls = db.execute(
-        "SELECT chat_id, input_tokens, output_tokens, request_id, error FROM llm_calls"
+        "SELECT chat_id, input_tokens, output_tokens, request_id, error FROM llm_calls "
+        "WHERE chat_type = 'group' ORDER BY id"
     ).fetchall()
     assert calls == [(GROUP, 5, 3, "req_test", ""), (GROUP, 10, 12, "req_test", "")], (
         calls

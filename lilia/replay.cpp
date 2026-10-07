@@ -12,6 +12,7 @@
 #include <lighter/async/runtime/task_group.h>
 
 #include <lilia/chat/responder.h>
+#include <lilia/learn/learner.h>
 #include <lilia/onebot/message.h>
 #include <lilia/provider/anthropic.h>
 #include <lilia/store/store.h>
@@ -88,6 +89,10 @@ provider::Provider make_planner(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.planner_model, model.planner_max_tokens, true);
 }
 
+provider::Provider make_learner(const ModelConfig &model) {
+    return make_client(model, model.base_url, model.api_key, model.planner_model, 1'000, true);
+}
+
 provider::Provider make_searcher(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.planner_model, 1'200);
 }
@@ -97,11 +102,13 @@ provider::Provider make_writer(const ModelConfig &model) {
                        model.writer_api_key.empty() ? model.api_key : model.writer_api_key, model.model, model.max_tokens);
 }
 
-Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona) {
+namespace {
+
+std::optional<std::vector<ReplayLine>> read_log(const std::filesystem::path &log) {
     std::ifstream input(log, std::ios::binary);
     if (!input) {
         std::fprintf(stderr, "cannot read %s\n", log.string().c_str());
-        co_return 1;
+        return std::nullopt;
     }
     std::vector<ReplayLine> lines;
     std::string raw;
@@ -110,10 +117,20 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         ReplayLine line;
         if (auto ec = glz::read<glz::opts{.null_terminated = false, .error_on_unknown_keys = false}>(line, raw)) {
             std::fprintf(stderr, "%s:%zu: %s\n", log.string().c_str(), number, glz::format_error(ec, raw).c_str());
-            co_return 1;
+            return std::nullopt;
         }
         lines.push_back(std::move(line));
     }
+    return lines;
+}
+
+} // namespace
+
+Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
+                     std::optional<std::filesystem::path> habits) {
+    auto parsed = read_log(log);
+    if (!parsed) co_return 1;
+    auto lines = *std::move(parsed);
 
     config.chat.groups = {k_replay_group};
     config.chat.private_users.clear();
@@ -122,6 +139,22 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     if (store.has_error()) {
         std::fprintf(stderr, "%s\n", store.error().message().c_str());
         co_return 1;
+    }
+    if (habits) {
+        auto source = store::Store::open_readonly(*habits);
+        if (source.has_error()) {
+            std::fprintf(stderr, "%s\n", source.error().message().c_str());
+            co_return 1;
+        }
+        auto rows = source->expressions(config.learning.max_expressions);
+        if (rows.has_error()) {
+            std::fprintf(stderr, "%s\n", rows.error().message().c_str());
+            co_return 1;
+        }
+        for (const auto &row : *rows) {
+            for (i64 i = 0; i < row.count; ++i) std::ignore = store->learn_expression(row.situation, row.style, row.last_active);
+        }
+        print(std::format("(载入 {} 条学来的说法)", rows->size()));
     }
 
     lighter::TaskGroup tasks(lighter::EventLoop::current());
@@ -175,6 +208,51 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     }
     co_await tasks.join();
     co_return 0;
+}
+
+Task<int> run_learn(Config config, std::filesystem::path log) {
+    auto parsed = read_log(log);
+    if (!parsed) co_return 1;
+    auto store = store::Store::open_memory();
+    if (store.has_error()) {
+        std::fprintf(stderr, "%s\n", store.error().message().c_str());
+        co_return 1;
+    }
+    lighter::TaskGroup tasks(lighter::EventLoop::current());
+    learn::Learner learner(config.learning, config.chat.name, *store, make_learner(config.model),
+                           [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    const usize batch = std::max<usize>(config.learning.batch_messages, 2);
+    std::vector<learn::Line> lines;
+    for (const auto &line : *parsed) {
+        if (auto text = learn::learnable_text(to_segments(line.text, {})); !text.empty())
+            lines.push_back({.sender = line.uid, .text = text});
+    }
+    for (usize start = 0; start < lines.size(); start += batch) {
+        std::vector<learn::Line> chunk(lines.begin() + static_cast<std::ptrdiff_t>(start),
+                                       lines.begin() + static_cast<std::ptrdiff_t>(std::min(lines.size(), start + batch)));
+        print(std::format("== 第 {}-{} 行", start + 1, start + chunk.size()));
+        // A co_await inside the range-for header crashes GCC 16.2.
+        const auto learned = co_await learner.learn(1, std::move(chunk));
+        for (const auto &pattern : learned) print(std::format("  当{}时，可以{}", pattern.situation, pattern.style));
+    }
+    co_await tasks.join();
+    co_return 0;
+}
+
+int print_expressions(const std::filesystem::path &database, usize limit) {
+    auto store = store::Store::open_readonly(database);
+    if (store.has_error()) {
+        std::fprintf(stderr, "%s\n", store.error().message().c_str());
+        return 1;
+    }
+    auto rows = store->expressions(limit);
+    if (rows.has_error()) {
+        std::fprintf(stderr, "%s\n", rows.error().message().c_str());
+        return 1;
+    }
+    for (const auto &row : *rows) print(std::format("{:>4}  当{}时，可以{}", row.count, row.situation, row.style));
+    print(std::format("({} 条)", rows->size()));
+    return 0;
 }
 
 } // namespace lilia

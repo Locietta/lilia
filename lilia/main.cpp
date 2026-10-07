@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -17,6 +18,7 @@
 #include <lilia/archive/archiver.h>
 #include <lilia/chat/responder.h>
 #include <lilia/config.h>
+#include <lilia/learn/learner.h>
 #include <lilia/log.h>
 #include <lilia/onebot/session.h>
 #include <lilia/replay.h>
@@ -30,7 +32,9 @@ using namespace std::chrono_literals;
 
 void print_usage(FILE *output) {
     std::fputs("usage: lilia [--config <path>] [--check-config]\n"
-               "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>]\n"
+               "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
+               "       lilia learn <chat.jsonl> [--config <path>]\n"
+               "       lilia expressions [--config <path>] [--limit <n>]\n"
                "       lilia --version | --help\n",
                output);
 }
@@ -103,6 +107,9 @@ Task<int> run_app(const Config &config) {
                               data_dir / "persona.md", [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     archive::Archiver archiver(config.archive, data_dir, *store);
     if (config.archive.enabled) responder.archiver = &archiver;
+    learn::Learner learner(config.learning, config.chat.name, *store, make_learner(config.model),
+                           [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    if (config.learning.enabled) responder.learner = &learner;
     if (auto loaded = responder.reload_persona(); loaded.has_error()) {
         log::error("{}", loaded.error().message());
         co_return 1;
@@ -121,11 +128,21 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> config_path;
     std::optional<std::filesystem::path> replay_log;
     std::optional<std::filesystem::path> persona_path;
+    std::optional<std::filesystem::path> habits_db;
+    std::optional<std::filesystem::path> learn_log;
+    bool list_expressions = false;
+    usize limit = 100;
     bool check_only = false;
     int first = 1;
     if (argc > 2 && std::string_view(argv[1]) == "replay") {
         replay_log = argv[2];
         first = 3;
+    } else if (argc > 2 && std::string_view(argv[1]) == "learn") {
+        learn_log = argv[2];
+        first = 3;
+    } else if (argc > 1 && std::string_view(argv[1]) == "expressions") {
+        list_expressions = true;
+        first = 2;
     }
     for (int i = first; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -143,6 +160,10 @@ int main(int argc, char **argv) {
             config_path = argv[++i];
         } else if (arg == "--persona" && replay_log && i + 1 < argc) {
             persona_path = argv[++i];
+        } else if (arg == "--habits" && replay_log && i + 1 < argc) {
+            habits_db = argv[++i];
+        } else if (arg == "--limit" && list_expressions && i + 1 < argc) {
+            limit = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else {
             print_usage(stderr);
             return 2;
@@ -160,6 +181,7 @@ int main(int argc, char **argv) {
         log::info("{} is valid", path.string());
         return 0;
     }
+    if (list_expressions) return print_expressions(std::filesystem::path(config->data_dir) / "lilia.db", limit);
 
     lighter::EventLoop loop;
     auto interrupts = lighter::InterruptSource::create(loop);
@@ -167,7 +189,10 @@ int main(int argc, char **argv) {
         log::error("cannot watch process signals: {}", interrupts.error().message());
         return 1;
     }
-    auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path) : run_app(*config), interrupts->token());
+    auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path, habits_db) :
+                                   learn_log  ? run_learn(*config, *learn_log) :
+                                                run_app(*config),
+                                   interrupts->token());
     loop.schedule(app);
     loop.run();
 

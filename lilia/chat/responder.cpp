@@ -206,6 +206,24 @@ Task<> handle_admin(Responder *r, store::StoredMessage command, std::string argu
 
 std::string_view default_persona() { return embedded(xmake::persona_md); }
 
+std::vector<std::string> sample_habits(store::Store &store, usize count, std::mt19937 &rng) {
+    auto all = store.expressions(500);
+    if (all.has_error() || count == 0) return {};
+    // The most learned few, then a random spread of the rest.
+    const usize top = std::min<usize>({all->size(), count / 3});
+    std::vector<store::Expression> picked(all->begin(), all->begin() + static_cast<std::ptrdiff_t>(top));
+    std::vector<store::Expression> rest(all->begin() + static_cast<std::ptrdiff_t>(top), all->end());
+    std::ranges::shuffle(rest, rng);
+    for (auto &expression : rest) {
+        if (picked.size() >= count) break;
+        picked.push_back(std::move(expression));
+    }
+    std::ranges::shuffle(picked, rng);
+    std::vector<std::string> habits;
+    for (const auto &expression : picked) habits.push_back(std::format("当{}时，可以{}", expression.situation, expression.style));
+    return habits;
+}
+
 Responder::Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher,
                      provider::Provider writer, std::filesystem::path persona_path, Spawn spawn)
     : now([] { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }),
@@ -287,6 +305,8 @@ void Responder::on_event(onebot::Event event) {
     // Until get_login_info answers, lilia does not know its own id.
     const auto *message = std::get_if<onebot::MessageEvent>(&event);
     if (!message || !session) return;
+    // Every group may teach her how people talk; only allowed chats go further.
+    if (learner) learner->observe(*message, self.user_id);
     const auto chat = ingest(*message);
     if (!chat) return;
     auto &state = chats[*chat];
@@ -330,6 +350,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = settings.context_bytes,
     };
+    if (config.learning.enabled) planner_input.habits = sample_habits(store, config.learning.candidates, rng);
     for (const auto &message : fresh) planner_input.fresh.push_back(message.message_id);
     const auto request = build_planner_request(planner_input);
 
@@ -357,8 +378,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         log::warn("planner target {} is not in the chat log", plan.target);
         co_return;
     }
-    log::info("{} replies to {} ({}, quote {}, search {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
-              plan.search, plan.intent);
+    log::info("{} replies to {} ({}, quote {}, search {}, habits {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
+              plan.habits.size(), plan.search, plan.intent);
 
     std::string style_override;
     if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(rng)) {
@@ -388,6 +409,14 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = settings.context_bytes,
         .reference = reference,
+        .habits =
+            [&] {
+                std::vector<std::string> picked;
+                for (const auto index : plan.habits) {
+                    if (index < planner_input.habits.size()) picked.push_back(planner_input.habits[index]);
+                }
+                return picked;
+            }(),
     });
     const auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, {});
     if (!written) co_return;

@@ -64,8 +64,20 @@ std::vector<usize> fit_lines(const std::vector<store::StoredMessage> &recent, us
     return kept;
 }
 
+glz::generic string_schema() {
+    glz::generic schema;
+    std::ignore = glz::read_json(schema, R"({"type": "string"})");
+    return schema;
+}
+
 provider::SchemaProperty property(std::string type, std::string description) {
     return {.type = std::move(type), .description = std::move(description)};
+}
+
+provider::SchemaProperty string_array_property(std::string description) {
+    provider::SchemaProperty result{.type = "array", .description = std::move(description)};
+    result.items.emplace(string_schema());
+    return result;
 }
 
 const glz::generic *field(const glz::generic &input, std::string_view key) {
@@ -194,6 +206,10 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
     }
     user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
                               std::format("\n没有人直接叫{}，大多数时候她不需要说话。", input.info.name);
+    if (!input.habits.empty()) {
+        user += "\n\n她从群友那里学来的说法（回复时可以挑 0 到 2 条最贴切的，把编号填进 habits；不合适就不选）：\n";
+        for (usize i = 0; i < input.habits.size(); ++i) user += std::format("E{} {}\n", i + 1, input.habits[i]);
+    }
     provider::append_user(request.history, std::move(user));
 
     request.tools.push_back({
@@ -203,7 +219,8 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
                                         {"quote", property("boolean", "是否引用那条消息")},
                                         {"style", property("string", "short | normal | long")},
                                         {"search", property("boolean", "是否需要联网搜索")},
-                                        {"intent", property("string", "一句话描述她想表达的意思，不是台词")}},
+                                        {"intent", property("string", "一句话描述她想表达的意思，不是台词")},
+                                        {"habits", string_array_property("选用的学来的说法编号，例如 [\"E2\"]，可以为空")}},
                          .required = {"target", "style", "intent"}},
     });
     request.tools.push_back({
@@ -225,6 +242,20 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         const auto target = parse_target(string_field(input, "target"));
         if (!target || *target == 0 || *target > ids.size()) return {.reason = "invalid target " + string_field(input, "target")};
         const auto style = string_field(input, "style");
+        std::vector<usize> habits;
+        if (const auto *picked = field(input, "habits"); picked && picked->is_array()) {
+            for (const auto &entry : picked->get_array()) {
+                std::string_view text = entry.is_string() ? std::string_view(entry.get_string()) : std::string_view();
+                if (text.starts_with('E') || text.starts_with('e')) text.remove_prefix(1);
+                usize index = 0;
+                if (entry.is_number()) {
+                    index = static_cast<usize>(entry.get_number());
+                } else if (std::from_chars(text.data(), text.data() + text.size(), index).ec != std::errc{}) {
+                    continue;
+                }
+                if (index >= 1 && habits.size() < 2 && !std::ranges::contains(habits, index - 1)) habits.push_back(index - 1);
+            }
+        }
         return {
             .reply = true,
             .target = ids[*target - 1],
@@ -234,6 +265,7 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
                                          ReplyStyle::SHORT,
             .search = bool_field(input, "search"),
             .intent = string_field(input, "intent"),
+            .habits = std::move(habits),
         };
     }
     return {.reason = "no tool call"};
@@ -275,6 +307,11 @@ provider::History build_writer_history(const WriterInput &input) {
                             input.reference);
     } else {
         if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
+        note += "】";
+    }
+    if (!input.habits.empty()) {
+        note += "\n【可以参考的说法，用得自然就用，不合适就别硬套：";
+        for (usize i = 0; i < input.habits.size(); ++i) note += (i ? "；" : "") + input.habits[i];
         note += "】";
     }
     note += "\n现在，你说：";

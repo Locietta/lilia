@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,8 @@ struct ToolCall {
 struct SchemaProperty {
     std::string type;
     std::string description;
+    /// Full JSON Schema for array elements, including nested objects.
+    std::optional<glz::generic> items;
 };
 
 struct InputSchema {

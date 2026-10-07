@@ -92,6 +92,16 @@ Result<Database> Database::open(const std::filesystem::path &path) {
 
 Result<Database> Database::open_memory() { return open_path(":memory:"); }
 
+Result<Database> Database::open_readonly(const std::filesystem::path &path) {
+    const auto utf8 = path.generic_u8string();
+    const std::string name(reinterpret_cast<const char *>(utf8.data()), utf8.size());
+    Database database;
+    const auto code = sqlite3_open_v2(name.c_str(), &database.value, SQLITE_OPEN_READONLY, nullptr);
+    if (code != SQLITE_OK) return lighter::outcome_error(database.error("cannot open database " + name, code));
+    sqlite3_busy_timeout(database.value, 5000);
+    return database;
+}
+
 Result<Statement> Database::prepare(std::string_view sql) {
     Statement statement;
     const auto code = sqlite3_prepare_v2(value, sql.data(), static_cast<int>(sql.size()), &statement.value, nullptr);

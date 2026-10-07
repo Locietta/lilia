@@ -33,6 +33,8 @@ struct Plan {
     bool search = false;
     std::string intent;
     std::string reason; ///< why she stays silent
+    /// Indices into PlannerInput::habits the writer should lean on (0-2).
+    std::vector<usize> habits;
 };
 
 struct PlannerInput {
@@ -46,6 +48,8 @@ struct PlannerInput {
     i64 now = 0;
     i32 utc_offset_minutes = 480;
     usize log_bytes = 12'000;
+    /// Learned patterns offered this turn, "当X时，可以Y", shown as E1, E2 ...
+    std::vector<std::string> habits;
 };
 
 struct PlannerRequest {
@@ -75,6 +79,8 @@ struct WriterInput {
     usize log_bytes = 12'000;
     /// Facts from the search step; the writer picks one point from them.
     std::string reference;
+    /// Learned patterns the planner picked, "当X时，可以Y".
+    std::vector<std::string> habits;
 };
 
 /// The search step: one call with only the web_search tool, asked to

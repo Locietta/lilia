@@ -22,8 +22,12 @@ submodule.
 
 ## Provider layer (copied, renamed `liminal::` to `lilia::`)
 
-Local changes since the copy: `anthropic::ClientOptions::disable_thinking`
-sends `thinking: {"type": "disabled"}` (DeepSeek thinks by default).
+Local changes since the copy:
+
+- `anthropic::ClientOptions::disable_thinking` sends `thinking: {"type": "disabled"}`
+  (DeepSeek thinks by default); `require_tool` sends `tool_choice: {"type": "any"}`.
+- `provider::SchemaProperty::items` (array element schema), the same change as
+  on liminal's `codex/skills-questions-task-plan` branch.
 
 From liminal `main` at `d520ce6`, keeping the relative paths so fixes can be
 ported in either direction:

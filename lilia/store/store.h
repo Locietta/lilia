@@ -59,8 +59,19 @@ struct MediaRecord {
     i64 time = 0;
 };
 
+/// A learned expression pattern: 当 situation 时，可以 style.
+struct Expression {
+    i64 id = 0;
+    std::string situation;
+    std::string style;
+    i64 count = 1; ///< times learned (from any group)
+    i64 last_active = 0;
+};
+
 struct Store {
     static Result<Store> open(const std::filesystem::path &path);
+    /// Existing database without schema changes; for inspection tools.
+    static Result<Store> open_readonly(const std::filesystem::path &path);
     static Result<Store> open_memory();
 
     /// Duplicates (same chat and message id) are ignored.
@@ -81,6 +92,16 @@ struct Store {
 
     /// Media rows of one message, in segment order.
     Result<std::vector<MediaRecord>> message_media(const ChatKey &chat, i64 message_id);
+
+    /// Adds a pattern, or counts it again when the style is already known
+    /// (the newest situation wins).
+    Result<void> learn_expression(std::string_view situation, std::string_view style, i64 now);
+
+    /// All patterns, most counted first.
+    Result<std::vector<Expression>> expressions(usize limit);
+
+    /// Keeps the `keep` most counted (then most recent) patterns.
+    Result<void> prune_expressions(usize keep);
 
     Database database;
 };

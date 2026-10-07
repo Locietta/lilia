@@ -87,11 +87,26 @@ struct ArchiveConfig {
     std::string host_qq_dir = "~/services/napcat/qq";
 };
 
+struct LearningConfig {
+    /// Learn expression patterns from group chat. Every group the account is
+    /// in may feed it (read-only); only allowed groups ever get replies.
+    bool enabled = true;
+    /// Groups never learned from.
+    std::vector<i64> exclude_groups;
+    /// Lines buffered per group before one learning call.
+    usize batch_messages = 30;
+    /// Oldest patterns beyond this are dropped (lowest count first).
+    usize max_expressions = 1'000;
+    /// Patterns offered to the planner per turn.
+    usize candidates = 15;
+};
+
 struct Config {
     OneBotConfig onebot;
     ModelConfig model;
     ChatConfig chat;
     ArchiveConfig archive;
+    LearningConfig learning;
     /// Database and persona location; empty means the platform default.
     std::string data_dir;
     std::string log_level = "info";

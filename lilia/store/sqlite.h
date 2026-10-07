@@ -59,6 +59,9 @@ struct Database {
     /// In-memory database, for tests.
     static Result<Database> open_memory();
 
+    /// Existing database, read-only (safe next to a running writer in WAL mode).
+    static Result<Database> open_readonly(const std::filesystem::path &path);
+
     Result<Statement> prepare(std::string_view sql);
     Result<void> execute(std::string_view sql);
 
