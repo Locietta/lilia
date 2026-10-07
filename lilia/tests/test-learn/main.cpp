@@ -48,7 +48,7 @@ void test_request() {
 
 void test_parse() {
     const auto learned = learn::parse_learned({tool_call("record_expressions", R"({"items": [
-            {"situation": "觉得离谱", "style": "用\"笑死 这也行\"", "source": "1"},
+            {"situation": "觉得离谱的时候", "style": "用\"笑死 这也行\"", "source": "1"},
             {"situation": "调侃别人破防", "style": "用\"急了急了\"", "source": 2},
             {"situation": "没有来源", "style": "用\"嗯嗯\"", "source": "9"},
             {"situation": "", "style": "空场景", "source": "1"},
@@ -56,7 +56,7 @@ void test_parse() {
         ]})")},
                                               3);
     require(learned.size() == 2, "invalid items are dropped");
-    require(learned[0].situation == "觉得离谱" && learned[0].style == "用\"笑死 这也行\"", "first item");
+    require(learned[0].situation == "觉得离谱" && learned[0].style == "用\"笑死 这也行\"", "first item; a trailing 的时候 is dropped");
     require(learned[1].style == "用\"急了急了\"", "numeric source accepted");
     require(learn::parse_learned({tool_call("record_expressions", R"({"items": []})")}, 3).empty(), "an empty list is fine");
     require(learn::parse_learned({}, 3).empty(), "no tool call learns nothing");

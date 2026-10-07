@@ -56,7 +56,8 @@ std::string drop_trailing_period(std::string text) {
 } // namespace
 
 std::string fit_length(std::string_view text, usize max_code_points) {
-    static constexpr std::array<std::string_view, 10> k_breaks{"。", "！", "？", "，", "；", "!", "?", ",", ";", "\n"};
+    // Spaces too: netizen-style replies often separate clauses with them.
+    static constexpr std::array<std::string_view, 11> k_breaks{"。", "！", "？", "，", "；", "!", "?", ",", ";", "\n", " "};
     std::string out;
     usize used = 0;
     usize clause_start = 0;
@@ -97,7 +98,8 @@ std::string fit_length(std::string_view text, usize max_code_points) {
         clause_start = i;
     }
     // A clause cut off mid-list should not end on a comma.
-    while (out.ends_with("，") || out.ends_with(",") || out.ends_with("；") || out.ends_with(";") || out.ends_with("\n")) {
+    while (out.ends_with("，") || out.ends_with(",") || out.ends_with("；") || out.ends_with(";") || out.ends_with("\n") ||
+           out.ends_with(" ")) {
         out.resize(out.size() - (out.ends_with("，") || out.ends_with("；") ? std::string_view("，").size() : 1));
     }
     return out;

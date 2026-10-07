@@ -388,7 +388,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         co_return;
     }
     log::info("{} replies to {} ({}, quote {}, search {}, habits {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
-              plan.habits.size(), plan.search, plan.intent);
+              plan.search, plan.habits.size(), plan.intent);
 
     std::string style_override;
     if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(rng)) {

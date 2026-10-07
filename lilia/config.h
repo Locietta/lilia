@@ -35,6 +35,8 @@ struct ModelConfig {
     /// style while the planner stays on `base_url`. Empty means the same.
     std::string writer_base_url;
     std::string writer_api_key; ///< secret; e.g. "$MINIMAX_API_KEY"
+    /// Writer sampling temperature; unset uses the provider default.
+    std::optional<double> writer_temperature;
     /// Describes images and stickers (on `base_url`); empty disables it.
     std::string vision_model = "deepseek-flash";
     /// Offer the provider-hosted web_search server tool. A searched answer
@@ -119,7 +121,9 @@ struct Config {
 /// Reads JSON (comments allowed). Unknown keys are errors so typos surface.
 /// Secret fields of the form "$NAME" are replaced from the environment; a
 /// literal secret is only accepted when the file is private to its owner.
-Result<Config> load_config(const std::filesystem::path &path);
+/// `resolve_secrets = false` leaves every secret empty and skips the checks;
+/// for inspection tools that never call a model.
+Result<Config> load_config(const std::filesystem::path &path, bool resolve_secrets = true);
 
 /// Parses config text without touching the file system or environment.
 Result<Config> parse_config(std::string_view text);

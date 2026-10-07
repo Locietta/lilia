@@ -51,6 +51,18 @@ Result<void> check_private(const std::filesystem::path &path) {
 #endif
 }
 
+/// Defaults and "~/" expansion for the path settings.
+void expand_paths(Config &config) {
+    if (config.data_dir.empty()) {
+        config.data_dir = default_data_dir().string();
+    } else if (config.data_dir.starts_with("~/")) {
+        config.data_dir = (home_directory() / config.data_dir.substr(2)).string();
+    }
+    if (config.archive.host_qq_dir.starts_with("~/")) {
+        config.archive.host_qq_dir = (home_directory() / config.archive.host_qq_dir.substr(2)).string();
+    }
+}
+
 } // namespace
 
 Result<std::string> resolve_secret(std::string_view value, std::string_view field) {
@@ -73,7 +85,7 @@ Result<Config> parse_config(std::string_view text) {
     return config;
 }
 
-Result<Config> load_config(const std::filesystem::path &path) {
+Result<Config> load_config(const std::filesystem::path &path, bool resolve_secrets) {
     std::ifstream file(path, std::ios::binary);
     if (!file) return lighter::outcome_error(Error::config("cannot read " + path.string(), ErrorCode::NOT_FOUND));
     std::ostringstream buffer;
@@ -81,6 +93,13 @@ Result<Config> load_config(const std::filesystem::path &path) {
 
     auto config = parse_config(buffer.str());
     if (config.has_error()) return config;
+    if (!resolve_secrets) {
+        config->onebot.access_token.clear();
+        config->model.api_key.clear();
+        config->model.writer_api_key.clear();
+        expand_paths(*config);
+        return config;
+    }
 
     const auto literal = [](const std::string &secret) { return !secret.empty() && !is_reference(secret); };
     if (literal(config->onebot.access_token) || literal(config->model.api_key) || literal(config->model.writer_api_key)) {
@@ -102,15 +121,7 @@ Result<Config> load_config(const std::filesystem::path &path) {
     if (config->model.api_key.empty()) {
         return lighter::outcome_error(Error::config("model.api_key is required", ErrorCode::AUTH_NOT_CONFIGURED));
     }
-
-    if (config->data_dir.empty()) {
-        config->data_dir = default_data_dir().string();
-    } else if (config->data_dir.starts_with("~/")) {
-        config->data_dir = (home_directory() / config->data_dir.substr(2)).string();
-    }
-    if (config->archive.host_qq_dir.starts_with("~/")) {
-        config->archive.host_qq_dir = (home_directory() / config->archive.host_qq_dir.substr(2)).string();
-    }
+    expand_paths(*config);
     return config;
 }
 

@@ -175,7 +175,8 @@ int main(int argc, char **argv) {
     }
 
     const auto path = config_path.value_or(default_config_path());
-    auto config = load_config(path);
+    // Listing learned expressions reads the database only; no keys needed.
+    auto config = load_config(path, !list_expressions);
     if (config.has_error()) {
         log::error("{}: {}", path.string(), config.error().message());
         return 1;

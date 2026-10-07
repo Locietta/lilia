@@ -102,8 +102,15 @@ provider::Provider make_searcher(const ModelConfig &model) {
 }
 
 provider::Provider make_writer(const ModelConfig &model) {
-    return make_client(model, model.writer_base_url.empty() ? model.base_url : model.writer_base_url,
-                       model.writer_api_key.empty() ? model.api_key : model.writer_api_key, model.model, model.max_tokens);
+    return pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
+        .auth = provider::api_key_auth(model.writer_api_key.empty() ? model.api_key : model.writer_api_key, false),
+        .base_url = model.writer_base_url.empty() ? model.base_url : model.writer_base_url,
+        .model = model.model,
+        .reasoning_effort = model.reasoning_effort,
+        .disable_thinking = !model.thinking,
+        .temperature = model.writer_temperature,
+        .max_tokens = model.max_tokens,
+    });
 }
 
 namespace {

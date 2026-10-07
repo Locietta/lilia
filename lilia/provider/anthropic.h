@@ -34,6 +34,8 @@ struct ClientOptions {
     /// Send `tool_choice: {"type": "any"}` whenever tools are offered, so
     /// the model must call one of them.
     bool require_tool = false;
+    /// Sampling temperature; unset leaves the provider default.
+    std::optional<double> temperature;
     u32 max_tokens = 8192;
     usize max_retries = 2;
     std::chrono::milliseconds initial_retry_delay{500};

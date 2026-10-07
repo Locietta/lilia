@@ -50,6 +50,17 @@ std::string text_field(const glz::generic &object, std::string_view key) {
     return {};
 }
 
+/// "被问具体内容时" -> "被问具体内容"; the template adds "当…时".
+std::string strip_time_suffix(std::string text) {
+    for (const std::string_view suffix : {"的时候", "时候", "时"}) {
+        if (text.ends_with(suffix) && text.size() > suffix.size()) {
+            text.resize(text.size() - suffix.size());
+            break;
+        }
+    }
+    return text;
+}
+
 bool fits(std::string_view text) { return !text.empty() && chat::count_code_points(text) <= k_max_field_code_points; }
 
 /// Spawned tasks return nothing; the learned patterns are already stored.
@@ -95,7 +106,7 @@ std::vector<Learned> parse_learned(const std::vector<provider::OutputItem> &item
         const auto *list = field(tool->call.input, "items");
         if (!list || !list->is_array()) break;
         for (const auto &entry : list->get_array()) {
-            auto situation = text_field(entry, "situation");
+            auto situation = strip_time_suffix(text_field(entry, "situation"));
             auto style = text_field(entry, "style");
             const auto source_text = text_field(entry, "source");
             usize source = 0;

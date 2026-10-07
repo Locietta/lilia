@@ -216,6 +216,8 @@ void test_bubbles() {
             "whole clauses that fit are kept");
     require(chat::fit_length("一二三四五六七八九十", 4) == "一二三四", "an overlong first clause is cut by characters");
     require(chat::fit_length("第一行\n第二行很长很长很长", 6) == "第一行", "newlines are breaks too");
+    require(chat::fit_length("工具就是工具 拿来提高效率没问题 最烦的是拿ai图装成自己画的", 18) == "工具就是工具 拿来提高效率没问题",
+            "spaces are clause breaks, so nothing is cut mid-word");
     require(chat::strip_asides("好耶（笑）真不错(指C++)和(C++)") == "好耶真不错和(C++)", "CJK asides are removed, code stays");
     require(chat::strip_asides("没写完（笑") == "没写完（笑", "an unclosed bracket stays");
     require(chat::strip_asides("其实——也还行") == "其实，也还行", "a dash becomes a comma");

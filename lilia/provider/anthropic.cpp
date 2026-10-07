@@ -118,6 +118,7 @@ struct MessageRequest {
     std::optional<Thinking> thinking;
     std::optional<OutputConfig> output_config;
     std::optional<ToolChoice> tool_choice;
+    std::optional<double> temperature;
 };
 
 struct Model {
@@ -918,6 +919,7 @@ Result<std::string> encode_complete_request(const provider::History &history, co
         request.tools = std::move(encoded_tools);
         if (options.require_tool) request.tool_choice = wire::MessageRequest::ToolChoice{.type = "any"};
     }
+    request.temperature = options.temperature;
     if (options.reasoning_effort) {
         request.thinking = wire::MessageRequest::Thinking{};
         request.output_config = wire::MessageRequest::OutputConfig{.effort = *options.reasoning_effort};
