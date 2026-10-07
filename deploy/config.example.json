@@ -17,6 +17,8 @@
     "planner_max_tokens": 400,
     // Thinking makes replies slower; off sends thinking: {"type": "disabled"}.
     "thinking": false,
+    // Describes images and stickers of allowed chats ("" turns it off).
+    "vision_model": "deepseek-flash",
     "web_search": true
   },
   "chat": {
@@ -32,6 +34,8 @@
     "debounce_seconds": 3,
     "alt_style_probability": 0.15,
     "typing_speed": 1.0,
+    // A turn waits this long for new images to be described.
+    "image_wait_seconds": 8,
     "context_messages": 40,
     "context_bytes": 12000,
     "daily_token_budget": 2000000,

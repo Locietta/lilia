@@ -57,6 +57,8 @@ struct MediaRecord {
     std::string source; ///< url or napcat path the bytes came from
     std::string error;
     i64 time = 0;
+    /// What a vision model saw in an image or sticker; empty otherwise.
+    std::string description;
 };
 
 /// A learned expression pattern: 当 situation 时，可以 style.
@@ -92,6 +94,13 @@ struct Store {
 
     /// Media rows of one message, in segment order.
     Result<std::vector<MediaRecord>> message_media(const ChatKey &chat, i64 message_id);
+
+    /// A description already made for the same content; empty when none.
+    Result<std::string> media_description(std::string_view sha1);
+
+    /// Replaces the plain-text projection of a stored message (e.g. once its
+    /// images have been described).
+    Result<void> update_message_text(const ChatKey &chat, i64 message_id, std::string_view text);
 
     /// Adds a pattern, or counts it again when the style is already known
     /// (the newest situation wins).

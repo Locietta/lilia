@@ -265,6 +265,7 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
     auto stored = to_stored(message);
     if (auto added = store.add_message(stored); added.has_error()) log::error("cannot store message: {}", added.error().message());
     if (archiver && session && !archive::collect_media(message.message).empty()) {
+        archiver->track(stored.chat, stored.message_id);
         spawn(archiver->archive(session, stored, message.message));
     }
     auto &state = chats[stored.chat];
@@ -334,6 +335,14 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             co_await send_and_record(this, chat, std::move(notice));
         }
         co_return;
+    }
+
+    // Let image descriptions of the new messages land before deciding, so she
+    // reacts to what a picture shows rather than to "[图片]".
+    if (archiver && realtime) {
+        std::vector<i64> ids;
+        for (const auto &message : fresh) ids.push_back(message.message_id);
+        co_await archiver->wait_for(chat, std::move(ids), std::chrono::seconds(settings.image_wait_seconds));
     }
 
     auto recent = store.recent_messages(chat, settings.context_messages);

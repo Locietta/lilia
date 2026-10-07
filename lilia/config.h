@@ -35,6 +35,8 @@ struct ModelConfig {
     /// style while the planner stays on `base_url`. Empty means the same.
     std::string writer_base_url;
     std::string writer_api_key; ///< secret; e.g. "$MINIMAX_API_KEY"
+    /// Describes images and stickers (on `base_url`); empty disables it.
+    std::string vision_model = "deepseek-flash";
     /// Offer the provider-hosted web_search server tool. A searched answer
     /// costs tens of thousands of input tokens with DeepSeek.
     bool web_search = true;
@@ -66,6 +68,8 @@ struct ChatConfig {
     double alt_style_probability = 0.15;
     /// Typing-delay speed for multi-message replies; 0 sends immediately.
     double typing_speed = 1.0;
+    /// How long a turn waits for new images to be described.
+    u32 image_wait_seconds = 8;
     /// Input plus output tokens per local calendar day across all chats.
     u64 daily_token_budget = 2'000'000;
     usize max_reply_bytes = 1'500;

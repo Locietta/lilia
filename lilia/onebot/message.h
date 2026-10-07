@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -32,5 +33,9 @@ std::string text_only(const Message &message);
 /// mentions as "@name", images and stickers as bracketed placeholders.
 /// Reply segments are omitted; callers render quoting separately.
 std::string render_plain(const Message &message);
+
+/// Same, with descriptions for some segments (by index): an image or sticker
+/// with one renders as "[图片: description]" / "[表情: description]".
+std::string render_plain(const Message &message, const std::map<usize, std::string> &descriptions);
 
 } // namespace lilia::onebot

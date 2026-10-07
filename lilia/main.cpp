@@ -106,6 +106,10 @@ Task<int> run_app(const Config &config) {
     chat::Responder responder(config, *store, make_planner(config.model), make_searcher(config.model), make_writer(config.model),
                               data_dir / "persona.md", [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     archive::Archiver archiver(config.archive, data_dir, *store);
+    if (!config.model.vision_model.empty()) {
+        archiver.vision = make_vision(config.model);
+        archiver.vision_model = config.model.vision_model;
+    }
     if (config.archive.enabled) responder.archiver = &archiver;
     learn::Learner learner(config.learning, config.chat.name, *store, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });

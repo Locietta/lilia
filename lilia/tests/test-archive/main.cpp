@@ -1,4 +1,6 @@
 #include <cstdio>
+#include <filesystem>
+#include <random>
 #include <string>
 
 #include <lilia/archive/archiver.h>
@@ -64,6 +66,62 @@ void test_paths() {
     require(!archive::map_container_path("/app/.config/QQ/../../etc/passwd", config), "parent traversal is refused");
 }
 
+void test_descriptions() {
+    require(archive::image_media_type(".png") == "image/png" && archive::image_media_type(".jpg") == "image/jpeg" &&
+                archive::image_media_type(".gif") == "image/gif" && archive::image_media_type(".webp") == "image/webp",
+            "image media types");
+    require(archive::image_media_type(".amr").empty() && archive::image_media_type(".mp4").empty(), "non-images have none");
+
+    auto sticker = segment("image", {{"file", "a.gif"}});
+    sticker.data["sub_type"] = int64_t{1};
+    const onebot::Message message{onebot::text_segment("看"), segment("image", {{"file", "b.jpg"}}), sticker,
+                                  segment("mface", {{"summary", "[开心]"}}), segment("record", {})};
+    require(onebot::render_plain(message, {{1, "一只猫"}, {2, "狗头"}, {3, "开心地转圈"}, {4, "不会用到"}}) ==
+                "看[图片: 一只猫][表情: 狗头][表情: 开心地转圈][语音]",
+            "described images and stickers render their descriptions; other segments ignore them");
+    require(onebot::render_plain(message) == "看[图片][表情][表情: 开心][语音]", "without descriptions nothing changes");
+
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    const store::ChatKey chat{.type = "group", .id = 7};
+    require(db->add_media({.chat = chat, .message_id = 1, .kind = "image", .status = "stored", .sha1 = "abc", .description = "一只猫"})
+                .has_value(),
+            "media with a description");
+    require(*db->media_description("abc") == "一只猫", "description cache hit by content");
+    require(db->media_description("zzz")->empty(), "cache miss");
+    require(db->add_message({.chat = chat, .message_id = 1, .text = "[图片]"}).has_value(), "message");
+    require(db->update_message_text(chat, 1, "[图片: 一只猫]").has_value(), "update");
+    require(db->recent_messages(chat, 1)->front().text == "[图片: 一只猫]", "the message text is replaced");
+}
+
+/// A database created by schema 3 gains media.description in place.
+void test_migration() {
+    const auto dir = std::filesystem::temp_directory_path() / ("lilia-test-migrate-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(dir);
+    const auto path = dir / "lilia.db";
+    {
+        auto old = store::Database::open(path);
+        require(old.has_value(), "open old");
+        require(old->execute("CREATE TABLE media (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL, chat_id INTEGER NOT NULL, "
+                             "message_id INTEGER NOT NULL, segment_index INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, "
+                             "sha1 TEXT NOT NULL, path TEXT NOT NULL, bytes INTEGER NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, "
+                             "error TEXT NOT NULL, time INTEGER NOT NULL, UNIQUE (chat_type, chat_id, message_id, segment_index)); "
+                             "INSERT INTO media VALUES (1, 'group', 7, 1, 0, 'image', 'stored', 'old', 'p', 1, '', '', '', 1); "
+                             "PRAGMA user_version = 3;")
+                    .has_value(),
+                "old schema");
+    }
+    {
+        auto migrated = store::Store::open(path);
+        require(migrated.has_value(), migrated ? std::string() : migrated.error().message());
+        auto rows = migrated->message_media({.type = "group", .id = 7}, 1);
+        require(rows.has_value() && rows->size() == 1 && rows->front().sha1 == "old" && rows->front().description.empty(),
+                "old rows survive with an empty description");
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 void test_media_rows() {
     auto db = store::Store::open_memory();
     require(db.has_value(), "open");
@@ -95,6 +153,8 @@ int main() {
         test_extensions();
         test_paths();
         test_media_rows();
+        test_descriptions();
+        test_migration();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

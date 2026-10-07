@@ -89,6 +89,10 @@ provider::Provider make_planner(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.planner_model, model.planner_max_tokens, true);
 }
 
+provider::Provider make_vision(const ModelConfig &model) {
+    return make_client(model, model.base_url, model.api_key, model.vision_model, 400);
+}
+
 provider::Provider make_learner(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.planner_model, 1'000, true);
 }

@@ -15,6 +15,8 @@ namespace lilia {
 provider::Provider make_planner(const ModelConfig &model);
 provider::Provider make_searcher(const ModelConfig &model);
 provider::Provider make_writer(const ModelConfig &model);
+/// Image and sticker descriptions (`vision_model` on `base_url`).
+provider::Provider make_vision(const ModelConfig &model);
 /// Expression learner: the planner's model, must call record_expressions.
 provider::Provider make_learner(const ModelConfig &model);
 

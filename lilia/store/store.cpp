@@ -7,8 +7,8 @@ namespace lilia::store {
 
 namespace {
 
-// 2: media table. 3: expressions table.
-constexpr int k_schema_version = 3;
+// 2: media table. 3: expressions table. 4: media.description.
+constexpr int k_schema_version = 4;
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS media (
     source TEXT NOT NULL,
     error TEXT NOT NULL,
     time INTEGER NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
     UNIQUE (chat_type, chat_id, message_id, segment_index)
 );
 CREATE INDEX IF NOT EXISTS media_by_sha1 ON media (sha1);
@@ -91,6 +92,11 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
 
     auto created = store.database.execute(k_schema);
     if (created.has_error()) return lighter::outcome_error(std::move(created).error());
+    // The media table predates its description column in versions 2 and 3.
+    if (current == 2 || current == 3) {
+        auto added = store.database.execute("ALTER TABLE media ADD COLUMN description TEXT NOT NULL DEFAULT ''");
+        if (added.has_error()) return lighter::outcome_error(std::move(added).error());
+    }
     auto stamped = store.database.execute("PRAGMA user_version = " + std::to_string(k_schema_version));
     if (stamped.has_error()) return lighter::outcome_error(std::move(stamped).error());
     return store;
@@ -192,9 +198,9 @@ Result<u64> Store::tokens_since(i64 since) {
 
 Result<void> Store::add_media(const MediaRecord &media) {
     // A retry after a failure replaces the earlier row for the same segment.
-    auto statement =
-        database.prepare("INSERT OR REPLACE INTO media (chat_type, chat_id, message_id, segment_index, kind, status, sha1, "
-                         "path, bytes, name, source, error, time) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
+    auto statement = database.prepare("INSERT OR REPLACE INTO media (chat_type, chat_id, message_id, segment_index, kind, status, sha1, "
+                                      "path, bytes, name, source, error, time, description) "
+                                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, media.chat.type);
     statement->bind(2, media.chat.id);
@@ -209,6 +215,26 @@ Result<void> Store::add_media(const MediaRecord &media) {
     statement->bind(11, media.source);
     statement->bind(12, media.error);
     statement->bind(13, media.time);
+    statement->bind(14, media.description);
+    return statement->run();
+}
+
+Result<std::string> Store::media_description(std::string_view sha1) {
+    auto statement = database.prepare("SELECT description FROM media WHERE sha1 = ?1 AND description != '' LIMIT 1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, sha1);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    return *row ? statement->column_text(0) : std::string();
+}
+
+Result<void> Store::update_message_text(const ChatKey &chat, i64 message_id, std::string_view text) {
+    auto statement = database.prepare("UPDATE messages SET text = ?4 WHERE chat_type = ?1 AND chat_id = ?2 AND message_id = ?3");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, message_id);
+    statement->bind(4, text);
     return statement->run();
 }
 
@@ -253,8 +279,9 @@ Result<void> Store::prune_expressions(usize keep) {
 }
 
 Result<std::vector<MediaRecord>> Store::message_media(const ChatKey &chat, i64 message_id) {
-    auto statement = database.prepare("SELECT segment_index, kind, status, sha1, path, bytes, name, source, error, time FROM media "
-                                      "WHERE chat_type = ?1 AND chat_id = ?2 AND message_id = ?3 ORDER BY segment_index");
+    auto statement =
+        database.prepare("SELECT segment_index, kind, status, sha1, path, bytes, name, source, error, time, description FROM media "
+                         "WHERE chat_type = ?1 AND chat_id = ?2 AND message_id = ?3 ORDER BY segment_index");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, chat.type);
     statement->bind(2, chat.id);
@@ -278,6 +305,7 @@ Result<std::vector<MediaRecord>> Store::message_media(const ChatKey &chat, i64 m
             .source = statement->column_text(7),
             .error = statement->column_text(8),
             .time = statement->column_int(9),
+            .description = statement->column_text(10),
         });
     }
     return media;

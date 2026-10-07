@@ -46,7 +46,13 @@ struct OpaquePart {
     std::string payload;
 };
 
-using Part = std::variant<TextPart, ToolCall, ToolOutcome, OpaquePart>;
+/// An inline image in a user message, base64-encoded.
+struct ImagePart {
+    std::string media_type; ///< image/png, image/jpeg, image/gif or image/webp
+    std::string data;
+};
+
+using Part = std::variant<TextPart, ToolCall, ToolOutcome, OpaquePart, ImagePart>;
 
 enum struct MessagePhase {
     UNSPECIFIED,
@@ -197,7 +203,7 @@ inline void append_tool_outcomes(History &history, std::vector<ToolOutcome> outc
 template <>
 struct glz::meta<lilia::provider::Part> {
     static constexpr std::string_view tag = "type";
-    static constexpr auto ids = std::array{"text", "tool_call", "tool_outcome", "opaque"};
+    static constexpr auto ids = std::array{"text", "tool_call", "tool_outcome", "opaque", "image"};
 };
 
 template <>

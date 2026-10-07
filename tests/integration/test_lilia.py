@@ -12,6 +12,7 @@ one llm_calls row, and nothing from the ignored group.
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -102,6 +103,14 @@ def start_model_server():
                 data = planner_answer(body)
             elif "record_expressions" in tools:
                 data = learner_answer()
+            elif has_image(body):
+                data = sse(
+                    [
+                        message_start(6),
+                        *text_block(0, VISION_TEXT),
+                        *message_end("end_turn", 9),
+                    ]
+                )
             else:
                 data = writer_answer()
             self.send_response(200)
@@ -186,6 +195,17 @@ def planner_answer(body):
             ("content_block_stop", {"type": "content_block_stop", "index": 0}),
             *message_end("tool_use", 3),
         ]
+    )
+
+
+VISION_TEXT = "一只橘猫趴在键盘上\n睡着了"
+
+
+def has_image(body):
+    return any(
+        isinstance(message["content"], list)
+        and any(block.get("type") == "image" for block in message["content"])
+        for message in body["messages"]
     )
 
 
@@ -516,7 +536,12 @@ def test_reply_and_reconnect(tmp_path):
         return [tool.get("name") for tool in body.get("tools", [])]
 
     learners = [b for b in model_state["bodies"] if "record_expressions" in offered(b)]
-    turns = [b for b in model_state["bodies"] if b not in learners]
+    visions = [b for b in model_state["bodies"] if has_image(b)]
+    turns = [b for b in model_state["bodies"] if b not in learners and b not in visions]
+    assert len(visions) == 1, "the picture is described once; voice is not an image"
+    image = visions[0]["messages"][0]["content"][0]
+    assert image["source"]["media_type"] == "image/png"
+    assert base64.b64decode(image["source"]["data"]) == PNG_BYTES
     assert len(learners) == 1, "one learning batch from the ignored group"
     learned_from = learners[0]["messages"][-1]["content"][0]["text"]
     assert learned_from == "1. 群友1: 别理我\n2. 群友1: 笑死 这也行\n", learned_from
@@ -530,7 +555,10 @@ def test_reply_and_reconnect(tmp_path):
     assert planner.get("thinking") == {"type": "disabled"}, "thinking is off by default"
     assert planner.get("tool_choice") == {"type": "any"}, "the planner must call a tool"
     log = planner["messages"][-1]["content"][0]["text"]
-    assert "你好呀" in log and "[图片][语音]" in log and "别理我" not in log
+    assert "你好呀" in log and "[图片: 一只橘猫趴在键盘上 睡着了][语音]" in log, (
+        "the turn waits for the description and sees it"
+    )
+    assert "别理我" not in log
     assert "tools" not in writer, "no search unless the planner asks for it"
     assert "莉莉娅" in writer["system"] and "测试群" in writer["system"]
     last = writer["messages"][-1]
@@ -548,7 +576,7 @@ def test_reply_and_reconnect(tmp_path):
         "SELECT chat_id, message_id, from_self, text FROM messages ORDER BY id"
     ).fetchall()
     assert rows == [
-        (GROUP, MEDIA_ID, 0, "[图片][语音]"),
+        (GROUP, MEDIA_ID, 0, "[图片: 一只橘猫趴在键盘上 睡着了][语音]"),
         (GROUP, TRIGGER_ID, 0, "@lilia 你好呀"),
         (GROUP, 777, 1, "fake reply"),
     ], rows
@@ -561,12 +589,14 @@ def test_reply_and_reconnect(tmp_path):
         "SELECT chat_id, input_tokens, output_tokens, request_id, error FROM llm_calls "
         "WHERE chat_type = 'group' ORDER BY id"
     ).fetchall()
-    assert calls == [(GROUP, 5, 3, "req_test", ""), (GROUP, 10, 12, "req_test", "")], (
-        calls
-    )
+    assert calls == [
+        (GROUP, 6, 9, "req_test", ""),
+        (GROUP, 5, 3, "req_test", ""),
+        (GROUP, 10, 12, "req_test", ""),
+    ], ("vision, planner, writer", calls)
 
     media = db.execute(
-        "SELECT chat_id, message_id, segment_index, kind, status, sha1, path, bytes, error "
+        "SELECT chat_id, message_id, segment_index, kind, status, sha1, path, bytes, error, description "
         "FROM media ORDER BY segment_index"
     ).fetchall()
     db.close()
@@ -583,6 +613,7 @@ def test_reply_and_reconnect(tmp_path):
             f"media/{png_sha1[:2]}/{png_sha1}.png",
             len(PNG_BYTES),
             "",
+            "一只橘猫趴在键盘上 睡着了",
         ),
         (
             GROUP,
@@ -593,6 +624,7 @@ def test_reply_and_reconnect(tmp_path):
             voice_sha1,
             f"media/{voice_sha1[:2]}/{voice_sha1}.amr",
             len(VOICE_BYTES),
+            "",
             "",
         ),
     ], media

@@ -7,11 +7,14 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <tuple>
 #include <utility>
+#include <variant>
 
 #include <curl/curl.h>
 #include <glaze/json.hpp>
 
+#include <lighter/async/runtime/timeout.h>
 #include <lighter/http/bound_client.h>
 
 #include <lilia/log.h>
@@ -48,6 +51,37 @@ struct FileUrl {
 };
 
 bool is_http(std::string_view text) { return text.starts_with("http://") || text.starts_with("https://"); }
+
+/// Anthropic's limit for one inline image.
+constexpr usize k_max_vision_bytes = 5 * 1024 * 1024;
+constexpr usize k_max_description_code_points = 120;
+
+constexpr std::string_view k_vision_prompt =
+    "用一两句中文描述这张图，像跟朋友转述一样简洁。是表情包的话说它表达的情绪或者梗；图上有文字就照写出来。不要用 Markdown，不要换行。";
+
+/// Collapses whitespace and newlines and bounds the length.
+std::string one_line(std::string_view text) {
+    std::string out;
+    bool space = false;
+    for (const char c : text) {
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+            space = !out.empty();
+            continue;
+        }
+        if (space) out.push_back(' ');
+        space = false;
+        out.push_back(c);
+    }
+    usize kept = 0;
+    usize bytes = 0;
+    while (bytes < out.size() && kept < k_max_description_code_points) {
+        ++bytes;
+        while (bytes < out.size() && (static_cast<unsigned char>(out[bytes]) & 0xC0) == 0x80) ++bytes;
+        ++kept;
+    }
+    if (bytes < out.size()) out = out.substr(0, bytes) + "…";
+    return out;
+}
 
 std::string sha1_hex(std::string_view bytes) {
     static constexpr std::string_view k_hex = "0123456789abcdef";
@@ -145,7 +179,52 @@ Result<void> write_content(const std::filesystem::path &target, std::string_view
     return {};
 }
 
-Task<> archive_one(Archiver &archiver, const std::shared_ptr<onebot::Session> &session, const store::StoredMessage &message, MediaRef ref) {
+/// One or two sentences about an image, cached by content hash; empty when
+/// there is no vision model, the format is unsupported or the call fails.
+Task<std::string> describe(Archiver &archiver, const store::ChatKey &chat, const std::string &sha1, const std::string &bytes,
+                           const std::string &extension) {
+    if (!archiver.vision) co_return std::string();
+    const auto media_type = image_media_type(extension);
+    if (media_type.empty() || bytes.size() > k_max_vision_bytes) co_return std::string();
+    if (auto cached = archiver.store.media_description(sha1); cached.has_value() && !cached->empty()) co_return std::move(*cached);
+
+    provider::History history;
+    history.push_back({.role = provider::Role::USER,
+                       .parts = {provider::ImagePart{.media_type = std::string(media_type), .data = net::base64_encode(bytes)},
+                                 provider::TextPart{.text = std::string(k_vision_prompt)}}});
+    std::string text;
+    const provider::StreamCallbacks callbacks{
+        .on_item_completed =
+            [&text](const provider::OutputItem &item) {
+                if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
+                    for (const auto &part : message->parts) text += part.text;
+                }
+            },
+    };
+    const auto started = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    auto completion = co_await (*archiver.vision)->complete(history, {}, callbacks);
+
+    store::LlmCall call{.time = started, .chat = chat, .model = archiver.vision_model};
+    if (completion.has_error()) {
+        call.error = completion.error().message();
+        log::warn("describing an image failed: {}", call.error);
+    } else {
+        if (!completion->model.empty()) call.model = completion->model;
+        call.input_tokens = completion->usage.input_tokens;
+        call.output_tokens = completion->usage.output_tokens;
+        call.cache_read_tokens = completion->usage.cache_read_tokens;
+        call.stop = completion->stop_detail;
+        call.request_id = completion->request_id;
+    }
+    if (auto recorded = archiver.store.add_llm_call(call); recorded.has_error()) {
+        log::error("cannot record model call: {}", recorded.error().message());
+    }
+    if (completion.has_error()) co_return std::string();
+    co_return one_line(text);
+}
+
+Task<std::string> archive_one(Archiver &archiver, const std::shared_ptr<onebot::Session> &session, const store::StoredMessage &message,
+                              MediaRef ref) {
     store::MediaRecord record{
         .chat = message.chat,
         .message_id = message.message_id,
@@ -178,8 +257,12 @@ Task<> archive_one(Archiver &archiver, const std::shared_ptr<onebot::Session> &s
             record.bytes = static_cast<i64>(bytes.size());
         }
         record.source = std::move(fetched->source);
+        if (ref.kind == MediaKind::IMAGE || ref.kind == MediaKind::STICKER) {
+            record.description = co_await describe(archiver, message.chat, record.sha1, bytes, relative.extension().string());
+        }
     }
     if (auto added = archiver.store.add_media(record); added.has_error()) log::error("cannot record media: {}", added.error().message());
+    co_return record.description;
 }
 
 /// Returns the archive slot even when the task is cancelled mid-download.
@@ -276,15 +359,61 @@ std::optional<std::filesystem::path> map_container_path(std::string_view contain
     return std::filesystem::path(config.host_qq_dir) / relative;
 }
 
+std::string_view image_media_type(std::string_view extension) {
+    if (extension == ".png") return "image/png";
+    if (extension == ".jpg" || extension == ".jpeg") return "image/jpeg";
+    if (extension == ".gif") return "image/gif";
+    if (extension == ".webp") return "image/webp";
+    return {};
+}
+
 Archiver::Archiver(const ArchiveConfig &config, std::filesystem::path data_dir, store::Store &store)
     : config(config), data_dir(std::move(data_dir)), store(store) {}
 
+void Archiver::track(const store::ChatKey &chat, i64 message_id) {
+    pending.try_emplace({chat.type, chat.id, message_id}, std::make_shared<lighter::Event>());
+}
+
 Task<> Archiver::archive(std::shared_ptr<onebot::Session> session, store::StoredMessage message, onebot::Message segments) {
+    // Wake waiting turns however this ends.
+    struct Done {
+        Archiver *archiver;
+        std::tuple<std::string, i64, i64> key;
+        ~Done() {
+            const auto it = archiver->pending.find(key);
+            if (it == archiver->pending.end()) return;
+            auto event = it->second;
+            archiver->pending.erase(it);
+            event->set();
+        }
+    } done{this, {message.chat.type, message.chat.id, message.message_id}};
+
     const auto refs = collect_media(segments);
     if (refs.empty()) co_return;
     co_await slots.acquire();
     SlotGuard guard(slots);
-    for (const auto &ref : refs) co_await archive_one(*this, session, message, ref);
+    std::map<usize, std::string> descriptions;
+    for (const auto &ref : refs) {
+        auto description = co_await archive_one(*this, session, message, ref);
+        if (!description.empty()) descriptions.emplace(ref.segment_index, std::move(description));
+    }
+    if (descriptions.empty()) co_return;
+    const auto text = onebot::render_plain(segments, descriptions);
+    if (auto updated = store.update_message_text(message.chat, message.message_id, text); updated.has_error()) {
+        log::error("cannot update message text: {}", updated.error().message());
+    }
+}
+
+Task<> Archiver::wait_for(store::ChatKey chat, std::vector<i64> message_ids, std::chrono::milliseconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    for (const auto id : message_ids) {
+        const auto it = pending.find({chat.type, chat.id, id});
+        if (it == pending.end()) continue;
+        auto event = it->second; // keeps the event alive if archive() finishes meanwhile
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (left <= std::chrono::milliseconds(0)) co_return;
+        std::ignore = co_await lighter::with_timeout(event->wait(), left);
+    }
 }
 
 } // namespace lilia::archive

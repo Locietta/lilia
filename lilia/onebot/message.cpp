@@ -97,10 +97,19 @@ std::string text_only(const Message &message) {
     return out;
 }
 
-std::string render_plain(const Message &message) {
+std::string render_plain(const Message &message) { return render_plain(message, {}); }
+
+std::string render_plain(const Message &message, const std::map<usize, std::string> &descriptions) {
     std::string out;
-    for (const auto &segment : message) {
+    for (usize index = 0; index < message.size(); ++index) {
+        const auto &segment = message[index];
         const auto &type = segment.type;
+        const auto described = descriptions.find(index);
+        if (described != descriptions.end() && (type == "image" || type == "mface")) {
+            const bool sticker = type == "mface" || data_integer(segment, "sub_type").value_or(0) == 1;
+            out += std::string(sticker ? "[表情: " : "[图片: ") + described->second + "]";
+            continue;
+        }
         if (type == "text") {
             out += data_string(segment, "text").value_or("");
         } else if (type == "at") {

@@ -71,8 +71,18 @@ struct WebFetchToolResultBlock {
     glz::generic content;
 };
 
+/// Requests only: an inline base64 image in a user message.
+struct ImageBlock {
+    struct Source {
+        std::string type = "base64";
+        std::string media_type;
+        std::string data;
+    };
+    Source source;
+};
+
 using ContentBlock = std::variant<TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, RedactedThinkingBlock, ServerToolUseBlock,
-                                  WebSearchToolResultBlock, WebFetchToolResultBlock>;
+                                  WebSearchToolResultBlock, WebFetchToolResultBlock, ImageBlock>;
 
 struct Tool {
     std::optional<std::string> type;
@@ -150,7 +160,8 @@ struct glz::meta<lilia::anthropic::wire::ContentBlock> {
                                            "redacted_thinking",
                                            "server_tool_use",
                                            "web_search_tool_result",
-                                           "web_fetch_tool_result"};
+                                           "web_fetch_tool_result",
+                                           "image"};
 };
 
 namespace lilia::anthropic {
@@ -265,6 +276,8 @@ Result<WireHistory> to_wire(const provider::History &history) {
                     .content = render_tool_outcome(*result),
                     .is_error = tool_outcome_is_error(result->kind),
                 });
+            } else if (const auto *image = std::get_if<provider::ImagePart>(&part)) {
+                message.content.push_back(wire::ImageBlock{.source = {.media_type = image->media_type, .data = image->data}});
             } else if (const auto *opaque = std::get_if<provider::OpaquePart>(&part)) {
                 if (opaque->provider_tag != k_provider_tag) {
                     continue; // another provider's private state

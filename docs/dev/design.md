@@ -54,6 +54,12 @@ quote, style, search, intent)` or `stay_silent(reason)`. If she was
     including failures and `too_large` (default cap 50 MB).
   - **Concurrency:** at most two messages are archived at a time; media from
     other chats is never fetched.
+  - **Image reading:** after a picture or sticker is stored, one
+    `vision_model` call (DeepSeek, image block plus a short prompt) describes
+    it in a sentence or two, including any text in it. Descriptions are cached
+    by content hash in `media.description`. The stored message text is then
+    re-rendered as `[图片: …]` / `[表情: …]`, and a turn waits up to
+    `image_wait_seconds` for descriptions of its new messages before planning.
 - **`store/`**: SQLite in WAL mode. Only allow-listed chats are stored; the bot
   account is also a member of unrelated groups.
 - **`main`**:
