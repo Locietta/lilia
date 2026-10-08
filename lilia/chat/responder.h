@@ -82,6 +82,12 @@ struct Responder {
     provider::Provider planner;
     provider::Provider searcher;
     provider::Provider writer;
+    /// Tried in order when `writer` fails or returns nothing.
+    struct NamedProvider {
+        std::string model;
+        provider::Provider provider;
+    };
+    std::vector<NamedProvider> writer_fallbacks;
     std::filesystem::path persona_path;
     std::string persona;
     /// The writer's rules (writer.md); replays may swap in a variant.

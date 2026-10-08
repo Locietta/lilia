@@ -31,6 +31,9 @@ struct ClientOptions {
     /// Send `thinking: {"type": "disabled"}` when no reasoning effort is set.
     /// DeepSeek's Anthropic endpoint thinks by default otherwise.
     bool disable_thinking = false;
+    /// The "off" value: "disabled" for most models; newer Claude models
+    /// (claude-sonnet-5-5) reject it and want "between_tools".
+    std::string thinking_off = "disabled";
     /// Send `tool_choice: {"type": "any"}` whenever tools are offered, so
     /// the model must call one of them.
     bool require_tool = false;

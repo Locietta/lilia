@@ -2,9 +2,11 @@
 
 #include <filesystem>
 #include <optional>
+#include <vector>
 
 #include <lighter/async/runtime/task.h>
 
+#include <lilia/chat/responder.h>
 #include <lilia/config.h>
 #include <lilia/provider/provider.h>
 
@@ -15,6 +17,7 @@ namespace lilia {
 provider::Provider make_planner(const ModelConfig &model);
 provider::Provider make_searcher(const ModelConfig &model);
 provider::Provider make_writer(const ModelConfig &model);
+std::vector<chat::Responder::NamedProvider> make_writer_fallbacks(const ModelConfig &model);
 /// Image and sticker descriptions (`vision_model` on `base_url`).
 provider::Provider make_vision(const ModelConfig &model);
 /// Expression learner: the planner's model, must call record_expressions.

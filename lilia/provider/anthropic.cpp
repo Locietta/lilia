@@ -924,7 +924,7 @@ Result<std::string> encode_complete_request(const provider::History &history, co
         request.thinking = wire::MessageRequest::Thinking{};
         request.output_config = wire::MessageRequest::OutputConfig{.effort = *options.reasoning_effort};
     } else if (options.disable_thinking) {
-        request.thinking = wire::MessageRequest::Thinking{.type = "disabled"};
+        request.thinking = wire::MessageRequest::Thinking{.type = options.thinking_off};
     }
 
     auto encoded = json::to_string(request);

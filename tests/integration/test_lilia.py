@@ -72,6 +72,9 @@ def text_block(index, text):
     ]
 
 
+BROKEN_WRITER = "broken-writer"
+
+
 def start_model_server():
     state = {"bodies": [], "errors": [], "gets": []}
 
@@ -97,6 +100,22 @@ def start_model_server():
             except AssertionError as error:
                 state["errors"].append(str(error))
                 self.send_error(500, str(error))
+                return
+            if body.get("model") == BROKEN_WRITER:
+                # The primary writer is down; lilia must fall back.
+                error = json.dumps(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "writer is down",
+                        },
+                    }
+                )
+                self.send_response(400)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(error.encode())
                 return
             tools = [tool.get("name") for tool in body.get("tools", [])]
             if "reply" in tools:
@@ -495,7 +514,8 @@ def test_reply_and_reconnect(tmp_path):
                 },
                 "model": {
                     "base_url": f"http://127.0.0.1:{model.server_port}",
-                    "model": "fake-model",
+                    "model": BROKEN_WRITER,
+                    "writer_fallbacks": [{"model": "fake-model"}],
                     "api_key": "$LILIA_TEST_KEY",
                 },
                 "chat": {"groups": [GROUP], "debounce_seconds": 0, "typing_speed": 0},
@@ -545,8 +565,12 @@ def test_reply_and_reconnect(tmp_path):
     assert len(learners) == 1, "one learning batch from the ignored group"
     learned_from = learners[0]["messages"][-1]["content"][0]["text"]
     assert learned_from == "1. 群友1: 别理我\n2. 群友1: 笑死 这也行\n", learned_from
-    assert len(turns) == 2, "one planner and one writer call"
-    planner, writer = turns
+    assert len(turns) == 3, "one planner call, the broken writer, then its fallback"
+    planner, broken, writer = turns
+    assert broken["model"] == BROKEN_WRITER and writer["model"] == "fake-model"
+    assert broken["messages"] == writer["messages"], (
+        "the fallback gets the same request"
+    )
     assert [tool["name"] for tool in planner["tools"]] == ["reply", "stay_silent"]
     assert (
         "莉莉娅" in planner["system"]
@@ -586,14 +610,16 @@ def test_reply_and_reconnect(tmp_path):
         "SELECT count(*) FROM llm_calls WHERE chat_type = 'learn'"
     ).fetchone() == (1,)
     calls = db.execute(
-        "SELECT chat_id, input_tokens, output_tokens, request_id, error FROM llm_calls "
+        "SELECT chat_id, model, input_tokens, output_tokens, error != '' FROM llm_calls "
         "WHERE chat_type = 'group' ORDER BY id"
     ).fetchall()
     assert calls == [
-        (GROUP, 6, 9, "req_test", ""),
-        (GROUP, 5, 3, "req_test", ""),
-        (GROUP, 10, 12, "req_test", ""),
-    ], ("vision, planner, writer", calls)
+        # The model column is what the response reports; the fake says fake-model.
+        (GROUP, "fake-model", 6, 9, 0),
+        (GROUP, "fake-model", 5, 3, 0),
+        (GROUP, BROKEN_WRITER, 0, 0, 1),
+        (GROUP, "fake-model", 10, 12, 0),
+    ], ("vision, planner, failed writer, fallback writer", calls)
 
     media = db.execute(
         "SELECT chat_id, message_id, segment_index, kind, status, sha1, path, bytes, error, description "

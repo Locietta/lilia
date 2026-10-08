@@ -20,6 +20,15 @@ struct OneBotConfig {
     std::string access_token; ///< secret; usually "$LILIA_ONEBOT_TOKEN"
 };
 
+/// Another writer to try when the previous one fails or returns nothing.
+struct WriterFallback {
+    std::string model;
+    std::string base_url; ///< empty means ModelConfig::base_url
+    std::string api_key;  ///< secret; empty means ModelConfig::api_key
+    bool bearer = false;
+    std::string thinking_off; ///< empty means "disabled"
+};
+
 struct ModelConfig {
     std::string base_url = "https://api.deepseek.com/anthropic";
     std::string model = "deepseek-flash";
@@ -38,11 +47,22 @@ struct ModelConfig {
     /// Send the writer key as "Authorization: Bearer" instead of x-api-key
     /// (some gateways want that).
     bool writer_bearer = false;
+    /// What "thinking off" is sent as; empty means "disabled". Newer Claude
+    /// models (e.g. claude-sonnet-5-5) reject that and want "between_tools".
+    std::string writer_thinking_off;
     /// Optional separate endpoint for the planner (`planner_model`); empty
     /// means `base_url`. Search, vision and learning stay on `base_url`.
     std::string planner_base_url;
     std::string planner_api_key; ///< secret
     bool planner_bearer = false;
+    std::string planner_thinking_off; ///< like writer_thinking_off
+    /// Force a tool call with tool_choice "any". Some models (e.g.
+    /// claude-sonnet-5-5) reject that; without it the prompt still asks for
+    /// a tool, and an answer without one counts as staying silent.
+    bool planner_force_tool = true;
+    /// Tried in order when the writer call fails (outage, rate limit) or
+    /// comes back empty.
+    std::vector<WriterFallback> writer_fallbacks;
     /// Writer sampling temperature; unset uses the provider default.
     std::optional<double> writer_temperature;
     /// Describes images and stickers (on `base_url`); empty disables it.

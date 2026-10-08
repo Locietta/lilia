@@ -1,5 +1,6 @@
 #include "config.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -98,13 +99,15 @@ Result<Config> load_config(const std::filesystem::path &path, bool resolve_secre
         config->model.api_key.clear();
         config->model.writer_api_key.clear();
         config->model.planner_api_key.clear();
+        for (auto &fallback : config->model.writer_fallbacks) fallback.api_key.clear();
         expand_paths(*config);
         return config;
     }
 
     const auto literal = [](const std::string &secret) { return !secret.empty() && !is_reference(secret); };
     if (literal(config->onebot.access_token) || literal(config->model.api_key) || literal(config->model.writer_api_key) ||
-        literal(config->model.planner_api_key)) {
+        literal(config->model.planner_api_key) ||
+        std::ranges::any_of(config->model.writer_fallbacks, [&](const WriterFallback &f) { return literal(f.api_key); })) {
         auto checked = check_private(path);
         if (checked.has_error()) return lighter::outcome_error(std::move(checked).error());
     }
@@ -124,6 +127,12 @@ Result<Config> load_config(const std::filesystem::path &path, bool resolve_secre
     auto planner_key = resolve_secret(config->model.planner_api_key, "model.planner_api_key");
     if (planner_key.has_error()) return lighter::outcome_error(std::move(planner_key).error());
     config->model.planner_api_key = *std::move(planner_key);
+
+    for (auto &fallback : config->model.writer_fallbacks) {
+        auto fallback_key = resolve_secret(fallback.api_key, "model.writer_fallbacks.api_key");
+        if (fallback_key.has_error()) return lighter::outcome_error(std::move(fallback_key).error());
+        fallback.api_key = *std::move(fallback_key);
+    }
     if (config->model.api_key.empty()) {
         return lighter::outcome_error(Error::config("model.api_key is required", ErrorCode::AUTH_NOT_CONFIGURED));
     }

@@ -71,13 +71,14 @@ std::string clock(i64 t) { return std::format("{:02}:{:02}", t / 60, t % 60); }
 namespace {
 
 provider::Provider make_client(const ModelConfig &model, const std::string &base_url, const std::string &api_key, const std::string &name,
-                               u32 max_tokens, bool require_tool = false, bool bearer = false) {
+                               u32 max_tokens, bool require_tool = false, bool bearer = false, const std::string &thinking_off = {}) {
     return pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
         .auth = provider::api_key_auth(api_key, bearer),
         .base_url = base_url,
         .model = name,
         .reasoning_effort = model.reasoning_effort,
         .disable_thinking = !model.thinking,
+        .thinking_off = thinking_off.empty() ? "disabled" : thinking_off,
         .require_tool = require_tool,
         .max_tokens = max_tokens,
     });
@@ -88,7 +89,8 @@ provider::Provider make_client(const ModelConfig &model, const std::string &base
 provider::Provider make_planner(const ModelConfig &model) {
     const bool own = !model.planner_base_url.empty();
     return make_client(model, own ? model.planner_base_url : model.base_url, own ? model.planner_api_key : model.api_key,
-                       model.planner_model, model.planner_max_tokens, true, own && model.planner_bearer);
+                       model.planner_model, model.planner_max_tokens, model.planner_force_tool, own && model.planner_bearer,
+                       own ? model.planner_thinking_off : std::string());
 }
 
 provider::Provider make_vision(const ModelConfig &model) {
@@ -111,9 +113,31 @@ provider::Provider make_writer(const ModelConfig &model) {
         .model = model.model,
         .reasoning_effort = model.reasoning_effort,
         .disable_thinking = !model.thinking,
+        .thinking_off = model.writer_thinking_off.empty() ? "disabled" : model.writer_thinking_off,
         .temperature = model.writer_temperature,
         .max_tokens = model.max_tokens,
     });
+}
+
+std::vector<chat::Responder::NamedProvider> make_writer_fallbacks(const ModelConfig &model) {
+    std::vector<chat::Responder::NamedProvider> fallbacks;
+    for (const auto &fallback : model.writer_fallbacks) {
+        fallbacks.push_back({
+            .model = fallback.model,
+            .provider = pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
+                .auth = provider::api_key_auth(fallback.api_key.empty() ? model.api_key : fallback.api_key,
+                                               !fallback.api_key.empty() && fallback.bearer),
+                .base_url = fallback.base_url.empty() ? model.base_url : fallback.base_url,
+                .model = fallback.model,
+                .reasoning_effort = model.reasoning_effort,
+                .disable_thinking = !model.thinking,
+                .thinking_off = fallback.thinking_off.empty() ? "disabled" : fallback.thinking_off,
+                .temperature = model.writer_temperature,
+                .max_tokens = model.max_tokens,
+            }),
+        });
+    }
+    return fallbacks;
 }
 
 namespace {
@@ -187,6 +211,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         }
         responder.writer_rules.assign(std::istreambuf_iterator<char>(input), {});
     }
+    responder.writer_fallbacks = make_writer_fallbacks(config.model);
     responder.self = {.user_id = k_replay_self, .nickname = config.chat.name};
     responder.realtime = false;
 

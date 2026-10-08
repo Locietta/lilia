@@ -455,7 +455,12 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             }(),
         .voice = config.learning.enabled ? sample_voice(store, k_voice_samples) : std::vector<std::string>{},
     });
-    const auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, {});
+    auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, {});
+    for (auto &fallback : writer_fallbacks) {
+        if (written && !final_text(*written).empty()) break;
+        log::warn("writer fallback for {}: {}", describe(chat), fallback.model);
+        written = co_await call_model(this, fallback.provider, fallback.model, "writer", chat, history, {});
+    }
     if (!written) co_return;
     log::debug("writer raw: {}", final_text(*written));
     const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
