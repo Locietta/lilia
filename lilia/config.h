@@ -181,6 +181,23 @@ struct MemoryConfig {
     double recall_score = 0.6;
 };
 
+struct StickerConfig {
+    /// Collect stickers from every group (images only, read-only) and let
+    /// lilia send registered ones. Needs model.vision_model for tagging.
+    bool enabled = false;
+    /// Groups never collected from.
+    std::vector<i64> exclude_groups;
+    /// Registered stickers she may send; popular spares replace the weakest.
+    usize max_registered = 200;
+    /// Budgets: new stickers described (vision calls) and downloads per hour.
+    usize descriptions_per_hour = 10;
+    usize downloads_per_hour = 200;
+    u64 max_bytes = 2ull * 1024 * 1024;
+    /// Candidates shown to the pick call, and the pause between her stickers.
+    usize candidates = 25;
+    i64 cooldown_seconds = 300;
+};
+
 struct Config {
     OneBotConfig onebot;
     ModelConfig model;
@@ -188,6 +205,7 @@ struct Config {
     ArchiveConfig archive;
     LearningConfig learning;
     MemoryConfig memory;
+    StickerConfig stickers;
     /// Database and persona location; empty means the platform default.
     std::string data_dir;
     std::string log_level = "info";

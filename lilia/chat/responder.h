@@ -20,6 +20,7 @@
 #include <lilia/config.h>
 #include <lilia/learn/learner.h>
 #include <lilia/memory/memory.h>
+#include <lilia/sticker/sticker.h>
 #include <lilia/onebot/session.h>
 #include <lilia/provider/provider.h>
 #include <lilia/store/store.h>
@@ -87,6 +88,8 @@ struct Responder {
         std::unordered_set<i64> requeued;
         /// The next turn is the look right after replying to this message.
         std::optional<i64> just_replied;
+        /// When she last sent a sticker here (unix seconds).
+        i64 last_sticker = 0;
     };
 
     const Config &config;
@@ -109,6 +112,9 @@ struct Responder {
     archive::Archiver *archiver = nullptr;
     /// Searchable history of the allowed chats; null when disabled.
     memory::Memory *memory = nullptr;
+    /// Collects stickers from every group and holds the pool she sends from;
+    /// null when disabled.
+    sticker::Collector *stickers = nullptr;
     /// Learns expressions from every group (read-only); null when disabled.
     learn::Learner *learner = nullptr;
     std::mt19937 rng{std::random_device{}()};

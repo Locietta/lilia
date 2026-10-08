@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -93,6 +94,25 @@ struct ChatSummary {
     std::string cue_vectors;
 };
 
+/// A sticker seen in any group. `status`: "pending" (not described yet),
+/// "registered" (may be sent), "spare" (fine but outside the pool) or
+/// "rejected". `path` is relative to the data directory.
+struct Sticker {
+    i64 id = 0;
+    std::string sha1;
+    std::string path;
+    std::string media_type;
+    i64 bytes = 0;
+    std::string description;
+    std::string tags; ///< "无语、震惊"
+    std::string status = "pending";
+    i64 seen = 1;
+    i64 used = 0;
+    i64 first_seen = 0;
+    i64 last_seen = 0;
+    i64 last_used = 0;
+};
+
 /// A stable fact about a person, quoted from their own message. `fact` is
 /// written about "TA"; `vector` as in MemoryChunk.
 struct PersonFact {
@@ -181,6 +201,17 @@ struct Store {
 
     /// Summaries of `chat`, oldest first; `limit` > 0 keeps only the newest.
     Result<std::vector<ChatSummary>> summaries(const ChatKey &chat, usize limit);
+
+    /// The sticker with this content hash, if known.
+    Result<std::optional<Sticker>> sticker_by_hash(std::string_view sha1);
+    Result<i64> add_sticker(const Sticker &sticker);
+    /// Counts another sighting.
+    Result<void> sticker_seen(i64 id, i64 time);
+    Result<void> describe_sticker(i64 id, std::string_view description, std::string_view tags, std::string_view status);
+    Result<void> set_sticker_status(i64 id, std::string_view status);
+    Result<void> sticker_used(i64 id, i64 time);
+    /// Stickers with this status, most seen first.
+    Result<std::vector<Sticker>> stickers(std::string_view status);
 
     Result<void> add_fact(const PersonFact &fact);
 

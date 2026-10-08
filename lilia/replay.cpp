@@ -167,7 +167,8 @@ std::optional<std::vector<ReplayLine>> read_log(const std::filesystem::path &log
 } // namespace
 
 Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
-                     std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt) {
+                     std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt,
+                     std::optional<std::filesystem::path> stickers) {
     auto parsed = read_log(log);
     if (!parsed) co_return 1;
     auto lines = *std::move(parsed);
@@ -214,6 +215,22 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         responder.writer_rules.assign(std::istreambuf_iterator<char>(input), {});
     }
     responder.writer_fallbacks = make_writer_fallbacks(config.model);
+    sticker::Collector collector(config.stickers, config.data_dir, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    if (stickers) {
+        auto source = store::Store::open_readonly(*stickers);
+        auto pool = source.has_value() ? source->stickers("registered") :
+                                         Result<std::vector<store::Sticker>>(lighter::outcome_error(source.error()));
+        if (pool.has_error()) {
+            std::fprintf(stderr, "%s\n", pool.error().message().c_str());
+            co_return 1;
+        }
+        for (auto sticker : *pool) {
+            sticker.path = (stickers->parent_path() / sticker.path).string(); // absolute: read from the live data dir
+            std::ignore = store->add_sticker(sticker);
+        }
+        responder.stickers = &collector;
+        print(std::format("(载入 {} 个表情包)", pool->size()));
+    }
     responder.self = {.user_id = k_replay_self, .nickname = config.chat.name};
     responder.realtime = false;
 
@@ -231,7 +248,9 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     responder.outbox = [&next_id, &sim](const store::ChatKey &, onebot::Message message) -> Task<std::optional<i64>> {
         std::string quote;
         if (onebot::reply_target(message)) quote = "↩ ";
-        print(std::format("[{}]   {}: {}{}", clock(sim), "莉莉娅", quote, onebot::render_plain(message)));
+        const bool sticker = std::ranges::any_of(message, [](const onebot::Segment &segment) { return segment.type == "image"; });
+        print(std::format("[{}]   {}: {}{}", clock(sim), "莉莉娅", quote,
+                          sticker ? std::string("[发了一张表情包]") : onebot::render_plain(message)));
         co_return ++next_id;
     };
     responder.observer = [](const store::ChatKey &, const chat::Plan &plan, const std::vector<std::string> &) {

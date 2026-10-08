@@ -33,7 +33,7 @@ using namespace std::chrono_literals;
 void print_usage(FILE *output) {
     std::fputs("usage: lilia [--config <path>] [--check-config]\n"
                "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
-               "                    [--writer-prompt <writer.md>]\n"
+               "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
                "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
@@ -117,6 +117,14 @@ Task<int> run_app(const Config &config) {
     learn::Learner learner(config.learning, config.chat.name, *store, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (config.learning.enabled) responder.learner = &learner;
+    sticker::Collector collector(config.stickers, data_dir, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    if (config.stickers.enabled) {
+        if (!config.model.vision_model.empty()) {
+            collector.vision = make_vision(config.model);
+            collector.vision_model = config.model.vision_model;
+        }
+        responder.stickers = &collector;
+    }
     memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
     if (config.memory.enabled) {
         responder.memory = &memory;
@@ -148,6 +156,7 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> persona_path;
     std::optional<std::filesystem::path> habits_db;
     std::optional<std::filesystem::path> writer_prompt;
+    std::optional<std::filesystem::path> stickers_db;
     std::optional<std::filesystem::path> learn_log;
     bool list_expressions = false;
     bool review = false;
@@ -186,6 +195,8 @@ int main(int argc, char **argv) {
             habits_db = argv[++i];
         } else if (arg == "--writer-prompt" && replay_log && i + 1 < argc) {
             writer_prompt = argv[++i];
+        } else if (arg == "--stickers" && replay_log && i + 1 < argc) {
+            stickers_db = argv[++i];
         } else if (arg == "--review" && list_expressions) {
             review = true;
         } else if (arg == "--apply" && list_expressions) {
@@ -220,7 +231,7 @@ int main(int argc, char **argv) {
         log::error("cannot watch process signals: {}", interrupts.error().message());
         return 1;
     }
-    auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt) :
+    auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db) :
                                    learn_log  ? run_learn(*config, *learn_log) :
                                    review     ? review_expressions(*config, apply, keep) :
                                                 run_app(*config),

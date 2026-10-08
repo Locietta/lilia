@@ -34,6 +34,10 @@ struct Plan {
     std::string intent;
     /// "reference" handoff: the planner's notes for the writer.
     std::string brief;
+    /// The feeling of a sticker to send with the reply ("无语"); empty: none.
+    std::string sticker;
+    /// Style "sticker": only a sticker, no words.
+    bool sticker_only = false;
     std::string reason; ///< why she stays silent
 };
 
@@ -55,6 +59,8 @@ struct PlannerInput {
     std::vector<std::string> decisions;
     /// Offer the search_history tool (long-term memory is enabled).
     bool memory_search = false;
+    /// Offer stickers (the sticker pool is not empty).
+    bool stickers = false;
     /// "- 名字：事实；事实" lines about the people in the new messages.
     std::string people;
     /// A summary of older chat the recent messages bring to mind.
@@ -66,6 +72,9 @@ struct PlannerInput {
 
 /// The planner.md rule about search_history; empty when memory is off.
 std::string_view memory_rule(bool enabled);
+
+/// The planner.md rule about stickers; empty when she has none to send.
+std::string_view sticker_rule(bool enabled);
 
 /// The planner.md line describing what it hands the writer.
 std::string_view handoff_rule(bool reference);

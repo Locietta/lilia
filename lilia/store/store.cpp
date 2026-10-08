@@ -1,15 +1,18 @@
 #include "store.h"
 
 #include <algorithm>
+#include <format>
 #include <utility>
+
+#include <sqlite3.h>
 
 namespace lilia::store {
 
 namespace {
 
 // 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
-// 6: person_facts. 7: chat_summaries.
-constexpr int k_schema_version = 7;
+// 6: person_facts. 7: chat_summaries. 8: stickers.
+constexpr int k_schema_version = 8;
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -115,6 +118,23 @@ CREATE TABLE IF NOT EXISTS chat_summaries (
     cue_vectors BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_summaries_by_chat ON chat_summaries (chat_type, chat_id, last_row);
+
+CREATE TABLE IF NOT EXISTS stickers (
+    id INTEGER PRIMARY KEY,
+    sha1 TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    seen INTEGER NOT NULL DEFAULT 1,
+    used INTEGER NOT NULL DEFAULT 0,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    last_used INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS stickers_by_status ON stickers (status, seen);
 )sql";
 
 Result<Store> initialize(Result<Database> opened, bool file_backed) {
@@ -350,6 +370,110 @@ Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize lim
         });
     }
     return summaries;
+}
+
+namespace {
+
+constexpr std::string_view k_sticker_columns =
+    "id, sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, last_seen, last_used";
+
+Sticker read_sticker(const Statement &statement) {
+    return {
+        .id = statement.column_int(0),
+        .sha1 = statement.column_text(1),
+        .path = statement.column_text(2),
+        .media_type = statement.column_text(3),
+        .bytes = statement.column_int(4),
+        .description = statement.column_text(5),
+        .tags = statement.column_text(6),
+        .status = statement.column_text(7),
+        .seen = statement.column_int(8),
+        .used = statement.column_int(9),
+        .first_seen = statement.column_int(10),
+        .last_seen = statement.column_int(11),
+        .last_used = statement.column_int(12),
+    };
+}
+
+} // namespace
+
+Result<std::optional<Sticker>> Store::sticker_by_hash(std::string_view sha1) {
+    auto statement = database.prepare(std::format("SELECT {} FROM stickers WHERE sha1 = ?1", k_sticker_columns));
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, sha1);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    if (!*row) return std::optional<Sticker>{};
+    return std::optional<Sticker>{read_sticker(*statement)};
+}
+
+Result<i64> Store::add_sticker(const Sticker &sticker) {
+    auto statement = database.prepare("INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, seen, used, "
+                                      "first_seen, last_seen, last_used) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, sticker.sha1);
+    statement->bind(2, sticker.path);
+    statement->bind(3, sticker.media_type);
+    statement->bind(4, sticker.bytes);
+    statement->bind(5, sticker.description);
+    statement->bind(6, sticker.tags);
+    statement->bind(7, sticker.status);
+    statement->bind(8, sticker.seen);
+    statement->bind(9, sticker.used);
+    statement->bind(10, sticker.first_seen);
+    statement->bind(11, sticker.last_seen);
+    statement->bind(12, sticker.last_used);
+    if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
+    return sqlite3_last_insert_rowid(database.value);
+}
+
+Result<void> Store::sticker_seen(i64 id, i64 time) {
+    auto statement = database.prepare("UPDATE stickers SET seen = seen + 1, last_seen = ?2 WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, time);
+    return statement->run();
+}
+
+Result<void> Store::describe_sticker(i64 id, std::string_view description, std::string_view tags, std::string_view status) {
+    auto statement = database.prepare("UPDATE stickers SET description = ?2, tags = ?3, status = ?4 WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, description);
+    statement->bind(3, tags);
+    statement->bind(4, status);
+    return statement->run();
+}
+
+Result<void> Store::set_sticker_status(i64 id, std::string_view status) {
+    auto statement = database.prepare("UPDATE stickers SET status = ?2 WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, status);
+    return statement->run();
+}
+
+Result<void> Store::sticker_used(i64 id, i64 time) {
+    auto statement = database.prepare("UPDATE stickers SET used = used + 1, last_used = ?2 WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, time);
+    return statement->run();
+}
+
+Result<std::vector<Sticker>> Store::stickers(std::string_view status) {
+    auto statement =
+        database.prepare(std::format("SELECT {} FROM stickers WHERE status = ?1 ORDER BY seen DESC, last_seen DESC", k_sticker_columns));
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, status);
+    std::vector<Sticker> stickers;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        stickers.push_back(read_sticker(*statement));
+    }
+    return stickers;
 }
 
 Result<void> Store::add_fact(const PersonFact &fact) {

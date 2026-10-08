@@ -30,9 +30,11 @@ provider::Provider make_learner(const ModelConfig &model);
 /// is lilia's name, an alias or `nickname`, becomes a mention.
 /// `habits`: a lilia.db (opened read-only) whose learned expressions are
 /// copied into the replay's in-memory store. `writer_prompt` replaces the
-/// built-in writer.md, for comparing prompt variants.
+/// built-in writer.md, for comparing prompt variants. `stickers`: a lilia.db
+/// whose registered stickers she may send (read-only; files from its data dir).
 lighter::Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
-                              std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt = {});
+                              std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt = {},
+                              std::optional<std::filesystem::path> stickers = {});
 
 /// Runs the expression learner over a JSONL log (same format as replay) in
 /// batches of `learning.batch_messages` and prints what it would learn.

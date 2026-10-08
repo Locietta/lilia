@@ -249,6 +249,11 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
                                                                    property("string", "一句话描述她想表达的意思，不是台词")}},
                          .required = {"target", "style", input.reference_handoff ? "brief" : "intent"}},
     });
+    if (input.stickers) {
+        auto &reply = request.tools.back().input_schema;
+        reply.properties.emplace("sticker", property("string", "可选：想配的表情包的感觉，比如\"无语\"；大多数时候不填"));
+        reply.properties["style"] = property("string", "short | normal | long | sticker（只发一张表情包）");
+    }
     if (input.memory_search) {
         request.tools.push_back({
             .name = "search_history",
@@ -264,6 +269,13 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         .input_schema = {.properties = {{"reason", property("string", "简短的理由")}}, .required = {"reason"}},
     });
     return request;
+}
+
+std::string_view sticker_rule(bool enabled) {
+    if (!enabled) return "";
+    return "- 想配个表情包时，在 reply 里填 "
+           "sticker（想表达的感觉，比如\"无语\"\"笑死\"\"好耶\"），她会在说完话后配一张；只想回一张表情包、不说话时，"
+           "style 选 sticker。别太频繁，大多数回复不需要表情包，刚发过就先别发。\n";
 }
 
 std::string_view memory_rule(bool enabled) {
@@ -302,6 +314,8 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
             .search = bool_field(input, "search"),
             .intent = string_field(input, "intent"),
             .brief = string_field(input, "brief"),
+            .sticker = string_field(input, "sticker"),
+            .sticker_only = style == "sticker",
         };
     }
     return {.reason = "no tool call"};
