@@ -7,8 +7,8 @@ namespace lilia::store {
 
 namespace {
 
-// 2: media table. 3: expressions table. 4: media.description.
-constexpr int k_schema_version = 4;
+// 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
+constexpr int k_schema_version = 5;
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -70,6 +70,20 @@ CREATE TABLE IF NOT EXISTS expressions (
     first_seen INTEGER NOT NULL,
     last_active INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS memory_chunks (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    first_row INTEGER NOT NULL,
+    last_row INTEGER NOT NULL,
+    start_time INTEGER NOT NULL,
+    end_time INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    vector BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS memory_chunks_by_chat ON memory_chunks (chat_type, chat_id, model, last_row);
 )sql";
 
 Result<Store> initialize(Result<Database> opened, bool file_backed) {
@@ -156,6 +170,96 @@ Result<std::vector<StoredMessage>> Store::recent_messages(const ChatKey &chat, u
     }
     std::ranges::reverse(messages);
     return messages;
+}
+
+Result<std::vector<StoredMessage>> Store::messages_after(const ChatKey &chat, i64 after_row, usize limit) {
+    auto statement = database.prepare("SELECT message_id, sender_id, sender_name, time, segments, text, from_self, id FROM messages "
+                                      "WHERE chat_type = ?1 AND chat_id = ?2 AND id > ?3 ORDER BY id LIMIT ?4");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, after_row);
+    statement->bind(4, static_cast<i64>(limit));
+    std::vector<StoredMessage> messages;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        messages.push_back({
+            .chat = chat,
+            .message_id = statement->column_int(0),
+            .sender_id = statement->column_int(1),
+            .sender_name = statement->column_text(2),
+            .time = statement->column_int(3),
+            .segments_json = statement->column_text(4),
+            .text = statement->column_text(5),
+            .from_self = statement->column_int(6) != 0,
+            .row_id = statement->column_int(7),
+        });
+    }
+    return messages;
+}
+
+Result<void> Store::add_chunk(const MemoryChunk &chunk) {
+    auto statement = database.prepare("INSERT INTO memory_chunks (chat_type, chat_id, first_row, last_row, start_time, end_time, text, "
+                                      "model, vector) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chunk.chat.type);
+    statement->bind(2, chunk.chat.id);
+    statement->bind(3, chunk.first_row);
+    statement->bind(4, chunk.last_row);
+    statement->bind(5, chunk.start_time);
+    statement->bind(6, chunk.end_time);
+    statement->bind(7, chunk.text);
+    statement->bind(8, chunk.model);
+    statement->bind_blob(9, chunk.vector);
+    return statement->run();
+}
+
+Result<i64> Store::last_chunk_row(const ChatKey &chat, std::string_view model) {
+    auto statement =
+        database.prepare("SELECT COALESCE(MAX(last_row), 0) FROM memory_chunks WHERE chat_type = ?1 AND chat_id = ?2 AND model = ?3");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, model);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    return *row ? statement->column_int(0) : 0;
+}
+
+Result<std::vector<MemoryChunk>> Store::chunks(const ChatKey &chat, std::string_view model) {
+    auto statement = database.prepare("SELECT id, first_row, last_row, start_time, end_time, text, vector FROM memory_chunks "
+                                      "WHERE chat_type = ?1 AND chat_id = ?2 AND model = ?3 ORDER BY last_row");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, model);
+    std::vector<MemoryChunk> chunks;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        chunks.push_back({
+            .id = statement->column_int(0),
+            .chat = chat,
+            .first_row = statement->column_int(1),
+            .last_row = statement->column_int(2),
+            .start_time = statement->column_int(3),
+            .end_time = statement->column_int(4),
+            .text = statement->column_text(5),
+            .model = std::string(model),
+            .vector = statement->column_blob(6),
+        });
+    }
+    return chunks;
+}
+
+Result<void> Store::delete_chunks_except(std::string_view model) {
+    auto statement = database.prepare("DELETE FROM memory_chunks WHERE model != ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, model);
+    return statement->run();
 }
 
 Result<bool> Store::is_own_message(const ChatKey &chat, i64 message_id) {

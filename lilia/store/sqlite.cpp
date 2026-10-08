@@ -26,6 +26,10 @@ void Statement::bind(int index, std::string_view text) {
     sqlite3_bind_text(value, index, text.data(), static_cast<int>(text.size()), SQLITE_TRANSIENT);
 }
 
+void Statement::bind_blob(int index, std::string_view bytes) {
+    sqlite3_bind_blob(value, index, bytes.data(), static_cast<int>(bytes.size()), SQLITE_TRANSIENT);
+}
+
 void Statement::bind_optional(int index, const std::optional<std::string> &text) {
     if (text)
         bind(index, std::string_view(*text));
@@ -50,6 +54,12 @@ Result<void> Statement::run() {
 }
 
 i64 Statement::column_int(int index) const { return sqlite3_column_int64(value, index); }
+
+std::string Statement::column_blob(int index) const {
+    const auto *bytes = static_cast<const char *>(sqlite3_column_blob(value, index));
+    if (!bytes) return {};
+    return std::string(bytes, static_cast<usize>(sqlite3_column_bytes(value, index)));
+}
 
 std::string Statement::column_text(int index) const {
     const auto *text = reinterpret_cast<const char *>(sqlite3_column_text(value, index));

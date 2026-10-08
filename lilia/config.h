@@ -146,12 +146,33 @@ struct LearningConfig {
     usize candidates = 10;
 };
 
+struct MemoryConfig {
+    /// Searchable history of the allowed chats; needs the local embedding
+    /// service (deployment/embedding).
+    bool enabled = false;
+    std::string embedding_url = "http://127.0.0.1:8090";
+    /// Stored with every vector; changing it drops and rebuilds all chunks.
+    std::string embedding_model = "Qwen3-Embedding-0.6B";
+    /// Prepended to search queries in Qwen3-Embedding's instruction format;
+    /// empty sends the query as is.
+    std::string query_instruction = "Given a question about a group chat, retrieve the chat messages that answer it";
+    /// Messages per chunk, and the pause that starts a new chunk.
+    usize chunk_messages = 6;
+    i64 chunk_gap_seconds = 1800;
+    /// Chunks returned per search, and the least similarity that counts.
+    usize search_results = 5;
+    double min_score = 0.35;
+    /// Searches the planner may run before deciding.
+    usize max_searches = 2;
+};
+
 struct Config {
     OneBotConfig onebot;
     ModelConfig model;
     ChatConfig chat;
     ArchiveConfig archive;
     LearningConfig learning;
+    MemoryConfig memory;
     /// Database and persona location; empty means the platform default.
     std::string data_dir;
     std::string log_level = "info";

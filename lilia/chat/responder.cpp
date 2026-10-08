@@ -82,6 +82,14 @@ store::StoredMessage to_stored(const onebot::MessageEvent &event) {
 
 std::string describe(const store::ChatKey &chat) { return chat.type + ":" + std::to_string(chat.id); }
 
+/// A string argument of a tool call; empty when missing.
+std::string string_input(const glz::generic &input, std::string_view key) {
+    if (!input.is_object()) return {};
+    const auto &object = input.get_object();
+    const auto it = object.find(key);
+    return it != object.end() && it->second.is_string() ? it->second.get_string() : std::string();
+}
+
 /// "21:05" in the chat's local time.
 std::string clock_of(i64 unix_seconds, i32 utc_offset_minutes) { return format_local_time(unix_seconds, utc_offset_minutes).substr(11); }
 
@@ -374,7 +382,11 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
     if (message.user_id == self.user_id || !chat_allowed(message, config.chat)) return std::nullopt;
 
     auto stored = to_stored(message);
-    if (auto added = store.add_message(stored); added.has_error()) log::error("cannot store message: {}", added.error().message());
+    if (auto added = store.add_message(stored); added.has_error()) {
+        log::error("cannot store message: {}", added.error().message());
+    } else if (memory) {
+        spawn(memory->index(stored.chat));
+    }
     if (archiver && session && !archive::collect_media(message.message).empty()) {
         archiver->track(stored.chat, stored.message_id);
         spawn(archiver->archive(session, stored, message.message));
@@ -481,9 +493,10 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
     const ChatInfo info{.chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self.nickname};
     PlannerInput planner_input{
-        .prompt =
-            fill_template(embedded(xmake::planner_md),
-                          {{"name", settings.name}, {"persona", persona}, {"handoff", handoff_rule(settings.handoff == "reference")}}),
+        .prompt = fill_template(embedded(xmake::planner_md), {{"name", settings.name},
+                                                              {"persona", persona},
+                                                              {"handoff", handoff_rule(settings.handoff == "reference")},
+                                                              {"memory_rule", memory_rule(memory != nullptr)}}),
         .info = info,
         .recent = log_lines,
         .addressed = addressed.has_value(),
@@ -492,13 +505,37 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .log_bytes = settings.context_bytes,
         .reference_handoff = settings.handoff == "reference",
         .decisions = {state.decisions.begin(), state.decisions.end()},
+        .memory_search = memory != nullptr,
         .just_replied = just_replied,
     };
     for (const auto &message : fresh) planner_input.fresh.push_back(message.message_id);
     const auto request = build_planner_request(planner_input);
 
     const auto selection = start_selection(this, chat, log_lines);
-    const auto planned = co_await call_model(this, planner, config.model.planner_model, "planner", chat, request.history, request.tools);
+    // The planner may look things up (search_history) before deciding; each
+    // result goes back to it as a tool result, then the tool is withdrawn.
+    auto planner_history = request.history;
+    auto planner_tools = request.tools;
+    std::string remembered;
+    std::optional<std::vector<provider::OutputItem>> planned;
+    for (usize searches = 0;; ++searches) {
+        if (!memory || searches >= config.memory.max_searches)
+            std::erase_if(planner_tools, [](const auto &tool) { return tool.name == "search_history"; });
+        planned = co_await call_model(this, planner, config.model.planner_model, "planner", chat, planner_history, planner_tools);
+        if (!planned || !memory) break;
+        const auto search = std::ranges::find_if(*planned, [](const provider::OutputItem &item) {
+            const auto *call = std::get_if<provider::ToolCallItem>(&item);
+            return call && call->call.name == "search_history";
+        });
+        if (search == planned->end()) break;
+        const auto &call = std::get<provider::ToolCallItem>(*search).call;
+        const auto query = string_input(call.input, "query");
+        const auto hits = co_await memory->search(chat, query);
+        const auto found = memory::render_hits(hits);
+        if (!hits.empty()) remembered += found;
+        for (const auto &item : *planned) provider::append_output_item(planner_history, item);
+        provider::append_tool_outcomes(planner_history, {ToolOutcome{.call_id = call.id, .receipt = found}});
+    }
     auto plan = planned ? parse_plan(*planned, request.ids) : Plan{.reason = "planner call failed"};
     if (!plan.reply && addressed) {
         // Ignoring someone who called her reads as broken, not as a choice.
@@ -567,6 +604,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .log_bytes = settings.context_bytes,
         .reference = reference,
         .habits = habits,
+        .remembered = remembered,
         .previous_reply =
             [&] {
                 const auto it = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);

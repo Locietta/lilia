@@ -19,6 +19,7 @@
 #include <lilia/chat/flow.h>
 #include <lilia/config.h>
 #include <lilia/learn/learner.h>
+#include <lilia/memory/memory.h>
 #include <lilia/onebot/session.h>
 #include <lilia/provider/provider.h>
 #include <lilia/store/store.h>
@@ -106,6 +107,8 @@ struct Responder {
     Spawn spawn;
     /// Archives media of allowed chats; null when archiving is disabled.
     archive::Archiver *archiver = nullptr;
+    /// Searchable history of the allowed chats; null when disabled.
+    memory::Memory *memory = nullptr;
     /// Learns expressions from every group (read-only); null when disabled.
     learn::Learner *learner = nullptr;
     std::mt19937 rng{std::random_device{}()};

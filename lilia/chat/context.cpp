@@ -119,6 +119,16 @@ std::string_view style_instruction(ReplyStyle style) {
     return "";
 }
 
+/// "@阿紫 芒果" -> "芒果": a typed mention is plain text in QQ, not a real @.
+std::string_view strip_leading_mention(std::string_view text) {
+    while (text.starts_with('@')) {
+        const auto space = text.find_first_of(" \n");
+        if (space == std::string_view::npos || space > 40) break;
+        text = trim(text.substr(space + 1));
+    }
+    return text;
+}
+
 /// Removes "[HH:MM] " and "name(qq): " prefixes the model may imitate.
 std::string_view strip_speaker_label(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases) {
     text = trim(text);
@@ -232,12 +242,27 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
                                                                    property("string", "一句话描述她想表达的意思，不是台词")}},
                          .required = {"target", "style", input.reference_handoff ? "brief" : "intent"}},
     });
+    if (input.memory_search) {
+        request.tools.push_back({
+            .name = "search_history",
+            .description = "搜索这个群以前的聊天记录，结果会告诉你，然后你再决定 reply 还是 stay_silent",
+            .input_schema = {.properties = {{"query",
+                                             property("string", "要找的内容，写成一句完整的问题或描述，例如\"谁说过对芒果过敏\"")}},
+                             .required = {"query"}},
+        });
+    }
     request.tools.push_back({
         .name = "stay_silent",
         .description = "这次她不说话",
         .input_schema = {.properties = {{"reason", property("string", "简短的理由")}}, .required = {"reason"}},
     });
     return request;
+}
+
+std::string_view memory_rule(bool enabled) {
+    if (!enabled) return "";
+    return "- 有人问到以前的事（\"上次\"\"之前\"\"来着\"\"还记得吗\"、过去的约定和时间、某人以前说过的话），而上面的聊天记录里没有时，"
+           "一定先用 search_history 查，不要直接让她说不记得。寒暄、接梗、看最近的聊天就能回的，不要查。\n";
 }
 
 std::string_view handoff_rule(bool reference) {
@@ -327,6 +352,9 @@ provider::History build_writer_history(const WriterInput &input) {
         if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
         note += "】";
     }
+    if (!input.remembered.empty()) {
+        note += std::format("\n【你想起来的以前的聊天，用得上就自然地用，别照抄，也别说你查过记录】\n{}", input.remembered);
+    }
     if (!input.previous_reply.empty()) {
         note += std::format("\n【你刚刚已经回复过这条消息，当时说的是：「{}」。这次是补充，别重复之前的话】", input.previous_reply);
     }
@@ -408,7 +436,7 @@ std::string strip_asides(std::string_view text) {
 }
 
 std::string clean_reply(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases, usize max_bytes) {
-    auto cleaned = strip_asides(strip_markdown(strip_speaker_label(text, info, aliases)));
+    auto cleaned = strip_asides(strip_markdown(strip_leading_mention(strip_speaker_label(text, info, aliases))));
     if (cleaned.size() <= max_bytes) return cleaned;
     constexpr std::string_view k_ellipsis = "……";
     auto bounded = bounded_utf8(cleaned, max_bytes > k_ellipsis.size() ? max_bytes - k_ellipsis.size() : 0);

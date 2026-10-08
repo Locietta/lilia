@@ -220,6 +220,11 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     const i64 base = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     i64 sim = 0;
     responder.now = [&sim, base] { return base + sim; };
+    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
+    if (config.memory.enabled) {
+        memory.now = [&sim, base] { return base + sim; };
+        responder.memory = &memory;
+    }
     i64 next_id = 1'000'000;
     responder.outbox = [&next_id, &sim](const store::ChatKey &, onebot::Message message) -> Task<std::optional<i64>> {
         std::string quote;

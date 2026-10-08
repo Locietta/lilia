@@ -303,6 +303,8 @@ void test_clean_reply() {
     require(chat::clean_reply("[21:05] lilia(你): 在的", info, aliases, 100) == "在的", "copied log prefix is stripped");
     require(chat::clean_reply("莉莉娅：嗯嗯", info, aliases, 100) == "嗯嗯", "full-width colon label is stripped");
     require(chat::clean_reply("lilia 很开心", info, aliases, 100) == "lilia 很开心", "a name without a colon is content");
+    require(chat::clean_reply("@阿紫 芒果\n昨天说的", info, aliases, 100) == "芒果\n昨天说的", "a typed leading mention is dropped");
+    require(chat::clean_reply("邮箱是 a@b.c", info, aliases, 100) == "邮箱是 a@b.c", "an @ inside the text stays");
     require(chat::strip_markdown("## 结论\n**26.3** 是最新版，a**b") == "结论\n26.3 是最新版，ab", "headings and bold are stripped");
     require(chat::strip_markdown("#话题 不是标题") == "#话题 不是标题", "a hash without a space is content");
     const std::vector<store::StoredMessage> recent{stored(1, 0, "Locietta", "@莉莉娅 玩游戏吗？"), stored(2, 0, "闭锁", "啥", true)};

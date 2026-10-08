@@ -28,6 +28,7 @@ struct StoredMessage {
     std::string segments_json;
     std::string text; ///< onebot::render_plain projection
     bool from_self = false;
+    i64 row_id = 0; ///< messages.id; filled by queries that need an order key
 };
 
 struct LlmCall {
@@ -59,6 +60,20 @@ struct MediaRecord {
     i64 time = 0;
     /// What a vision model saw in an image or sticker; empty otherwise.
     std::string description;
+};
+
+/// A few consecutive messages of one chat with their embedding, for memory
+/// search. `vector` is raw little-endian float32, as produced by `model`.
+struct MemoryChunk {
+    i64 id = 0;
+    ChatKey chat;
+    i64 first_row = 0; ///< messages.id range covered
+    i64 last_row = 0;
+    i64 start_time = 0;
+    i64 end_time = 0;
+    std::string text;
+    std::string model;
+    std::string vector;
 };
 
 /// A learned expression pattern: 当 situation 时，可以 style.
@@ -112,6 +127,21 @@ struct Store {
     /// Up to `limit` patterns picked at random, excluding the `skip_top`
     /// that `expressions` would list first.
     Result<std::vector<Expression>> random_expressions(usize skip_top, usize limit);
+
+    /// Messages of `chat` stored after row `after_row`, oldest first (with
+    /// row_id set), at most `limit`.
+    Result<std::vector<StoredMessage>> messages_after(const ChatKey &chat, i64 after_row, usize limit);
+
+    Result<void> add_chunk(const MemoryChunk &chunk);
+
+    /// The last message row covered by chunks of `model` in `chat` (0: none).
+    Result<i64> last_chunk_row(const ChatKey &chat, std::string_view model);
+
+    /// All chunks of `chat` made by `model`, oldest first.
+    Result<std::vector<MemoryChunk>> chunks(const ChatKey &chat, std::string_view model);
+
+    /// Drops chunks embedded by any other model (their vectors are not comparable).
+    Result<void> delete_chunks_except(std::string_view model);
 
     /// Deletes the patterns with these ids.
     Result<void> delete_expressions(const std::vector<i64> &ids);

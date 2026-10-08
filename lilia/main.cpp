@@ -117,6 +117,15 @@ Task<int> run_app(const Config &config) {
     learn::Learner learner(config.learning, config.chat.name, *store, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (config.learning.enabled) responder.learner = &learner;
+    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
+    if (config.memory.enabled) {
+        responder.memory = &memory;
+        // Vectors of another model are not comparable; drop them and rebuild.
+        if (auto dropped = store->delete_chunks_except(config.memory.embedding_model); dropped.has_error())
+            log::error("memory: {}", dropped.error().message());
+        for (const auto group : config.chat.groups) tasks.spawn(memory.index({.type = "group", .id = group}));
+        for (const auto user : config.chat.private_users) tasks.spawn(memory.index({.type = "private", .id = user}));
+    }
     if (auto loaded = responder.reload_persona(); loaded.has_error()) {
         log::error("{}", loaded.error().message());
         co_return 1;

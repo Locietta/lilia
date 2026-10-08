@@ -53,10 +53,15 @@ struct PlannerInput {
     /// Her latest decisions, oldest first ("[21:05] 没说话：…"), so the planner
     /// knows what she just did and why.
     std::vector<std::string> decisions;
+    /// Offer the search_history tool (long-term memory is enabled).
+    bool memory_search = false;
     /// Set on the extra turn right after a reply: the message she answered.
     /// The other new messages are offered once more.
     std::optional<i64> just_replied;
 };
+
+/// The planner.md rule about search_history; empty when memory is off.
+std::string_view memory_rule(bool enabled);
 
 /// The planner.md line describing what it hands the writer.
 std::string_view handoff_rule(bool reference);
@@ -90,6 +95,8 @@ struct WriterInput {
     std::string reference;
     /// Learned patterns the selector picked for this reply, "当X时，可以Y".
     std::vector<std::string> habits;
+    /// Older chat the planner looked up for this reply (search_history).
+    std::string remembered;
     /// What she already said to this same target, when she answers it again.
     std::string previous_reply;
     /// A random handful of phrases people in the groups actually say, to

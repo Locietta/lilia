@@ -32,6 +32,7 @@ struct Statement {
     void bind(int index, i64 value);
     void bind(int index, std::string_view value);
     void bind_optional(int index, const std::optional<std::string> &value);
+    void bind_blob(int index, std::string_view bytes);
 
     /// Advances one row. True when a row is available, false when done.
     Result<bool> step();
@@ -41,6 +42,7 @@ struct Statement {
 
     i64 column_int(int index) const;
     std::string column_text(int index) const;
+    std::string column_blob(int index) const;
 
     sqlite3_stmt *value = nullptr;
 };
