@@ -75,6 +75,8 @@ struct MemoryChunk {
     std::string text;
     std::string model;
     std::string vector;
+    /// 0..1, how recent; set at search time, never stored.
+    double recency = 0;
 };
 
 /// An incremental summary of a stretch of chat (empty `summary`: nothing

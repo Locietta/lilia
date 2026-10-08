@@ -25,6 +25,9 @@ constexpr usize k_scan_messages = 2'000;
 /// At most this many literal keyword hits add to a chunk's score.
 constexpr usize k_keyword_bonus_cap = 2;
 constexpr double k_keyword_bonus = 0.05;
+/// Up to this much for the newest chunk, fading with this time constant.
+constexpr double k_recency_bonus = 0.04;
+constexpr double k_recency_seconds = 14.0 * 86400;
 
 struct EmbeddingItem {
     usize index = 0;
@@ -126,6 +129,7 @@ std::vector<Hit> rank(std::vector<store::MemoryChunk> chunks, const std::vector<
             if (chunk.text.find(word) != std::string::npos) ++literal;
         }
         score += k_keyword_bonus * static_cast<double>(std::min(literal, k_keyword_bonus_cap));
+        score += k_recency_bonus * chunk.recency;
         if (score >= min_score) hits.push_back({.chunk = std::move(chunk), .score = score});
     }
     std::ranges::sort(hits, [](const Hit &a, const Hit &b) { return a.score > b.score; });
@@ -273,6 +277,10 @@ Task<std::vector<Hit>> Memory::search(store::ChatKey chat, std::string query) {
                 chunks->push_back(summary_chunk(summary, utc_offset_minutes));
         }
     }
+    // Newer memories win ties: a small bonus fading over about two weeks.
+    const i64 current = now();
+    for (auto &chunk : *chunks)
+        chunk.recency = std::exp(-static_cast<double>(std::max<i64>(0, current - chunk.end_time)) / k_recency_seconds);
     auto hits = rank(*std::move(chunks), vectors->front(), keywords(query), config.search_results, config.min_score);
     log::info("memory: search \"{}\" in {}:{} -> {} hit(s){}", query, chat.type, chat.id, hits.size(),
               hits.empty() ? "" : std::format(", best {:.2f}", hits.front().score));

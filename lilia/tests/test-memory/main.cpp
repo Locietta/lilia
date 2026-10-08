@@ -60,6 +60,12 @@ void test_rank_and_render() {
     hits = memory::rank(chunks, {1, 0}, {"MC"}, 1, 0);
     require(hits.size() == 1 && hits[0].chunk.id == 2 && std::abs(hits[0].score - 1.02) < 1e-3,
             "a literal keyword hit decides between close candidates");
+    std::vector<store::MemoryChunk> twins{
+        {.id = 7, .text = "old", .vector = memory::encode_vector({1, 0}), .recency = 0.1},
+        {.id = 8, .text = "new", .vector = memory::encode_vector({1, 0}), .recency = 0.9},
+    };
+    hits = memory::rank(twins, {1, 0}, {}, 2, 0);
+    require(hits.front().chunk.id == 8 && hits.front().score > hits.back().score, "of two equal matches the newer wins");
     require(memory::render_hits({}) == "没找到相关的聊天记录。", "no hits");
     const auto text = memory::render_hits(memory::rank(chunks, {1, 0}, {}, 2, 0.5));
     require(text.find("我对芒果过敏") < text.find("---") && text.find("---") < text.find("周六一起打 MC"), "hits are separated");

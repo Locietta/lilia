@@ -246,7 +246,13 @@ Task<> Collector::tag(store::Sticker sticker, std::string bytes, std::string con
     sticker.status = tagged->usable ? "spare" : "rejected";
     std::ignore = store.describe_sticker(sticker.id, sticker.description, sticker.tags, sticker.status);
     log::info("sticker: {} [{}] {}", sticker.status == "rejected" ? "rejected" : "tagged", sticker.tags, sticker.description);
-    if (tagged->usable) file_into_pool(sticker);
+    if (tagged->usable) {
+        file_into_pool(sticker);
+    } else {
+        // Kept as a row (so it is not tagged again), but the image goes.
+        std::error_code ec;
+        std::filesystem::remove(data_dir / sticker.path, ec);
+    }
 }
 
 void Collector::file_into_pool(const store::Sticker &sticker) {
