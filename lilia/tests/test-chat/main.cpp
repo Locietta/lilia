@@ -162,6 +162,7 @@ void test_writer() {
     require(history[6].role == Role::USER && last.starts_with("b: 莉莉娅你追吗\n\n【你要回应b的这条") && last.ends_with("现在，你说："),
             "the note ends the last user turn");
     require(last.find("说在追") != std::string::npos, "the intent reaches the writer");
+    require(text_of(history[1]).find("口气") == std::string::npos, "no voice section without samples");
 }
 
 void test_flow() {
@@ -192,8 +193,15 @@ void test_flow() {
     require(!chat::should_plan(flow, settings, 2010), "backoff holds below the burst size");
     flow.unseen.push_back(stored(10, 2000, "a", "x"));
     require(chat::should_plan(flow, settings, 2010), "a burst bypasses the backoff");
-    chat::note_spoke(flow, 2020);
+    chat::note_spoke(flow, 2020, 20001);
     require(flow.silent_streak == 0 && flow.backoff_until == 0, "speaking resets the backoff");
+    chat::note_silent(flow, 2030);
+    chat::note_silent(flow, 2030);
+    flow.unseen.assign(1, stored(5, 2031, "a", "x"));
+    require(!chat::should_plan(flow, settings, 2031), "others are held back by the backoff");
+    flow.unseen.push_back(stored(1, 2031, "b", "你是gpt吗"));
+    require(chat::should_plan(flow, settings, 2031), "whom she just answered is not");
+    require(!chat::should_plan(flow, settings, 2400), "only inside the conversation window");
 
     chat::FlowSettings shy{.talk_value = 0};
     chat::Flow quiet;
@@ -230,6 +238,7 @@ void test_bubbles() {
                 std::vector<std::string>({"第一段很长，很长很长很长很长很长很长很长。\n第二段"}),
             "a long reply stays one message with its lines");
     require(chat::whole_message(" \n ").empty(), "nothing to send");
+    require(chat::first_lines("一\n\n 二 \n三", 2) == "一\n二", "first lines, blanks skipped");
 
     require(chat::fit_length("短的就不动", 30) == "短的就不动", "short text is untouched");
     require(chat::fit_length("这集作画不错，打戏很顶。剧情也推进了！下周还看", 20) == "这集作画不错，打戏很顶。剧情也推进了！",

@@ -60,6 +60,18 @@ void test_parse() {
     require(learned[1].style == "用\"急了急了\"", "numeric source accepted");
     require(learn::parse_learned({tool_call("record_expressions", R"({"items": []})")}, 3).empty(), "an empty list is fine");
     require(learn::parse_learned({}, 3).empty(), "no tool call learns nothing");
+
+    const auto filtered = learn::parse_learned({tool_call("record_expressions", R"({"items": [
+            {"situation": "吐槽某个人很差劲", "style": "用「杂鱼」", "source": "1"},
+            {"situation": "调侃对方菜或者不行", "style": "用\"你怎么这么区\"", "source": "1"},
+            {"situation": "评价某人水平一般", "style": "用\"很菜\"", "source": "1"},
+            {"situation": "看到离谱的事", "style": "说「绷」", "source": "1"}
+        ]})")},
+                                               3);
+    require(filtered.size() == 1 && filtered[0].style == "用\"绷\"", "put-downs are dropped; quotes and verbs are normalized");
+    require(learn::normalize_style("回“洗澡”") == "用\"洗澡\"", "回 and curly quotes");
+    require(learn::normalize_style("句尾加\"捏\"") == "句尾加\"捏\"", "other forms stay");
+    require(!learn::blocked_expression("表示受不了", "用\"我不行了\""), "ordinary phrases pass");
 }
 
 void test_learnable_text() {
@@ -92,6 +104,9 @@ void test_store_and_sampling() {
     require(habits.size() == 3, "sample size");
     require(std::ranges::contains(habits, std::string("当觉得很好笑时，可以用\"笑死\"")), "the most counted pattern is always offered");
     require(chat::sample_habits(*store, 2, rng).size() == 2, "fewer than three candidates are all random");
+    require(chat::sample_voice(*store, 20) == std::vector<std::string>({"笑死"}),
+            "voice samples are the bare quoted phrases, without duplicates or unquoted styles");
+    require(chat::quoted_phrase("用\"何意味\"") == "何意味" && chat::quoted_phrase("句尾加个括号").empty(), "quoted phrase");
 
     require(store->prune_expressions(5).has_value(), "prune");
     require(store->expressions(100)->size() == 5, "pruned to the most counted");

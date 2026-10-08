@@ -41,6 +41,10 @@ constexpr std::array<std::string_view, 4> k_alt_styles{
 };
 
 constexpr i64 k_max_debounce_seconds = 15;
+/// Learned phrases shown to the writer as a sample of how the groups talk.
+constexpr usize k_voice_samples = 8;
+/// Messages per casual (short / normal) reply.
+constexpr usize k_casual_messages = 2;
 
 store::ChatKey chat_key(const onebot::MessageEvent &event) {
     if (event.is_group()) return {.type = "group", .id = *event.group_id};
@@ -223,6 +227,19 @@ std::vector<std::string> sample_habits(store::Store &store, usize count, std::mt
     std::vector<std::string> habits;
     for (const auto &expression : picked) habits.push_back(std::format("当{}时，可以{}", expression.situation, expression.style));
     return habits;
+}
+
+std::vector<std::string> sample_voice(store::Store &store, usize count) {
+    // Over-fetch: some styles ("句尾加…") have no quoted phrase.
+    auto rows = store.random_expressions(0, count * 2);
+    if (rows.has_error()) return {};
+    std::vector<std::string> phrases;
+    for (const auto &row : *rows) {
+        if (auto phrase = quoted_phrase(row.style); !phrase.empty() && !std::ranges::contains(phrases, phrase))
+            phrases.push_back(std::move(phrase));
+        if (phrases.size() >= count) break;
+    }
+    return phrases;
 }
 
 Responder::Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher,
@@ -432,6 +449,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                 }
                 return picked;
             }(),
+        .voice = config.learning.enabled ? sample_voice(store, k_voice_samples) : std::vector<std::string>{},
     });
     const auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, {});
     if (!written) co_return;
@@ -442,7 +460,10 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     const auto reply = fit_length(
         clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes), budget);
     // A long reply is on purpose (an explanation, a copypasta): one message.
-    const auto bubbles = plan.style == ReplyStyle::LONG && style_override.empty() ? whole_message(reply) : split_bubbles(reply);
+    // Casual replies: at most two messages. Models like a point-elaboration-
+    // conclusion triple, which reads as AI; the extra lines are add-ons.
+    const bool deliberate = plan.style == ReplyStyle::LONG && style_override.empty();
+    const auto bubbles = deliberate ? whole_message(reply) : split_bubbles(first_lines(reply, k_casual_messages), k_casual_messages);
     if (bubbles.empty()) {
         log::warn("writer returned an empty reply for {}", describe(chat));
         co_return;
@@ -456,7 +477,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         message.push_back(onebot::text_segment(bubbles[i]));
         if (!co_await send_and_record(this, chat, std::move(message))) break;
     }
-    note_spoke(state.flow, now());
+    note_spoke(state.flow, now(), target->sender_id);
 
     // One target per turn: if someone called her while she answered another
     // message, take another turn for them (the worker loop runs it next).

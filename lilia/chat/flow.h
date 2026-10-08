@@ -28,6 +28,9 @@ struct Flow {
     std::optional<i64> addressed;
     i64 last_arrival = 0; ///< unix seconds the newest unseen message arrived
     i64 last_spoke = 0;
+    /// Whom she last answered; their messages inside the window always reach
+    /// the planner, backoff or not (they are probably talking to her).
+    i64 partner = 0;
     u32 silent_streak = 0;
     i64 backoff_until = 0;
 };
@@ -38,6 +41,6 @@ bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now);
 /// (15s, doubling to 5 min) after two such decisions in a row.
 void note_silent(Flow &flow, i64 now);
 
-void note_spoke(Flow &flow, i64 now);
+void note_spoke(Flow &flow, i64 now, i64 partner = 0);
 
 } // namespace lilia::chat

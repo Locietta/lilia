@@ -3,6 +3,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <lighter/async/runtime/task.h>
@@ -41,6 +42,14 @@ LearnerRequest build_learner_request(std::string_view prompt, const std::vector<
 /// Reads record_expressions; drops items that are empty, too long, or cite a
 /// line that does not exist.
 std::vector<Learned> parse_learned(const std::vector<provider::OutputItem> &items, usize line_count);
+
+/// True for patterns that put people down (insults, "说人菜", "让人闭嘴"),
+/// which lilia must never pick up, even as a joke.
+bool blocked_expression(std::string_view situation, std::string_view style);
+
+/// One spelling per style: 「」“”『』 become ASCII quotes and 说"…"/回"…"
+/// become 用"…", so the same phrase learned twice counts up.
+std::string normalize_style(std::string_view style);
 
 /// Text worth learning from: plain text segments only (no media, mentions or
 /// replies), trimmed; empty when the message has none.

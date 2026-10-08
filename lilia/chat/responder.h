@@ -103,4 +103,7 @@ std::string_view default_persona();
 /// the rest random, shuffled; rendered "当X时，可以Y".
 std::vector<std::string> sample_habits(store::Store &store, usize count, std::mt19937 &rng);
 
+/// Up to `count` distinct quoted phrases from random learned patterns.
+std::vector<std::string> sample_voice(store::Store &store, usize count);
+
 } // namespace lilia::chat

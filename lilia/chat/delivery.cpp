@@ -212,6 +212,21 @@ std::vector<std::string> split_bubbles(std::string_view text, usize max_bubbles)
     return bubbles;
 }
 
+std::string first_lines(std::string_view text, usize count) {
+    std::string out;
+    usize kept = 0;
+    while (!text.empty() && kept < count) {
+        const auto newline = text.find('\n');
+        const auto line = trim(text.substr(0, newline));
+        text = newline == std::string_view::npos ? std::string_view{} : text.substr(newline + 1);
+        if (line.empty()) continue;
+        if (!out.empty()) out += '\n';
+        out += line;
+        ++kept;
+    }
+    return out;
+}
+
 std::vector<std::string> whole_message(std::string_view text) {
     std::string out;
     while (!text.empty()) {

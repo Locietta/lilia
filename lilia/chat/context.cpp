@@ -271,6 +271,14 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
     return {.reason = "no tool call"};
 }
 
+std::string quoted_phrase(std::string_view style) {
+    const auto open = style.find('"');
+    if (open == std::string_view::npos) return {};
+    const auto close = style.find('"', open + 1);
+    if (close == std::string_view::npos || close == open + 1) return {};
+    return std::string(style.substr(open + 1, close - open - 1));
+}
+
 provider::History build_writer_history(const WriterInput &input) {
     provider::History history;
     provider::append_system(history, input.persona);
@@ -280,6 +288,10 @@ provider::History build_writer_history(const WriterInput &input) {
     developer += input.rules;
     developer += "\n";
     developer += input.style_override.empty() ? style_instruction(input.plan.style) : std::string_view(input.style_override);
+    if (!input.voice.empty()) {
+        developer += "\n\n群里的人平时会说这样的话，只是让你找找大家说话的口气，不用照搬：";
+        for (usize i = 0; i < input.voice.size(); ++i) developer += (i ? "、" : "") + std::format("「{}」", input.voice[i]);
+    }
     provider::append_developer(history, std::move(developer));
 
     const auto turn_text = [](const store::StoredMessage &message) {

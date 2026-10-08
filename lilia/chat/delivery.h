@@ -19,6 +19,10 @@ using namespace lighter::types;
 /// "。" or a comma.
 std::vector<std::string> split_bubbles(std::string_view text, usize max_bubbles = 3);
 
+/// The first `count` non-blank lines of `text`. Each line is a complete
+/// message, so this drops add-on messages without cutting anything short.
+std::string first_lines(std::string_view text, usize count);
+
 /// The whole text as one message (lines kept, blank lines dropped); empty
 /// when there is nothing to send.
 std::vector<std::string> whole_message(std::string_view text);

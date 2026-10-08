@@ -81,7 +81,13 @@ struct WriterInput {
     std::string reference;
     /// Learned patterns the planner picked, "当X时，可以Y".
     std::vector<std::string> habits;
+    /// A random handful of phrases people in the groups actually say, to
+    /// anchor her voice in real chat rather than the model's own register.
+    std::vector<std::string> voice;
 };
+
+/// The quoted phrase of a learned style: 用"何意味" -> 何意味; empty if none.
+std::string quoted_phrase(std::string_view style);
 
 /// The search step: one call with only the web_search tool, asked to
 /// summarise what it finds about the target message in a few sentences.

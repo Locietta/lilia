@@ -1,6 +1,7 @@
 #include "learner.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <format>
@@ -61,6 +62,16 @@ std::string strip_time_suffix(std::string text) {
     return text;
 }
 
+/// Insults slip past the prompt now and then; lilia never attacks people,
+/// so these are dropped whatever the model says.
+constexpr std::array<std::string_view, 24> k_blocked_words{"杂鱼",   "肺物", "废物", "煞笔", "傻逼", "傻b",    "傻B",  "sb",
+                                                           "SB",     "弱智", "脑残", "智障", "艾草", "闭嘴",   "菜狗", "笨蛋",
+                                                           "这么区", "去死", "nmsl", "你妈", "尼玛", "垃圾人", "滚",   "狗东西"};
+
+/// Situations that describe putting someone else down.
+constexpr std::array<std::string_view, 8> k_blocked_situations{"别人菜", "对方菜",   "某人水平", "别人笨",
+                                                               "对方笨", "别人没用", "骂人",     "让对方"};
+
 bool fits(std::string_view text) { return !text.empty() && chat::count_code_points(text) <= k_max_field_code_points; }
 
 /// Spawned tasks return nothing; the learned patterns are already stored.
@@ -83,6 +94,34 @@ provider::ToolDefinition record_tool() {
 }
 
 } // namespace
+
+bool blocked_expression(std::string_view situation, std::string_view style) {
+    const auto contains = [](std::string_view text, std::string_view word) { return text.find(word) != std::string_view::npos; };
+    return std::ranges::any_of(k_blocked_words,
+                               [&](std::string_view word) { return contains(style, word) || contains(situation, word); }) ||
+           std::ranges::any_of(k_blocked_situations, [&](std::string_view word) { return contains(situation, word); });
+}
+
+std::string normalize_style(std::string_view style) {
+    std::string out;
+    for (usize i = 0; i < style.size();) {
+        bool replaced = false;
+        for (const std::string_view quote : {"「", "」", "“", "”", "『", "』"}) {
+            if (style.substr(i).starts_with(quote)) {
+                out += '"';
+                i += quote.size();
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) out += style[i++];
+    }
+    // 说"…" / 回"…" / 用"…" mean the same thing; one form lets repeats count.
+    for (const std::string_view verb : {"说\"", "回\""}) {
+        if (out.starts_with(verb)) out = "用\"" + out.substr(verb.size());
+    }
+    return out;
+}
 
 LearnerRequest build_learner_request(std::string_view prompt, const std::vector<Line> &lines) {
     LearnerRequest request;
@@ -107,12 +146,12 @@ std::vector<Learned> parse_learned(const std::vector<provider::OutputItem> &item
         if (!list || !list->is_array()) break;
         for (const auto &entry : list->get_array()) {
             auto situation = strip_time_suffix(text_field(entry, "situation"));
-            auto style = text_field(entry, "style");
+            auto style = normalize_style(text_field(entry, "style"));
             const auto source_text = text_field(entry, "source");
             usize source = 0;
             const auto [end, ec] = std::from_chars(source_text.data(), source_text.data() + source_text.size(), source);
             if (ec != std::errc{} || source == 0 || source > line_count) continue;
-            if (!fits(situation) || !fits(style)) continue;
+            if (!fits(situation) || !fits(style) || blocked_expression(situation, style)) continue;
             learned.push_back({.situation = std::move(situation), .style = std::move(style)});
             if (learned.size() == 5) break;
         }
