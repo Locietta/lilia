@@ -84,6 +84,8 @@ struct Responder {
     provider::Provider writer;
     std::filesystem::path persona_path;
     std::string persona;
+    /// The writer's rules (writer.md); replays may swap in a variant.
+    std::string writer_rules;
     Spawn spawn;
     /// Archives media of allowed chats; null when archiving is disabled.
     archive::Archiver *archiver = nullptr;

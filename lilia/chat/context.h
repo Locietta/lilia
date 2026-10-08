@@ -32,6 +32,8 @@ struct Plan {
     ReplyStyle style = ReplyStyle::SHORT;
     bool search = false;
     std::string intent;
+    /// "reference" handoff: the planner's notes for the writer.
+    std::string brief;
     std::string reason; ///< why she stays silent
     /// Indices into PlannerInput::habits the writer should lean on (0-2).
     std::vector<usize> habits;
@@ -50,7 +52,12 @@ struct PlannerInput {
     usize log_bytes = 12'000;
     /// Learned patterns offered this turn, "当X时，可以Y", shown as E1, E2 ...
     std::vector<std::string> habits;
+    /// The reply tool asks for `brief` (notes) instead of `intent`.
+    bool reference_handoff = false;
 };
+
+/// The planner.md line describing what it hands the writer.
+std::string_view handoff_rule(bool reference);
 
 struct PlannerRequest {
     provider::History history;

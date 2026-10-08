@@ -219,9 +219,11 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
                                         {"quote", property("boolean", "是否引用那条消息")},
                                         {"style", property("string", "short | normal | long")},
                                         {"search", property("boolean", "是否需要联网搜索")},
-                                        {"intent", property("string", "一句话描述她想表达的意思，不是台词")},
+                                        {input.reference_handoff ? "brief" : "intent",
+                                         input.reference_handoff ? property("string", "给她的参考信息，不是台词，也不规定她怎么说") :
+                                                                   property("string", "一句话描述她想表达的意思，不是台词")},
                                         {"habits", string_array_property("选用的学来的说法编号，例如 [\"E2\"]，可以为空")}},
-                         .required = {"target", "style", "intent"}},
+                         .required = {"target", "style", input.reference_handoff ? "brief" : "intent"}},
     });
     request.tools.push_back({
         .name = "stay_silent",
@@ -229,6 +231,15 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         .input_schema = {.properties = {{"reason", property("string", "简短的理由")}}, .required = {"reason"}},
     });
     return request;
+}
+
+std::string_view handoff_rule(bool reference) {
+    if (reference) {
+        return "- brief：给她的参考信息，像旁观者的笔记：大家在聊什么、她对这件事大概什么态度、回复可能用得上的事实。"
+               "不要写台词，也不要规定她具体说什么、怎么说，那由她自己决定。";
+    }
+    return "- intent：用一句短话（十来个字）写她的态度或想说的点，例如\"吐槽这集作画崩了\"或\"问他抽到没有\"。"
+           "不要写成台词，也不要写成一套论证或建议（\"认同……但提醒……建议……\"）。";
 }
 
 Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vector<i64> &ids) {
@@ -265,6 +276,7 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
                                          ReplyStyle::SHORT,
             .search = bool_field(input, "search"),
             .intent = string_field(input, "intent"),
+            .brief = string_field(input, "brief"),
             .habits = std::move(habits),
         };
     }
@@ -317,6 +329,8 @@ provider::History build_writer_history(const WriterInput &input) {
                             "你已经知道是怎么回事了，不要再问真假或者出处。挑最关键的一点或者你的看法，用一句大白话说，"
                             "不报数字、日期和来源，不贴链接，别照抄】",
                             input.reference);
+    } else if (!input.plan.brief.empty()) {
+        note += std::format("】\n【回复信息参考：{}\n可以参考，但视情况而定，不用完全遵守】", input.plan.brief);
     } else {
         if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
         note += "】";
@@ -343,6 +357,7 @@ provider::History build_search_history(const ChatInfo &info, const store::Stored
                                                  format_local_time(now, utc_offset_minutes)));
     std::string user = std::format("群聊里{}说：「{}」", display_name(target), target.text);
     if (!plan.intent.empty()) user += std::format("\n{}想知道的：{}", info.name, plan.intent);
+    if (!plan.brief.empty()) user += std::format("\n背景：{}", plan.brief);
     user += "\n请先搜索再总结。";
     provider::append_user(history, std::move(user));
     return history;

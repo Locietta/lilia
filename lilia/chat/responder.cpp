@@ -246,7 +246,8 @@ Responder::Responder(const Config &config, store::Store &store, provider::Provid
                      provider::Provider writer, std::filesystem::path persona_path, Spawn spawn)
     : now([] { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }),
       config(config), store(store), planner(std::move(planner)), searcher(std::move(searcher)), writer(std::move(writer)),
-      persona_path(std::move(persona_path)), persona(default_persona()), spawn(std::move(spawn)) {}
+      persona_path(std::move(persona_path)), persona(default_persona()), writer_rules(embedded(xmake::writer_md)), spawn(std::move(spawn)) {
+}
 
 void Responder::attach(std::shared_ptr<onebot::Session> live, onebot::LoginInfo login) {
     session = std::move(live);
@@ -370,13 +371,16 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
     const ChatInfo info{.chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self.nickname};
     PlannerInput planner_input{
-        .prompt = fill_template(embedded(xmake::planner_md), {{"name", settings.name}, {"persona", persona}}),
+        .prompt =
+            fill_template(embedded(xmake::planner_md),
+                          {{"name", settings.name}, {"persona", persona}, {"handoff", handoff_rule(settings.handoff == "reference")}}),
         .info = info,
         .recent = log_lines,
         .addressed = addressed.has_value(),
         .now = started,
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = settings.context_bytes,
+        .reference_handoff = settings.handoff == "reference",
     };
     if (config.learning.enabled) planner_input.habits = sample_habits(store, config.learning.candidates, rng);
     for (const auto &message : fresh) planner_input.fresh.push_back(message.message_id);
@@ -411,7 +415,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         co_return;
     }
     log::info("{} replies to {} ({}, quote {}, search {}, habits {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
-              plan.search, plan.habits.size(), plan.intent);
+              plan.search, plan.habits.size(), plan.intent.empty() ? plan.brief : plan.intent);
 
     std::string style_override;
     if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(rng)) {
@@ -431,7 +435,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     }
     const auto history = build_writer_history({
         .persona = persona,
-        .rules = std::string(embedded(xmake::writer_md)),
+        .rules = writer_rules,
         .info = info,
         .recent = log_lines,
         .target = *target,

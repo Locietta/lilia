@@ -97,12 +97,14 @@ Result<Config> load_config(const std::filesystem::path &path, bool resolve_secre
         config->onebot.access_token.clear();
         config->model.api_key.clear();
         config->model.writer_api_key.clear();
+        config->model.planner_api_key.clear();
         expand_paths(*config);
         return config;
     }
 
     const auto literal = [](const std::string &secret) { return !secret.empty() && !is_reference(secret); };
-    if (literal(config->onebot.access_token) || literal(config->model.api_key) || literal(config->model.writer_api_key)) {
+    if (literal(config->onebot.access_token) || literal(config->model.api_key) || literal(config->model.writer_api_key) ||
+        literal(config->model.planner_api_key)) {
         auto checked = check_private(path);
         if (checked.has_error()) return lighter::outcome_error(std::move(checked).error());
     }
@@ -118,6 +120,10 @@ Result<Config> load_config(const std::filesystem::path &path, bool resolve_secre
     auto writer_key = resolve_secret(config->model.writer_api_key, "model.writer_api_key");
     if (writer_key.has_error()) return lighter::outcome_error(std::move(writer_key).error());
     config->model.writer_api_key = *std::move(writer_key);
+
+    auto planner_key = resolve_secret(config->model.planner_api_key, "model.planner_api_key");
+    if (planner_key.has_error()) return lighter::outcome_error(std::move(planner_key).error());
+    config->model.planner_api_key = *std::move(planner_key);
     if (config->model.api_key.empty()) {
         return lighter::outcome_error(Error::config("model.api_key is required", ErrorCode::AUTH_NOT_CONFIGURED));
     }

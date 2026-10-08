@@ -33,6 +33,7 @@ using namespace std::chrono_literals;
 void print_usage(FILE *output) {
     std::fputs("usage: lilia [--config <path>] [--check-config]\n"
                "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
+               "                    [--writer-prompt <writer.md>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
                "       lilia --version | --help\n",
@@ -133,6 +134,7 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> replay_log;
     std::optional<std::filesystem::path> persona_path;
     std::optional<std::filesystem::path> habits_db;
+    std::optional<std::filesystem::path> writer_prompt;
     std::optional<std::filesystem::path> learn_log;
     bool list_expressions = false;
     usize limit = 100;
@@ -166,6 +168,8 @@ int main(int argc, char **argv) {
             persona_path = argv[++i];
         } else if (arg == "--habits" && replay_log && i + 1 < argc) {
             habits_db = argv[++i];
+        } else if (arg == "--writer-prompt" && replay_log && i + 1 < argc) {
+            writer_prompt = argv[++i];
         } else if (arg == "--limit" && list_expressions && i + 1 < argc) {
             limit = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else {
@@ -194,7 +198,7 @@ int main(int argc, char **argv) {
         log::error("cannot watch process signals: {}", interrupts.error().message());
         return 1;
     }
-    auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path, habits_db) :
+    auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt) :
                                    learn_log  ? run_learn(*config, *learn_log) :
                                                 run_app(*config),
                                    interrupts->token());

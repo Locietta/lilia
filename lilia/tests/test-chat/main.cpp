@@ -132,6 +132,21 @@ void test_planner() {
     require(!chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#9","style":"short","intent":"x"})"))}, request.ids).reply,
             "an out-of-range target is silence");
     require(!chat::parse_plan({}, request.ids).reply, "no tool call is silence");
+
+    auto reference_input =
+        chat::PlannerInput{.prompt = "P", .info = group_info(), .recent = {stored(301, t, "c", "看新番吗")}, .fresh = {301}};
+    reference_input.reference_handoff = true;
+    const auto reference_request = chat::build_planner_request(reference_input);
+    const auto &reply_schema = reference_request.tools[0].input_schema;
+    require(std::ranges::contains(reply_schema.required, std::string("brief")) &&
+                !std::ranges::contains(reply_schema.required, std::string("intent")),
+            "the reference handoff asks for brief instead of intent");
+    const auto briefed = chat::parse_plan(
+        {OutputItem(tool_call("reply", R"({"target":"#1","style":"short","brief":"在聊新番，她最近在追"})"))}, reference_request.ids);
+    require(briefed.reply && briefed.brief == "在聊新番，她最近在追", "brief is read");
+    require(chat::handoff_rule(true).find("brief") != std::string_view::npos &&
+                chat::handoff_rule(false).find("intent") != std::string_view::npos,
+            "the planner rule follows the handoff");
 }
 
 void test_writer() {
@@ -162,6 +177,19 @@ void test_writer() {
     require(history[6].role == Role::USER && last.starts_with("b: 莉莉娅你追吗\n\n【你要回应b的这条") && last.ends_with("现在，你说："),
             "the note ends the last user turn");
     require(last.find("说在追") != std::string::npos, "the intent reaches the writer");
+    const auto briefed = chat::build_writer_history({
+        .persona = "PERSONA",
+        .rules = "RULES",
+        .info = group_info(),
+        .recent = {stored(205, t - 60, "b", "莉莉娅你追吗")},
+        .target = stored(205, t - 60, "b", "莉莉娅你追吗"),
+        .plan = {.reply = true, .target = 205, .brief = "b 在问她追不追第三集"},
+        .now = t,
+    });
+    const auto briefed_note = text_of(briefed.back());
+    require(briefed_note.find("回复信息参考：b 在问她追不追第三集") != std::string::npos &&
+                briefed_note.find("不用完全遵守") != std::string::npos && briefed_note.find("你想表达的意思") == std::string::npos,
+            "a brief reaches the writer as optional reference");
     require(text_of(history[1]).find("口气") == std::string::npos, "no voice section without samples");
 }
 

@@ -35,6 +35,14 @@ struct ModelConfig {
     /// style while the planner stays on `base_url`. Empty means the same.
     std::string writer_base_url;
     std::string writer_api_key; ///< secret; e.g. "$MINIMAX_API_KEY"
+    /// Send the writer key as "Authorization: Bearer" instead of x-api-key
+    /// (some gateways want that).
+    bool writer_bearer = false;
+    /// Optional separate endpoint for the planner (`planner_model`); empty
+    /// means `base_url`. Search, vision and learning stay on `base_url`.
+    std::string planner_base_url;
+    std::string planner_api_key; ///< secret
+    bool planner_bearer = false;
     /// Writer sampling temperature; unset uses the provider default.
     std::optional<double> writer_temperature;
     /// Describes images and stickers (on `base_url`); empty disables it.
@@ -68,6 +76,9 @@ struct ChatConfig {
     u32 debounce_seconds = 3;
     /// Chance that one reply uses a random alternative style (e.g. one word).
     double alt_style_probability = 0.15;
+    /// What the planner hands the writer: "intent" (a short stance to voice)
+    /// or "reference" (notes the writer may use or ignore, like MaiBot).
+    std::string handoff = "intent";
     /// Typing-delay speed for multi-message replies; 0 sends immediately.
     double typing_speed = 1.0;
     /// How long a turn waits for new images to be described.

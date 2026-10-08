@@ -71,9 +71,9 @@ std::string clock(i64 t) { return std::format("{:02}:{:02}", t / 60, t % 60); }
 namespace {
 
 provider::Provider make_client(const ModelConfig &model, const std::string &base_url, const std::string &api_key, const std::string &name,
-                               u32 max_tokens, bool require_tool = false) {
+                               u32 max_tokens, bool require_tool = false, bool bearer = false) {
     return pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
-        .auth = provider::api_key_auth(api_key, false),
+        .auth = provider::api_key_auth(api_key, bearer),
         .base_url = base_url,
         .model = name,
         .reasoning_effort = model.reasoning_effort,
@@ -86,7 +86,9 @@ provider::Provider make_client(const ModelConfig &model, const std::string &base
 } // namespace
 
 provider::Provider make_planner(const ModelConfig &model) {
-    return make_client(model, model.base_url, model.api_key, model.planner_model, model.planner_max_tokens, true);
+    const bool own = !model.planner_base_url.empty();
+    return make_client(model, own ? model.planner_base_url : model.base_url, own ? model.planner_api_key : model.api_key,
+                       model.planner_model, model.planner_max_tokens, true, own && model.planner_bearer);
 }
 
 provider::Provider make_vision(const ModelConfig &model) {
@@ -103,7 +105,8 @@ provider::Provider make_searcher(const ModelConfig &model) {
 
 provider::Provider make_writer(const ModelConfig &model) {
     return pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
-        .auth = provider::api_key_auth(model.writer_api_key.empty() ? model.api_key : model.writer_api_key, false),
+        .auth = provider::api_key_auth(model.writer_api_key.empty() ? model.api_key : model.writer_api_key,
+                                       !model.writer_api_key.empty() && model.writer_bearer),
         .base_url = model.writer_base_url.empty() ? model.base_url : model.writer_base_url,
         .model = model.model,
         .reasoning_effort = model.reasoning_effort,
@@ -138,7 +141,7 @@ std::optional<std::vector<ReplayLine>> read_log(const std::filesystem::path &log
 } // namespace
 
 Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
-                     std::optional<std::filesystem::path> habits) {
+                     std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt) {
     auto parsed = read_log(log);
     if (!parsed) co_return 1;
     auto lines = *std::move(parsed);
@@ -176,6 +179,14 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         std::fprintf(stderr, "%s\n", loaded.error().message().c_str());
         co_return 1;
     }
+    if (writer_prompt) {
+        std::ifstream input(*writer_prompt, std::ios::binary);
+        if (!input) {
+            std::fprintf(stderr, "cannot read %s\n", writer_prompt->string().c_str());
+            co_return 1;
+        }
+        responder.writer_rules.assign(std::istreambuf_iterator<char>(input), {});
+    }
     responder.self = {.user_id = k_replay_self, .nickname = config.chat.name};
     responder.realtime = false;
 
@@ -194,7 +205,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             print(std::format("        · 不说话：{}", plan.reason));
         } else {
             print(std::format("        · 回复 {}（{}{}{}）：{}", plan.target, style_name(plan.style), plan.quote ? "，引用" : "",
-                              plan.search ? "，搜索" : "", plan.intent));
+                              plan.search ? "，搜索" : "", plan.intent.empty() ? plan.brief : plan.intent));
         }
     };
 
