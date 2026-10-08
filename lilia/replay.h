@@ -42,7 +42,8 @@ lighter::Task<int> run_learn(Config config, std::filesystem::path log);
 int print_expressions(const std::filesystem::path &database, usize limit);
 
 /// Runs the learning review over every stored expression and lists what it
-/// would reject (and blocked put-downs); `apply` deletes those rows.
-lighter::Task<int> review_expressions(Config config, bool apply);
+/// would reject (and blocked put-downs); `apply` deletes those rows. Styles
+/// containing any `keep` text are never rejected.
+lighter::Task<int> review_expressions(Config config, bool apply, std::vector<std::string> keep = {});
 
 } // namespace lilia

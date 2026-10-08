@@ -36,7 +36,7 @@ void print_usage(FILE *output) {
                "                    [--writer-prompt <writer.md>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
-               "       lilia expressions --review [--apply] [--config <path>]\n"
+               "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
                "       lilia --version | --help\n",
                output);
 }
@@ -141,6 +141,7 @@ int main(int argc, char **argv) {
     bool list_expressions = false;
     bool review = false;
     bool apply = false;
+    std::vector<std::string> keep;
     usize limit = 100;
     bool check_only = false;
     int first = 1;
@@ -178,6 +179,8 @@ int main(int argc, char **argv) {
             review = true;
         } else if (arg == "--apply" && list_expressions) {
             apply = true;
+        } else if (arg == "--keep" && list_expressions && i + 1 < argc) {
+            keep.emplace_back(argv[++i]);
         } else if (arg == "--limit" && list_expressions && i + 1 < argc) {
             limit = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else {
@@ -208,7 +211,7 @@ int main(int argc, char **argv) {
     }
     auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt) :
                                    learn_log  ? run_learn(*config, *learn_log) :
-                                   review     ? review_expressions(*config, apply) :
+                                   review     ? review_expressions(*config, apply, keep) :
                                                 run_app(*config),
                                    interrupts->token());
     loop.schedule(app);

@@ -293,7 +293,7 @@ Task<int> run_learn(Config config, std::filesystem::path log) {
     co_return 0;
 }
 
-Task<int> review_expressions(Config config, bool apply) {
+Task<int> review_expressions(Config config, bool apply, std::vector<std::string> keep) {
     const auto path = std::filesystem::path(config.data_dir) / "lilia.db";
     auto store = apply ? store::Store::open(path) : store::Store::open_readonly(path);
     if (store.has_error()) {
@@ -324,7 +324,9 @@ Task<int> review_expressions(Config config, bool apply) {
         for (usize i = start; i < end; ++i) {
             const auto &row = (*rows)[i];
             const bool blocked = learn::blocked_expression(row.situation, row.style);
-            if (!blocked && std::ranges::contains(*kept, i - start)) continue;
+            const bool protected_ =
+                std::ranges::any_of(keep, [&](const std::string &text) { return row.style.find(text) != std::string::npos; });
+            if (protected_ || (!blocked && std::ranges::contains(*kept, i - start))) continue;
             rejected.push_back(row.id);
             print(std::format("  {}当{}时，可以{}", blocked ? "[屏蔽] " : "", row.situation, row.style));
         }
