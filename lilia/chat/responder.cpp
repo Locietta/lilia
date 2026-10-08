@@ -469,9 +469,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         const usize window = std::min(log_lines.size(), k_self_window);
         const auto recent_self =
             std::ranges::count_if(log_lines.end() - static_cast<std::ptrdiff_t>(window), log_lines.end(), &store::StoredMessage::from_self);
-        const auto before_fresh = std::ranges::find(log_lines, fresh.front().message_id, &store::StoredMessage::message_id);
-        const bool answering_her = before_fresh != log_lines.begin() && before_fresh != log_lines.end() &&
-                                   std::prev(before_fresh)->from_self &&
+        // Whoever she is talking with (inside the conversation window) still
+        // gets through; the brake is for chiming in on everyone else.
+        const bool answering_her = state.flow.partner != 0 && started - state.flow.last_spoke <= settings.conversation_window_seconds &&
                                    std::ranges::contains(fresh, state.flow.partner, &store::StoredMessage::sender_id);
         if (static_cast<usize>(recent_self) >= k_self_limit && !answering_her) {
             log::info("{} holds back: she wrote {} of the last {} messages", describe(chat), recent_self, window);
