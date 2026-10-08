@@ -75,15 +75,18 @@ latency is negligible at this scale.
 
 1. **Reply pipeline (done 2026-10-07).** Gate, debounce, planner and writer,
    multi-message delivery, persona v2, replay tool.
-2. **Memory (next).** References: MaiBot's A_Memorix and person profiles,
-   and AIRI's #2748 trust labels.
-   - Summaries of chat that scrolls out of context, with recall cues.
-   - Incremental facts, entities and per-person profiles. Facts must quote
-     the person; never store lilia's own lines, jokes, rumours, or
-     relationships inferred from sharing a group. Record who said what.
-   - A `recall` planner tool: FTS5 trigram first, embeddings later. Rank by
-     relevance plus recency plus use; reinforce on use, decay otherwise;
-     private memories never reach groups.
+2. **Memory (in progress).** References: MaiBot's A_Memorix and person
+   profiles, and AIRI's #2748 trust labels.
+   - Searchable history (done 2026-10-08, `memory/`). Allowed chats are cut
+     into chunks of up to 6 messages, embedded by a local model
+     (Qwen3-Embedding-0.6B via llama.cpp on cachy's iGPU) and stored in
+     `memory_chunks`; the planner's `search_history` tool ranks by cosine
+     plus a literal-keyword bonus. Brute force is fine at this size.
+   - Next: incremental facts and per-person profiles. Facts must quote the
+     person; never store lilia's own lines, jokes, rumours, or relationships
+     inferred from sharing a group. Record who said what.
+   - Then: summaries of chat that scrolls out of context, with recall cues;
+     ranking by recency and use; private memories never reach groups.
 3. **lilia's own style.**
    - Expression learning (done 2026-10-07, `learn/`). Every group the
      account is in feeds an in-memory buffer; batches of 30 lines become
