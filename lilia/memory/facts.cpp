@@ -97,7 +97,8 @@ std::vector<ExtractedFact> parse_facts(const std::vector<provider::OutputItem> &
         for (const auto &entry : list->get_array()) {
             auto fact = tidy_fact(text_field(entry, "fact"));
             auto quote = text_field(entry, "quote");
-            std::string_view source_text = text_field(entry, "source");
+            const auto source_field = text_field(entry, "source");
+            std::string_view source_text = source_field;
             if (source_text.starts_with('#')) source_text.remove_prefix(1);
             usize source = 0;
             if (std::from_chars(source_text.data(), source_text.data() + source_text.size(), source).ec != std::errc{}) continue;
