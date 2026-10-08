@@ -13,6 +13,7 @@
 #include <glaze/json.hpp>
 
 #include <xmake/bin2obj/learner_md.hpp>
+#include <xmake/bin2obj/review_md.hpp>
 
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
@@ -93,6 +94,20 @@ provider::ToolDefinition record_tool() {
     };
 }
 
+/// A tool whose single argument is a list of numbers (as strings).
+provider::ToolDefinition pick_tool(std::string name, std::string description, std::string field, std::string field_description) {
+    glz::generic item_schema;
+    std::ignore = glz::read_json(item_schema, R"({"type": "string"})");
+    provider::SchemaProperty list{.type = "array", .description = std::move(field_description)};
+    list.items.emplace(std::move(item_schema));
+    std::string required = field;
+    return {
+        .name = std::move(name),
+        .description = std::move(description),
+        .input_schema = {.properties = {{std::move(field), std::move(list)}}, .required = {std::move(required)}},
+    };
+}
+
 } // namespace
 
 bool blocked_expression(std::string_view situation, std::string_view style) {
@@ -160,6 +175,58 @@ std::vector<Learned> parse_learned(const std::vector<provider::OutputItem> &item
     return learned;
 }
 
+LearnerRequest build_review_request(std::string_view prompt, const std::vector<Learned> &learned) {
+    LearnerRequest request;
+    provider::append_system(request.history, std::string(prompt));
+    std::string list;
+    for (usize i = 0; i < learned.size(); ++i) list += std::format("{}. 当{}时，可以{}\n", i + 1, learned[i].situation, learned[i].style);
+    provider::append_user(request.history, std::move(list));
+    request.tools.push_back(
+        pick_tool("review_expressions", "提交不适合留下的说法编号", "reject", "不适合留下的编号，例如 [\"2\"]，都合适就为空"));
+    return request;
+}
+
+LearnerRequest build_selection_request(std::string_view prompt, const SelectionInput &input) {
+    LearnerRequest request;
+    provider::append_system(request.history, std::string(prompt));
+    std::string user = "最近的聊天：\n";
+    for (const auto &line : input.recent) user += line + "\n";
+    user += std::format("\n最新的一条：{}\n", input.target);
+    if (!input.intent.empty()) user += std::format("她想表达的意思：{}\n", input.intent);
+    user += "\n学来的说法：\n";
+    for (usize i = 0; i < input.candidates.size(); ++i) user += std::format("{}. {}\n", i + 1, input.candidates[i]);
+    provider::append_user(request.history, std::move(user));
+    request.tools.push_back(pick_tool("select_expressions", "提交这次可以参考的说法编号", "ids", "选中的编号，0 到 3 个，可以为空"));
+    return request;
+}
+
+std::vector<usize> parse_picks(const std::vector<provider::OutputItem> &items, std::string_view tool, std::string_view field_name,
+                               usize count, usize limit) {
+    std::vector<usize> picks;
+    for (const auto &item : items) {
+        const auto *call = std::get_if<provider::ToolCallItem>(&item);
+        if (!call || call->call.name != tool) continue;
+        const auto *list = field(call->call.input, field_name);
+        if (!list || !list->is_array()) break;
+        for (const auto &entry : list->get_array()) {
+            usize number = 0;
+            if (entry.is_number()) {
+                number = static_cast<usize>(entry.get_number());
+            } else if (entry.is_string()) {
+                std::string_view text = trim(entry.get_string());
+                if (text.starts_with('#')) text.remove_prefix(1);
+                if (std::from_chars(text.data(), text.data() + text.size(), number).ec != std::errc{}) continue;
+            } else {
+                continue;
+            }
+            if (number >= 1 && number <= count && !std::ranges::contains(picks, number - 1)) picks.push_back(number - 1);
+            if (picks.size() >= limit) break;
+        }
+        break;
+    }
+    return picks;
+}
+
 std::string learnable_text(const onebot::Message &message) {
     std::string text;
     for (const auto &segment : message) {
@@ -174,6 +241,8 @@ Learner::Learner(const LearningConfig &config, std::string name, store::Store &s
     : now([] { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }),
       config(config),
       prompt(chat::fill_template({reinterpret_cast<const char *>(xmake::learner_md.data()), xmake::learner_md.size()}, {{"name", name}})),
+      review_prompt(
+          chat::fill_template({reinterpret_cast<const char *>(xmake::review_md.data()), xmake::review_md.size()}, {{"name", name}})),
       store(store), provider(std::move(provider)), spawn(std::move(spawn)) {}
 
 void Learner::observe(const onebot::MessageEvent &message, i64 self_id) {
@@ -187,19 +256,22 @@ void Learner::observe(const onebot::MessageEvent &message, i64 self_id) {
     spawn(learn_batch(this, *message.group_id, std::exchange(buffer, {})));
 }
 
-Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
-    const auto request = build_learner_request(prompt, lines);
+namespace {
+
+/// One learning-side model call, recorded as chat type "learn".
+Task<std::optional<std::vector<provider::OutputItem>>> run_call(Learner *learner, i64 group, const LearnerRequest &request,
+                                                                std::string_view purpose) {
     std::vector<provider::OutputItem> items;
     const provider::StreamCallbacks callbacks{
         .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
     };
-    const i64 started = now();
-    auto completion = co_await provider->complete(request.history, request.tools, callbacks);
+    const i64 started = learner->now();
+    auto completion = co_await learner->provider->complete(request.history, request.tools, callbacks);
 
     store::LlmCall call{.time = started, .chat = {.type = "learn", .id = group}, .model = "learner"};
     if (completion.has_error()) {
         call.error = completion.error().message();
-        log::warn("learning call failed: {}", call.error);
+        log::warn("{} call failed: {}", purpose, call.error);
     } else {
         if (!completion->model.empty()) call.model = completion->model;
         call.input_tokens = completion->usage.input_tokens;
@@ -208,11 +280,45 @@ Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
         call.stop = completion->stop_detail;
         call.request_id = completion->request_id;
     }
-    if (auto recorded = store.add_llm_call(call); recorded.has_error())
+    if (auto recorded = learner->store.add_llm_call(call); recorded.has_error())
         log::error("cannot record model call: {}", recorded.error().message());
-    if (completion.has_error()) co_return std::vector<Learned>{};
+    if (completion.has_error()) co_return std::nullopt;
+    co_return std::move(items);
+}
 
-    auto learned = parse_learned(items, lines.size());
+} // namespace
+
+Task<std::optional<std::vector<usize>>> Learner::review(i64 group, const std::vector<Learned> &learned) {
+    if (learned.empty()) co_return std::vector<usize>{};
+    const auto items = co_await run_call(this, group, build_review_request(review_prompt, learned), "review");
+    if (!items) co_return std::nullopt;
+    // Asking what to drop (not what to keep) makes the reviewer less picky.
+    const auto rejected = parse_picks(*items, "review_expressions", "reject", learned.size(), learned.size());
+    if (std::ranges::none_of(*items, [](const provider::OutputItem &item) {
+            const auto *call = std::get_if<provider::ToolCallItem>(&item);
+            return call && call->call.name == "review_expressions";
+        })) {
+        co_return std::nullopt;
+    }
+    std::vector<usize> kept;
+    for (usize i = 0; i < learned.size(); ++i) {
+        if (!std::ranges::contains(rejected, i)) kept.push_back(i);
+    }
+    co_return kept;
+}
+
+Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
+    const i64 started = now();
+    const auto items = co_await run_call(this, group, build_learner_request(prompt, lines), "learning");
+    if (!items) co_return std::vector<Learned>{};
+    const auto extracted = parse_learned(*items, lines.size());
+
+    // Nothing is stored unless the review passes it; a failed review keeps nothing.
+    const auto kept = co_await review(group, extracted);
+    std::vector<Learned> learned;
+    if (kept) {
+        for (const auto index : *kept) learned.push_back(extracted[index]);
+    }
     for (const auto &pattern : learned) {
         if (auto added = store.learn_expression(pattern.situation, pattern.style, started); added.has_error()) {
             log::error("cannot store expression: {}", added.error().message());
@@ -222,8 +328,9 @@ Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
         if (auto pruned = store.prune_expressions(config.max_expressions); pruned.has_error())
             log::error("cannot prune expressions: {}", pruned.error().message());
     }
-    log::info("learned {} expression(s) from {} lines", learned.size(), lines.size());
-    co_return std::move(learned);
+    log::info("learned {} expression(s) from {} lines ({} extracted, {} rejected by review)", learned.size(), lines.size(),
+              extracted.size(), extracted.size() - learned.size());
+    co_return learned;
 }
 
 } // namespace lilia::learn

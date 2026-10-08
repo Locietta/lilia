@@ -36,6 +36,7 @@ void print_usage(FILE *output) {
                "                    [--writer-prompt <writer.md>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
+               "       lilia expressions --review [--apply] [--config <path>]\n"
                "       lilia --version | --help\n",
                output);
 }
@@ -138,6 +139,8 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> writer_prompt;
     std::optional<std::filesystem::path> learn_log;
     bool list_expressions = false;
+    bool review = false;
+    bool apply = false;
     usize limit = 100;
     bool check_only = false;
     int first = 1;
@@ -171,6 +174,10 @@ int main(int argc, char **argv) {
             habits_db = argv[++i];
         } else if (arg == "--writer-prompt" && replay_log && i + 1 < argc) {
             writer_prompt = argv[++i];
+        } else if (arg == "--review" && list_expressions) {
+            review = true;
+        } else if (arg == "--apply" && list_expressions) {
+            apply = true;
         } else if (arg == "--limit" && list_expressions && i + 1 < argc) {
             limit = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else {
@@ -181,7 +188,7 @@ int main(int argc, char **argv) {
 
     const auto path = config_path.value_or(default_config_path());
     // Listing learned expressions reads the database only; no keys needed.
-    auto config = load_config(path, !list_expressions);
+    auto config = load_config(path, !list_expressions || review);
     if (config.has_error()) {
         log::error("{}: {}", path.string(), config.error().message());
         return 1;
@@ -191,7 +198,7 @@ int main(int argc, char **argv) {
         log::info("{} is valid", path.string());
         return 0;
     }
-    if (list_expressions) return print_expressions(std::filesystem::path(config->data_dir) / "lilia.db", limit);
+    if (list_expressions && !review) return print_expressions(std::filesystem::path(config->data_dir) / "lilia.db", limit);
 
     lighter::EventLoop loop;
     auto interrupts = lighter::InterruptSource::create(loop);
@@ -201,6 +208,7 @@ int main(int argc, char **argv) {
     }
     auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt) :
                                    learn_log  ? run_learn(*config, *learn_log) :
+                                   review     ? review_expressions(*config, apply) :
                                                 run_app(*config),
                                    interrupts->token());
     loop.schedule(app);

@@ -12,9 +12,11 @@
 #include <glaze/json.hpp>
 
 #include <lighter/async/io/watcher.h>
+#include <lighter/async/runtime/timeout.h>
 
 #include <xmake/bin2obj/persona_md.hpp>
 #include <xmake/bin2obj/planner_md.hpp>
+#include <xmake/bin2obj/select_md.hpp>
 #include <xmake/bin2obj/writer_md.hpp>
 #include <xmake/version/lilia.hpp>
 
@@ -22,6 +24,7 @@
 #include <lilia/chat/trigger.h>
 #include <lilia/log.h>
 #include <lilia/onebot/message.h>
+#include <lilia/text.h>
 
 namespace lilia::chat {
 
@@ -43,6 +46,20 @@ constexpr std::array<std::string_view, 4> k_alt_styles{
 constexpr i64 k_max_debounce_seconds = 15;
 /// Learned phrases shown to the writer as a sample of how the groups talk.
 constexpr usize k_voice_samples = 8;
+/// Recent targets whose reply she remembers, and offered-again messages.
+constexpr usize k_replied_memory = 20;
+constexpr usize k_requeued_memory = 500;
+constexpr usize k_decision_memory = 6;
+/// Expression selection: too few candidates skip the call; the selector sees
+/// this many recent lines and picks at most `k_max_habits`.
+constexpr usize k_min_candidates = 5;
+constexpr usize k_selector_context = 10;
+constexpr usize k_max_habits = 3;
+/// How long a reply waits for a selection still running after the planner.
+constexpr i64 k_selection_wait_seconds = 4;
+/// She holds back once she wrote this many of the last `k_self_window` messages.
+constexpr usize k_self_window = 10;
+constexpr usize k_self_limit = 3;
 /// Messages per casual (short / normal) reply.
 constexpr usize k_casual_messages = 2;
 
@@ -64,6 +81,14 @@ store::StoredMessage to_stored(const onebot::MessageEvent &event) {
 }
 
 std::string describe(const store::ChatKey &chat) { return chat.type + ":" + std::to_string(chat.id); }
+
+/// "21:05" in the chat's local time.
+std::string clock_of(i64 unix_seconds, i32 utc_offset_minutes) { return format_local_time(unix_seconds, utc_offset_minutes).substr(11); }
+
+void remember_decision(Responder::ChatState &state, std::string decision) {
+    state.decisions.push_back(std::move(decision));
+    while (state.decisions.size() > k_decision_memory) state.decisions.pop_front();
+}
 
 std::string_view style_name(ReplyStyle style) {
     switch (style) {
@@ -110,6 +135,21 @@ Task<bool> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Mes
     co_return true;
 }
 
+/// with_timeout takes lighter's error type; this hands the provider's
+/// outcome through as a plain value instead.
+Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
+    auto outcome = co_await std::move(call);
+    co_return outcome;
+}
+
+/// Per-purpose deadline for one model call (including the client's retries).
+std::chrono::seconds call_deadline(const Responder *r, std::string_view purpose) {
+    const auto &model = r->config.model;
+    return std::chrono::seconds(purpose == "search" ? model.search_timeout_seconds :
+                                purpose == "writer" ? model.writer_timeout_seconds :
+                                                      model.timeout_seconds);
+}
+
 /// Runs one model call, records its usage, and returns the completed output
 /// items (nullopt on failure).
 Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, provider::Provider &provider, std::string model,
@@ -121,7 +161,13 @@ Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, 
         .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
     };
     const i64 started = r->now();
-    auto completion = co_await provider->complete(history, tools, callbacks);
+    // A request that never finishes must not leave her silent: past the
+    // deadline it fails like any other error (and the writer falls back).
+    auto settled = co_await lighter::with_timeout(settle(provider->complete(history, tools, callbacks)), call_deadline(r, purpose));
+    auto completion = settled.has_error() ?
+                          Result<provider::ProviderCallCompletion>(lighter::outcome_error(Error::api(
+                              "timeout", std::format("{} call exceeded {}s", purpose, call_deadline(r, purpose).count()), "", true))) :
+                          *std::move(settled);
 
     store::LlmCall call{.time = started, .chat = chat, .model = std::move(model)};
     if (completion.has_error()) {
@@ -212,20 +258,22 @@ std::string_view default_persona() { return embedded(xmake::persona_md); }
 
 std::vector<std::string> sample_habits(store::Store &store, usize count, std::mt19937 &rng) {
     if (count == 0) return {};
-    // The most learned few, then a random spread of the rest of the pool.
-    const usize top = count / 3;
-    std::vector<store::Expression> picked;
-    if (top > 0) {
-        auto best = store.expressions(top);
-        if (best.has_error()) return {};
-        picked = *std::move(best);
+    auto rows = store.expressions(0);
+    if (rows.has_error() || rows->empty()) return {};
+    // Weighted by how often each was learned, mapped onto 1..5 like MaiBot,
+    // so common phrases come up more without crowding out the rest.
+    const auto [low, high] = std::ranges::minmax(*rows | std::views::transform(&store::Expression::count));
+    std::vector<double> weights;
+    for (const auto &row : *rows) {
+        weights.push_back(high == low ? 1.0 : 1.0 + 4.0 * static_cast<double>(row.count - low) / static_cast<double>(high - low));
     }
-    if (auto rest = store.random_expressions(top, count - picked.size()); rest.has_value()) {
-        for (auto &expression : *rest) picked.push_back(std::move(expression));
-    }
-    std::ranges::shuffle(picked, rng);
     std::vector<std::string> habits;
-    for (const auto &expression : picked) habits.push_back(std::format("当{}时，可以{}", expression.situation, expression.style));
+    while (habits.size() < count && habits.size() < rows->size()) {
+        std::discrete_distribution<usize> pick(weights.begin(), weights.end());
+        const auto index = pick(rng);
+        habits.push_back(std::format("当{}时，可以{}", (*rows)[index].situation, (*rows)[index].style));
+        weights[index] = 0; // without replacement
+    }
     return habits;
 }
 
@@ -241,6 +289,50 @@ std::vector<std::string> sample_voice(store::Store &store, usize count) {
     }
     return phrases;
 }
+
+namespace {
+
+std::string speaker(const Responder *r, const store::StoredMessage &message) {
+    if (message.from_self) return r->config.chat.name + "（她自己）";
+    return message.sender_name.empty() ? std::to_string(message.sender_id) : message.sender_name;
+}
+
+/// MaiBot's expression selector: a small call that sees the recent chat and
+/// picks 0-3 learned phrases that fit, out of a weighted sample. It runs in
+/// parallel with the planner (so it adds no delay before a reply) and
+/// therefore judges by the chat, not by the planner's intent.
+struct Selection {
+    std::vector<std::string> picked;
+    lighter::Event done;
+};
+
+Task<> run_selection(Responder *r, store::ChatKey chat, learn::SelectionInput input, std::shared_ptr<Selection> out) {
+    const auto prompt = fill_template(embedded(xmake::select_md), {{"name", r->config.chat.name}});
+    const auto request = learn::build_selection_request(prompt, input);
+    const auto items = co_await call_model(r, r->planner, r->config.model.planner_model, "select", chat, request.history, request.tools);
+    if (items) {
+        for (const auto index : learn::parse_picks(*items, "select_expressions", "ids", input.candidates.size(), k_max_habits)) {
+            out->picked.push_back(input.candidates[index]);
+        }
+        log::info("{} picks {} of {} learned expression(s)", describe(chat), out->picked.size(), input.candidates.size());
+    }
+    out->done.set();
+}
+
+std::shared_ptr<Selection> start_selection(Responder *r, const store::ChatKey &chat, const std::vector<store::StoredMessage> &log) {
+    if (!r->config.learning.enabled || log.empty()) return nullptr;
+    auto candidates = sample_habits(r->store, r->config.learning.candidates, r->rng);
+    if (candidates.size() < k_min_candidates) return nullptr;
+    learn::SelectionInput input{.target = speaker(r, log.back()) + ": " + log.back().text, .candidates = std::move(candidates)};
+    for (usize i = log.size() > k_selector_context ? log.size() - k_selector_context : 0; i < log.size(); ++i) {
+        input.recent.push_back(speaker(r, log[i]) + ": " + log[i].text);
+    }
+    auto selection = std::make_shared<Selection>();
+    r->spawn(run_selection(r, chat, std::move(input), selection));
+    return selection;
+}
+
+} // namespace
 
 Responder::Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher,
                      provider::Provider writer, std::filesystem::path persona_path, Spawn spawn)
@@ -340,6 +432,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     auto fresh = std::exchange(state.flow.unseen, {});
     const auto addressed = std::exchange(state.flow.addressed, std::nullopt);
     const auto owed = std::exchange(state.owed, std::nullopt);
+    const auto just_replied = std::exchange(state.just_replied, std::nullopt);
     if (fresh.empty()) co_return;
 
     const auto &settings = config.chat;
@@ -369,6 +462,23 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     if (recent.has_error()) log::error("cannot read chat log: {}", recent.error().message());
     auto log_lines = recent.has_value() ? *std::move(recent) : fresh;
 
+    // MaiBot weighs "how much of the recent chat was me" heavily: once she has
+    // said a lot lately, only being called (or answered right after her own
+    // message) brings her back, and the planner is not even asked.
+    if (!addressed && !owed) {
+        const usize window = std::min(log_lines.size(), k_self_window);
+        const auto recent_self =
+            std::ranges::count_if(log_lines.end() - static_cast<std::ptrdiff_t>(window), log_lines.end(), &store::StoredMessage::from_self);
+        const auto before_fresh = std::ranges::find(log_lines, fresh.front().message_id, &store::StoredMessage::message_id);
+        const bool answering_her = before_fresh != log_lines.begin() && before_fresh != log_lines.end() &&
+                                   std::prev(before_fresh)->from_self &&
+                                   std::ranges::contains(fresh, state.flow.partner, &store::StoredMessage::sender_id);
+        if (static_cast<usize>(recent_self) >= k_self_limit && !answering_her) {
+            log::info("{} holds back: she wrote {} of the last {} messages", describe(chat), recent_self, window);
+            co_return;
+        }
+    }
+
     const ChatInfo info{.chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self.nickname};
     PlannerInput planner_input{
         .prompt =
@@ -381,11 +491,13 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = settings.context_bytes,
         .reference_handoff = settings.handoff == "reference",
+        .decisions = {state.decisions.begin(), state.decisions.end()},
+        .just_replied = just_replied,
     };
-    if (config.learning.enabled) planner_input.habits = sample_habits(store, config.learning.candidates, rng);
     for (const auto &message : fresh) planner_input.fresh.push_back(message.message_id);
     const auto request = build_planner_request(planner_input);
 
+    const auto selection = start_selection(this, chat, log_lines);
     const auto planned = co_await call_model(this, planner, config.model.planner_model, "planner", chat, request.history, request.tools);
     auto plan = planned ? parse_plan(*planned, request.ids) : Plan{.reason = "planner call failed"};
     if (!plan.reply && addressed) {
@@ -400,6 +512,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     if (!plan.reply) {
         log::info("{} stays silent: {}", describe(chat), plan.reason);
         note_silent(state.flow, now());
+        remember_decision(state, std::format("[{}] 没说话：{}", clock_of(started, settings.utc_offset_minutes), plan.reason));
         if (observer) observer(chat, plan, {});
         co_return;
     }
@@ -414,8 +527,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         log::warn("planner target {} is not in the chat log", plan.target);
         co_return;
     }
-    log::info("{} replies to {} ({}, quote {}, search {}, habits {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
-              plan.search, plan.habits.size(), plan.intent.empty() ? plan.brief : plan.intent);
+    log::info("{} replies to {} ({}, quote {}, search {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
+              plan.search, plan.intent.empty() ? plan.brief : plan.intent);
+    remember_decision(state, std::format("[{}] 回复了{}的「{}」：{}", clock_of(started, settings.utc_offset_minutes),
+                                         target->sender_name.empty() ? std::to_string(target->sender_id) : target->sender_name,
+                                         bounded_utf8(target->text, 60), plan.intent.empty() ? plan.brief : plan.intent));
 
     std::string style_override;
     if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(rng)) {
@@ -433,6 +549,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         log::info("search for {} returned {} bytes", describe(chat), reference.size());
         log::debug("search reference: {}", reference);
     }
+    std::vector<std::string> habits;
+    if (selection) {
+        std::ignore = co_await lighter::with_timeout(selection->done.wait(), std::chrono::seconds(k_selection_wait_seconds));
+        habits = selection->picked;
+    }
     const auto history = build_writer_history({
         .persona = persona,
         .rules = writer_rules,
@@ -445,13 +566,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = settings.context_bytes,
         .reference = reference,
-        .habits =
+        .habits = habits,
+        .previous_reply =
             [&] {
-                std::vector<std::string> picked;
-                for (const auto index : plan.habits) {
-                    if (index < planner_input.habits.size()) picked.push_back(planner_input.habits[index]);
-                }
-                return picked;
+                const auto it = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
+                return it == state.replied.end() ? std::string() : it->second;
             }(),
         .voice = config.learning.enabled ? sample_voice(store, k_voice_samples) : std::vector<std::string>{},
     });
@@ -488,11 +607,28 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     }
     note_spoke(state.flow, now(), target->sender_id);
 
-    // One target per turn: if someone called her while she answered another
-    // message, take another turn for them (the worker loop runs it next).
-    if (addressed && plan.target != *addressed) {
-        if (const auto it = std::ranges::find(fresh, *addressed, &store::StoredMessage::message_id); it != fresh.end()) {
-            state.flow.unseen.insert(state.flow.unseen.begin(), *it);
+    std::string said;
+    for (const auto &bubble : bubbles) said += (said.empty() ? "" : " ") + bubble;
+    state.replied.emplace_back(plan.target, std::move(said));
+    if (state.replied.size() > k_replied_memory) state.replied.pop_front();
+
+    // One target per turn, then another look (like MaiBot's planner, which
+    // re-plans after replying): the other new messages after the target are
+    // offered once more, with a note that she just replied. Whoever called
+    // her must be answered on that turn. The worker loop runs it next.
+    const auto after = std::ranges::find(fresh, plan.target, &store::StoredMessage::message_id);
+    std::vector<store::StoredMessage> again;
+    for (auto it = fresh.begin(); it != fresh.end(); ++it) {
+        // Later messages, plus whoever called her even if they came earlier.
+        const bool later = after == fresh.end() || it > after;
+        const bool caller = addressed && it->message_id == *addressed && it->message_id != plan.target;
+        if ((later || caller) && !it->from_self && state.requeued.insert(it->message_id).second) again.push_back(*it);
+    }
+    if (state.requeued.size() > k_requeued_memory) state.requeued.clear();
+    if (!again.empty()) {
+        state.flow.unseen.insert(state.flow.unseen.begin(), again.begin(), again.end());
+        state.just_replied = plan.target;
+        if (addressed && plan.target != *addressed && std::ranges::contains(again, *addressed, &store::StoredMessage::message_id)) {
             if (!state.flow.addressed) state.flow.addressed = *addressed;
             state.owed = *addressed;
         }

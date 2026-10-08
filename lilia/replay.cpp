@@ -25,6 +25,8 @@ namespace {
 
 constexpr i64 k_replay_group = 1;
 constexpr i64 k_replay_self = 10'001;
+/// Expressions per review call in `lilia expressions --review`.
+constexpr usize k_review_batch = 20;
 
 struct ReplayLine {
     i64 t = 0;
@@ -253,8 +255,9 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         };
         if (const auto chat = responder.ingest(event)) {
             co_await responder.run_turn(*chat);
-            // Someone she has not answered yet gets the next turn right away, as in turn_worker.
-            if (responder.chats[*chat].owed) co_await responder.run_turn(*chat);
+            // The look right after a reply (and whoever she still owes an
+            // answer) runs right away, as in turn_worker.
+            for (int extra = 0; extra < 3 && responder.chats[*chat].just_replied; ++extra) co_await responder.run_turn(*chat);
         }
     }
     co_await tasks.join();
@@ -285,6 +288,54 @@ Task<int> run_learn(Config config, std::filesystem::path log) {
         // A co_await inside the range-for header crashes GCC 16.2.
         const auto learned = co_await learner.learn(1, std::move(chunk));
         for (const auto &pattern : learned) print(std::format("  当{}时，可以{}", pattern.situation, pattern.style));
+    }
+    co_await tasks.join();
+    co_return 0;
+}
+
+Task<int> review_expressions(Config config, bool apply) {
+    const auto path = std::filesystem::path(config.data_dir) / "lilia.db";
+    auto store = apply ? store::Store::open(path) : store::Store::open_readonly(path);
+    if (store.has_error()) {
+        std::fprintf(stderr, "%s\n", store.error().message().c_str());
+        co_return 1;
+    }
+    auto rows = store->expressions(0);
+    if (rows.has_error()) {
+        std::fprintf(stderr, "%s\n", rows.error().message().c_str());
+        co_return 1;
+    }
+    // The dry run cannot record its review calls in a read-only database.
+    auto scratch = store::Store::open_memory();
+    lighter::TaskGroup tasks(lighter::EventLoop::current());
+    learn::Learner learner(config.learning, config.chat.name, apply ? *store : *scratch, make_learner(config.model),
+                           [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    std::vector<i64> rejected;
+    for (usize start = 0; start < rows->size(); start += k_review_batch) {
+        const usize end = std::min(rows->size(), start + k_review_batch);
+        std::vector<learn::Learned> batch;
+        for (usize i = start; i < end; ++i) batch.push_back({.situation = (*rows)[i].situation, .style = (*rows)[i].style});
+        // A co_await inside an if/for header crashes GCC 16.2.
+        const auto kept = co_await learner.review(0, batch);
+        if (!kept) {
+            std::fprintf(stderr, "review call failed; stopping\n");
+            co_return 1;
+        }
+        for (usize i = start; i < end; ++i) {
+            const auto &row = (*rows)[i];
+            const bool blocked = learn::blocked_expression(row.situation, row.style);
+            if (!blocked && std::ranges::contains(*kept, i - start)) continue;
+            rejected.push_back(row.id);
+            print(std::format("  {}当{}时，可以{}", blocked ? "[屏蔽] " : "", row.situation, row.style));
+        }
+    }
+    print(std::format("({} 条中 {} 条不合适)", rows->size(), rejected.size()));
+    if (apply) {
+        if (auto deleted = store->delete_expressions(rejected); deleted.has_error()) {
+            std::fprintf(stderr, "%s\n", deleted.error().message().c_str());
+            co_return 1;
+        }
+        print(std::format("已删除 {} 条", rejected.size()));
     }
     co_await tasks.join();
     co_return 0;

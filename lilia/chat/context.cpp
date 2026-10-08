@@ -204,11 +204,19 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         request.ids.push_back(message.message_id);
         user += std::format("#{} {}\n", request.ids.size(), render_line(message, input.utc_offset_minutes));
     }
-    user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
-                              std::format("\n没有人直接叫{}，大多数时候她不需要说话。", input.info.name);
-    if (!input.habits.empty()) {
-        user += "\n\n她从群友那里学来的说法（回复时可以挑 0 到 2 条最贴切的，把编号填进 habits；不合适就不选）：\n";
-        for (usize i = 0; i < input.habits.size(); ++i) user += std::format("E{} {}\n", i + 1, input.habits[i]);
+    if (input.just_replied) {
+        const auto it = std::ranges::find(request.ids, *input.just_replied);
+        user += it == request.ids.end() ? "\n她刚回复完一条消息。" :
+                                          std::format("\n她刚回复了 #{}。", static_cast<usize>(it - request.ids.begin()) + 1);
+        user += "新消息里其余的她还没回应过：看看有没有人在跟她说话、或者还有她想接的，没有就不说话，别为了说而说。";
+    } else {
+        user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
+                                  std::format("\n没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
+    }
+    if (!input.decisions.empty()) {
+        user += std::format("\n\n{}最近几次的判断（旧到新）：\n", input.info.name);
+        for (const auto &decision : input.decisions) user += "- " + decision + "\n";
+        user += "别重复她刚说过的意思。";
     }
     provider::append_user(request.history, std::move(user));
 
@@ -221,8 +229,7 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
                                         {"search", property("boolean", "是否需要联网搜索")},
                                         {input.reference_handoff ? "brief" : "intent",
                                          input.reference_handoff ? property("string", "给她的参考信息，不是台词，也不规定她怎么说") :
-                                                                   property("string", "一句话描述她想表达的意思，不是台词")},
-                                        {"habits", string_array_property("选用的学来的说法编号，例如 [\"E2\"]，可以为空")}},
+                                                                   property("string", "一句话描述她想表达的意思，不是台词")}},
                          .required = {"target", "style", input.reference_handoff ? "brief" : "intent"}},
     });
     request.tools.push_back({
@@ -253,20 +260,6 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         const auto target = parse_target(string_field(input, "target"));
         if (!target || *target == 0 || *target > ids.size()) return {.reason = "invalid target " + string_field(input, "target")};
         const auto style = string_field(input, "style");
-        std::vector<usize> habits;
-        if (const auto *picked = field(input, "habits"); picked && picked->is_array()) {
-            for (const auto &entry : picked->get_array()) {
-                std::string_view text = entry.is_string() ? std::string_view(entry.get_string()) : std::string_view();
-                if (text.starts_with('E') || text.starts_with('e')) text.remove_prefix(1);
-                usize index = 0;
-                if (entry.is_number()) {
-                    index = static_cast<usize>(entry.get_number());
-                } else if (std::from_chars(text.data(), text.data() + text.size(), index).ec != std::errc{}) {
-                    continue;
-                }
-                if (index >= 1 && habits.size() < 2 && !std::ranges::contains(habits, index - 1)) habits.push_back(index - 1);
-            }
-        }
         return {
             .reply = true,
             .target = ids[*target - 1],
@@ -277,7 +270,6 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
             .search = bool_field(input, "search"),
             .intent = string_field(input, "intent"),
             .brief = string_field(input, "brief"),
-            .habits = std::move(habits),
         };
     }
     return {.reason = "no tool call"};
@@ -335,10 +327,13 @@ provider::History build_writer_history(const WriterInput &input) {
         if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
         note += "】";
     }
+    if (!input.previous_reply.empty()) {
+        note += std::format("\n【你刚刚已经回复过这条消息，当时说的是：「{}」。这次是补充，别重复之前的话】", input.previous_reply);
+    }
     if (!input.habits.empty()) {
-        note += "\n【可以参考的说法，用得自然就用，不合适就别硬套：";
-        for (usize i = 0; i < input.habits.size(); ++i) note += (i ? "；" : "") + input.habits[i];
-        note += "】";
+        // MaiBot's wording for picked expressions.
+        note += "\n【表达习惯参考，请视情况自然地使用】";
+        for (const auto &habit : input.habits) note += "\n- " + habit;
     }
     note += "\n现在，你说：";
     if (history.size() > 2 && history.back().role == provider::Role::USER) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -7,6 +8,8 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <lighter/async/runtime/task.h>
@@ -75,6 +78,14 @@ struct Responder {
         /// Someone called her while she answered another message; the next
         /// turn must answer this one.
         std::optional<i64> owed;
+        /// Her latest planner decisions, oldest first, shown to the planner.
+        std::deque<std::string> decisions;
+        /// What she said to recent targets (message id, her text), newest last.
+        std::deque<std::pair<i64, std::string>> replied;
+        /// Messages already offered again after a reply; never twice.
+        std::unordered_set<i64> requeued;
+        /// The next turn is the look right after replying to this message.
+        std::optional<i64> just_replied;
     };
 
     const Config &config;

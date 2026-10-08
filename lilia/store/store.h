@@ -113,6 +113,9 @@ struct Store {
     /// that `expressions` would list first.
     Result<std::vector<Expression>> random_expressions(usize skip_top, usize limit);
 
+    /// Deletes the patterns with these ids.
+    Result<void> delete_expressions(const std::vector<i64> &ids);
+
     /// Keeps the `keep` most counted (then most recent) patterns.
     Result<void> prune_expressions(usize keep);
 

@@ -1,5 +1,7 @@
 #include <cstdio>
+#include <format>
 #include <random>
+#include <set>
 #include <string>
 #include <variant>
 #include <vector>
@@ -100,10 +102,14 @@ void test_store_and_sampling() {
             "random picks skip the top patterns");
 
     std::mt19937 rng(3);
-    const auto habits = chat::sample_habits(*store, 3, rng);
-    require(habits.size() == 3, "sample size");
-    require(std::ranges::contains(habits, std::string("当觉得很好笑时，可以用\"笑死\"")), "the most counted pattern is always offered");
-    require(chat::sample_habits(*store, 2, rng).size() == 2, "fewer than three candidates are all random");
+    const auto habits = chat::sample_habits(*store, 5, rng);
+    require(habits.size() == 5 && std::set<std::string>(habits.begin(), habits.end()).size() == 5, "sampled without replacement");
+    require(chat::sample_habits(*store, 100, rng).size() == 21, "never more than the pool");
+    usize top = 0;
+    for (int i = 0; i < 400; ++i)
+        top += std::ranges::contains(chat::sample_habits(*store, 1, rng), std::string("当觉得很好笑时，可以用\"笑死\""));
+    // Weight 5 against 20 others of weight 1: about 1/5 of single picks.
+    require(top > 40 && top < 140, std::format("the most counted pattern is weighted up ({} of 400)", top));
     require(chat::sample_voice(*store, 20) == std::vector<std::string>({"笑死"}),
             "voice samples are the bare quoted phrases, without duplicates or unquoted styles");
     require(chat::quoted_phrase("用\"何意味\"") == "何意味" && chat::quoted_phrase("句尾加个括号").empty(), "quoted phrase");
@@ -112,19 +118,29 @@ void test_store_and_sampling() {
     require(store->expressions(100)->size() == 5, "pruned to the most counted");
 }
 
-void test_planner_habits() {
-    const auto request = chat::build_planner_request({
-        .prompt = "P",
-        .info = {.chat = {.type = "group", .id = 1}, .name = "莉莉娅"},
-        .recent = {{.chat = {.type = "group", .id = 1}, .message_id = 5, .sender_id = 2, .sender_name = "a", .text = "笑死"}},
-        .fresh = {5},
-        .habits = {"当觉得离谱时，可以用\"笑死\"", "当附和时，可以用\"确实\""},
-    });
-    const auto user = text_of(request.history[1]);
-    require(user.find("E1 当觉得离谱时") != std::string::npos && user.find("E2 当附和时") != std::string::npos, "habits are listed");
-    const auto plan = chat::parse_plan(
-        {tool_call("reply", R"({"target": "#1", "style": "short", "intent": "x", "habits": ["E2", "e9", 1, "E2", "E1"]})")}, request.ids);
-    require(plan.reply && plan.habits == std::vector<usize>({1, 8}), "picks parse, dedupe and stop at two");
+void test_review_and_selection() {
+    const auto review = learn::build_review_request("REVIEW", {{"觉得离谱", "用\"笑死\""}, {"不想理人", "用\"别理我\""}});
+    require(text_of(review.history[0]) == "REVIEW" &&
+                text_of(review.history[1]) == "1. 当觉得离谱时，可以用\"笑死\"\n2. 当不想理人时，可以用\"别理我\"\n",
+            "review lists the patterns numbered from 1");
+    require(review.tools.size() == 1 && review.tools[0].name == "review_expressions", "review tool");
+    require(learn::parse_picks({tool_call("review_expressions", R"({"reject": ["2", 1, "#2", "9", "x"]})")}, "review_expressions", "reject",
+                               2, 2) == std::vector<usize>({1, 0}),
+            "picks parse numbers, strings and #n, dedupe, drop out-of-range");
+    require(learn::parse_picks({}, "review_expressions", "reject", 2, 2).empty(), "no tool call picks nothing");
+
+    const auto selection = learn::build_selection_request("SELECT", {.recent = {"a: 抽卡又歪了", "莉莉娅（她自己）: 惨"},
+                                                                     .target = "a: 抽卡又歪了",
+                                                                     .intent = "吐槽运气",
+                                                                     .candidates = {"当倒霉时，可以用\"我服了\""}});
+    const auto user = text_of(selection.history[1]);
+    require(user.find("a: 抽卡又歪了\n莉莉娅（她自己）: 惨") != std::string::npos &&
+                user.find("最新的一条：a: 抽卡又歪了") != std::string::npos && user.find("她想表达的意思：吐槽运气") != std::string::npos &&
+                user.find("1. 当倒霉时，可以用\"我服了\"") != std::string::npos,
+            "the selector sees the chat, the target, the intent and numbered candidates");
+    require(learn::parse_picks({tool_call("select_expressions", R"({"ids": ["1", "1"]})")}, "select_expressions", "ids", 1, 3) ==
+                std::vector<usize>({0}),
+            "selection picks");
 
     const auto history = chat::build_writer_history({
         .persona = "P",
@@ -135,7 +151,8 @@ void test_planner_habits() {
         .plan = {.reply = true, .target = 5},
         .habits = {"当附和时，可以用\"确实\""},
     });
-    require(text_of(history.back()).find("可以参考的说法") != std::string::npos, "picked habits reach the writer");
+    require(text_of(history.back()).find("【表达习惯参考，请视情况自然地使用】\n- 当附和时，可以用\"确实\"") != std::string::npos,
+            "picked habits reach the writer");
 }
 
 } // namespace
@@ -146,7 +163,7 @@ int main() {
         test_parse();
         test_learnable_text();
         test_store_and_sampling();
-        test_planner_habits();
+        test_review_and_selection();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

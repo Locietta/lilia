@@ -41,4 +41,8 @@ lighter::Task<int> run_learn(Config config, std::filesystem::path log);
 /// Prints the learned expressions of a lilia.db (read-only).
 int print_expressions(const std::filesystem::path &database, usize limit);
 
+/// Runs the learning review over every stored expression and lists what it
+/// would reject (and blocked put-downs); `apply` deletes those rows.
+lighter::Task<int> review_expressions(Config config, bool apply);
+
 } // namespace lilia

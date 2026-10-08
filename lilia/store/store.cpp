@@ -291,6 +291,16 @@ Result<std::vector<Expression>> Store::expressions(usize limit) {
     return read_expressions(*statement);
 }
 
+Result<void> Store::delete_expressions(const std::vector<i64> &ids) {
+    for (const auto id : ids) {
+        auto statement = database.prepare("DELETE FROM expressions WHERE id = ?1");
+        if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+        statement->bind(1, id);
+        if (auto ran = statement->run(); ran.has_error()) return ran;
+    }
+    return {};
+}
+
 Result<void> Store::prune_expressions(usize keep) {
     auto statement = database.prepare(
         "DELETE FROM expressions WHERE id NOT IN (SELECT id FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1)");

@@ -60,6 +60,11 @@ struct ModelConfig {
     /// claude-sonnet-5-5) reject that; without it the prompt still asks for
     /// a tool, and an answer without one counts as staying silent.
     bool planner_force_tool = true;
+    /// Deadlines (seconds) for one model call, retries included. Past them a
+    /// call counts as failed, so a hung request cannot leave her silent.
+    u32 timeout_seconds = 30;
+    u32 writer_timeout_seconds = 40;
+    u32 search_timeout_seconds = 90;
     /// Tried in order when the writer call fails (outage, rate limit) or
     /// comes back empty.
     std::vector<WriterFallback> writer_fallbacks;
@@ -137,8 +142,8 @@ struct LearningConfig {
     /// Patterns beyond this are dropped (lowest count first); 0 keeps all.
     /// A pattern is a short row, so the pool is allowed to grow.
     usize max_expressions = 0;
-    /// Patterns offered to the planner per turn.
-    usize candidates = 15;
+    /// Patterns sampled (weighted by count) for the selector per reply.
+    usize candidates = 10;
 };
 
 struct Config {

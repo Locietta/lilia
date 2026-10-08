@@ -35,8 +35,6 @@ struct Plan {
     /// "reference" handoff: the planner's notes for the writer.
     std::string brief;
     std::string reason; ///< why she stays silent
-    /// Indices into PlannerInput::habits the writer should lean on (0-2).
-    std::vector<usize> habits;
 };
 
 struct PlannerInput {
@@ -50,10 +48,14 @@ struct PlannerInput {
     i64 now = 0;
     i32 utc_offset_minutes = 480;
     usize log_bytes = 12'000;
-    /// Learned patterns offered this turn, "当X时，可以Y", shown as E1, E2 ...
-    std::vector<std::string> habits;
     /// The reply tool asks for `brief` (notes) instead of `intent`.
     bool reference_handoff = false;
+    /// Her latest decisions, oldest first ("[21:05] 没说话：…"), so the planner
+    /// knows what she just did and why.
+    std::vector<std::string> decisions;
+    /// Set on the extra turn right after a reply: the message she answered.
+    /// The other new messages are offered once more.
+    std::optional<i64> just_replied;
 };
 
 /// The planner.md line describing what it hands the writer.
@@ -86,8 +88,10 @@ struct WriterInput {
     usize log_bytes = 12'000;
     /// Facts from the search step; the writer picks one point from them.
     std::string reference;
-    /// Learned patterns the planner picked, "当X时，可以Y".
+    /// Learned patterns the selector picked for this reply, "当X时，可以Y".
     std::vector<std::string> habits;
+    /// What she already said to this same target, when she answers it again.
+    std::string previous_reply;
     /// A random handful of phrases people in the groups actually say, to
     /// anchor her voice in real chat rather than the model's own register.
     std::vector<std::string> voice;

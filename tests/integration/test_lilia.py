@@ -73,6 +73,7 @@ def text_block(index, text):
 
 
 BROKEN_WRITER = "broken-writer"
+WRITER_TIMEOUT = 2
 
 
 def start_model_server():
@@ -122,6 +123,8 @@ def start_model_server():
                 data = planner_answer(body)
             elif "record_expressions" in tools:
                 data = learner_answer()
+            elif "review_expressions" in tools:
+                data = review_answer()
             elif has_image(body):
                 data = sse(
                     [
@@ -229,13 +232,25 @@ def has_image(body):
 
 
 def learner_answer():
-    """One pattern citing line 2, plus one citing a line that does not exist."""
-    arguments = {
-        "items": [
-            {"situation": "觉得离谱", "style": '用"笑死 这也行"', "source": "2"},
-            {"situation": "编造的", "style": "不存在的行", "source": "7"},
-        ]
-    }
+    """Two patterns the review sees, plus one citing a line that does not exist."""
+    return tool_answer(
+        "record_expressions",
+        {
+            "items": [
+                {"situation": "觉得离谱", "style": '用"笑死 这也行"', "source": "2"},
+                {"situation": "不想理人", "style": '用"别理我"', "source": "1"},
+                {"situation": "编造的", "style": "不存在的行", "source": "7"},
+            ]
+        },
+    )
+
+
+def review_answer():
+    """The review drops the second pattern."""
+    return tool_answer("review_expressions", {"reject": ["2"]})
+
+
+def tool_answer(name, arguments):
     return sse(
         [
             message_start(8),
@@ -247,7 +262,7 @@ def learner_answer():
                     "content_block": {
                         "type": "tool_use",
                         "id": "toolu_2",
-                        "name": "record_expressions",
+                        "name": name,
                         "input": {},
                     },
                 },
@@ -516,6 +531,7 @@ def test_reply_and_reconnect(tmp_path):
                     "base_url": f"http://127.0.0.1:{model.server_port}",
                     "model": BROKEN_WRITER,
                     "writer_fallbacks": [{"model": "fake-model"}],
+                    "writer_timeout_seconds": WRITER_TIMEOUT,
                     "api_key": "$LILIA_TEST_KEY",
                 },
                 "chat": {"groups": [GROUP], "debounce_seconds": 0, "typing_speed": 0},
@@ -556,13 +572,24 @@ def test_reply_and_reconnect(tmp_path):
         return [tool.get("name") for tool in body.get("tools", [])]
 
     learners = [b for b in model_state["bodies"] if "record_expressions" in offered(b)]
+    reviews = [b for b in model_state["bodies"] if "review_expressions" in offered(b)]
     visions = [b for b in model_state["bodies"] if has_image(b)]
-    turns = [b for b in model_state["bodies"] if b not in learners and b not in visions]
+    turns = [
+        b
+        for b in model_state["bodies"]
+        if b not in learners and b not in reviews and b not in visions
+    ]
     assert len(visions) == 1, "the picture is described once; voice is not an image"
     image = visions[0]["messages"][0]["content"][0]
     assert image["source"]["media_type"] == "image/png"
     assert base64.b64decode(image["source"]["data"]) == PNG_BYTES
     assert len(learners) == 1, "one learning batch from the ignored group"
+    assert len(reviews) == 1, "the extracted patterns are reviewed before storing"
+    reviewed = reviews[0]["messages"][-1]["content"][0]["text"]
+    assert (
+        reviewed
+        == '1. 当觉得离谱时，可以用"笑死 这也行"\n2. 当不想理人时，可以用"别理我"\n'
+    ), reviewed
     learned_from = learners[0]["messages"][-1]["content"][0]["text"]
     assert learned_from == "1. 群友1: 别理我\n2. 群友1: 笑死 这也行\n", learned_from
     assert len(turns) == 3, "one planner call, the broken writer, then its fallback"
@@ -608,7 +635,7 @@ def test_reply_and_reconnect(tmp_path):
     assert learned == [("觉得离谱", '用"笑死 这也行"', 1)], learned
     assert db.execute(
         "SELECT count(*) FROM llm_calls WHERE chat_type = 'learn'"
-    ).fetchone() == (1,)
+    ).fetchone() == (2,), "learning and review calls"
     calls = db.execute(
         "SELECT chat_id, model, input_tokens, output_tokens, error != '' FROM llm_calls "
         "WHERE chat_type = 'group' ORDER BY id"

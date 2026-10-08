@@ -133,6 +133,16 @@ void test_planner() {
             "an out-of-range target is silence");
     require(!chat::parse_plan({}, request.ids).reply, "no tool call is silence");
 
+    auto followup_input = chat::PlannerInput{
+        .prompt = "P", .info = group_info(), .recent = {stored(401, t, "c", "a"), stored(402, t, "d", "b")}, .fresh = {401, 402}};
+    followup_input.decisions = {"[21:04] 没说话：别人在私聊", "[21:05] 回复了c的「a」：接一句"};
+    followup_input.just_replied = 401;
+    const auto followup = text_of(chat::build_planner_request(followup_input).history[1]);
+    require(followup.find("她刚回复了 #1") != std::string::npos && followup.find("没有人直接叫") == std::string::npos,
+            "the look after a reply says what she answered");
+    require(followup.find("- [21:05] 回复了c的「a」：接一句") != std::string::npos && followup.find("别重复") != std::string::npos,
+            "recent decisions are listed");
+
     auto reference_input =
         chat::PlannerInput{.prompt = "P", .info = group_info(), .recent = {stored(301, t, "c", "看新番吗")}, .fresh = {301}};
     reference_input.reference_handoff = true;
