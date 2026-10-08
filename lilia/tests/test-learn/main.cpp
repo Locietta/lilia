@@ -64,7 +64,7 @@ void test_parse() {
     require(learn::parse_learned({}, 3).empty(), "no tool call learns nothing");
 
     const auto filtered = learn::parse_learned({tool_call("record_expressions", R"({"items": [
-            {"situation": "吐槽某个人很差劲", "style": "用「杂鱼」", "source": "1"},
+            {"situation": "吐槽某个人很差劲", "style": "用「废物」", "source": "1"},
             {"situation": "调侃对方菜或者不行", "style": "用\"你怎么这么区\"", "source": "1"},
             {"situation": "评价某人水平一般", "style": "用\"很菜\"", "source": "1"},
             {"situation": "看到离谱的事", "style": "说「绷」", "source": "1"}
@@ -74,6 +74,7 @@ void test_parse() {
     require(learn::normalize_style("回“洗澡”") == "用\"洗澡\"", "回 and curly quotes");
     require(learn::normalize_style("句尾加\"捏\"") == "句尾加\"捏\"", "other forms stay");
     require(!learn::blocked_expression("表示受不了", "用\"我不行了\""), "ordinary phrases pass");
+    require(!learn::blocked_expression("开玩笑逗人", "用\"杂鱼~\""), "playful 杂鱼 is not an insult");
 }
 
 void test_learnable_text() {

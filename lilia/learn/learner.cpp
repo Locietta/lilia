@@ -65,9 +65,10 @@ std::string strip_time_suffix(std::string text) {
 
 /// Insults slip past the prompt now and then; lilia never attacks people,
 /// so these are dropped whatever the model says.
-constexpr std::array<std::string_view, 24> k_blocked_words{"杂鱼",   "肺物", "废物", "煞笔", "傻逼", "傻b",    "傻B",  "sb",
-                                                           "SB",     "弱智", "脑残", "智障", "艾草", "闭嘴",   "菜狗", "笨蛋",
-                                                           "这么区", "去死", "nmsl", "你妈", "尼玛", "垃圾人", "滚",   "狗东西"};
+/// (Not "杂鱼": that is playful little-devil teasing, not an insult.)
+constexpr std::array<std::string_view, 23> k_blocked_words{"肺物", "废物", "煞笔", "傻逼", "傻b",    "傻B",  "sb",    "SB",
+                                                           "弱智", "脑残", "智障", "艾草", "闭嘴",   "菜狗", "笨蛋",  "这么区",
+                                                           "去死", "nmsl", "你妈", "尼玛", "垃圾人", "滚",   "狗东西"};
 
 /// Situations that describe putting someone else down.
 constexpr std::array<std::string_view, 8> k_blocked_situations{"别人菜", "对方菜",   "某人水平", "别人笨",
