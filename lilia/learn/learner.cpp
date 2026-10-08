@@ -63,16 +63,21 @@ std::string strip_time_suffix(std::string text) {
     return text;
 }
 
-/// Insults slip past the prompt now and then; lilia never attacks people,
-/// so these are dropped whatever the model says.
-/// (Not "杂鱼": that is playful little-devil teasing, not an insult.)
-constexpr std::array<std::string_view, 23> k_blocked_words{"肺物", "废物", "煞笔", "傻逼", "傻b",    "傻B",  "sb",    "SB",
-                                                           "弱智", "脑残", "智障", "艾草", "闭嘴",   "菜狗", "笨蛋",  "这么区",
-                                                           "去死", "nmsl", "你妈", "尼玛", "垃圾人", "滚",   "狗东西"};
+/// Insults slip past the prompt now and then; lilia never attacks people, so
+/// these are dropped whatever the model says. Insults whatever the target:
+constexpr std::array<std::string_view, 14> k_slurs{"煞笔", "傻逼", "傻b",  "傻B",  "sb",   "SB",   "弱智",
+                                                   "脑残", "智障", "去死", "nmsl", "你妈", "尼玛", "狗东西"};
+
+/// Fine about things ("这卡有点区", "这道具纯纯垃圾"), not about people:
+/// dropped only when the pattern is aimed at a person. (Not "杂鱼": that is
+/// playful little-devil teasing.)
+constexpr std::array<std::string_view, 11> k_put_downs{"区", "菜", "垃圾", "废物", "肺物", "笨蛋", "笨", "滚", "闭嘴", "艾草", "没用"};
+
+/// A situation about someone (别人/对方/某人...) or a phrase said to "你".
+constexpr std::array<std::string_view, 9> k_person_markers{"别人", "对方", "某人", "某个人", "群友", "他人", "人家", "朋友", "骂人"};
 
 /// Situations that describe putting someone else down.
-constexpr std::array<std::string_view, 8> k_blocked_situations{"别人菜", "对方菜",   "某人水平", "别人笨",
-                                                               "对方笨", "别人没用", "骂人",     "让对方"};
+constexpr std::array<std::string_view, 3> k_blocked_situations{"骂人", "让对方", "让人闭嘴"};
 
 bool fits(std::string_view text) { return !text.empty() && chat::count_code_points(text) <= k_max_field_code_points; }
 
@@ -113,9 +118,12 @@ provider::ToolDefinition pick_tool(std::string name, std::string description, st
 
 bool blocked_expression(std::string_view situation, std::string_view style) {
     const auto contains = [](std::string_view text, std::string_view word) { return text.find(word) != std::string_view::npos; };
-    return std::ranges::any_of(k_blocked_words,
-                               [&](std::string_view word) { return contains(style, word) || contains(situation, word); }) ||
-           std::ranges::any_of(k_blocked_situations, [&](std::string_view word) { return contains(situation, word); });
+    const auto in_either = [&](std::string_view word) { return contains(style, word) || contains(situation, word); };
+    if (std::ranges::any_of(k_slurs, in_either)) return true;
+    if (std::ranges::any_of(k_blocked_situations, [&](std::string_view word) { return contains(situation, word); })) return true;
+    const bool at_person =
+        contains(style, "你") || std::ranges::any_of(k_person_markers, [&](std::string_view word) { return contains(situation, word); });
+    return at_person && std::ranges::any_of(k_put_downs, in_either);
 }
 
 std::string normalize_style(std::string_view style) {

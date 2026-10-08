@@ -44,8 +44,10 @@ LearnerRequest build_learner_request(std::string_view prompt, const std::vector<
 /// line that does not exist.
 std::vector<Learned> parse_learned(const std::vector<provider::OutputItem> &items, usize line_count);
 
-/// True for patterns that put people down (insults, "说人菜", "让人闭嘴"),
-/// which lilia must never pick up, even as a joke.
+/// True for patterns that put people down, which lilia must never pick up:
+/// outright slurs always; words like 区/菜/垃圾 only when aimed at a person
+/// (a situation about 别人/对方/某人, or a phrase said to 你), since they are
+/// fine about cards, items and other things.
 bool blocked_expression(std::string_view situation, std::string_view style);
 
 /// One spelling per style: 「」“”『』 become ASCII quotes and 说"…"/回"…"

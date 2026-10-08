@@ -75,6 +75,11 @@ void test_parse() {
     require(learn::normalize_style("句尾加\"捏\"") == "句尾加\"捏\"", "other forms stay");
     require(!learn::blocked_expression("表示受不了", "用\"我不行了\""), "ordinary phrases pass");
     require(!learn::blocked_expression("开玩笑逗人", "用\"杂鱼~\""), "playful 杂鱼 is not an insult");
+    require(!learn::blocked_expression("评价新卡强度不够", "用\"这卡有点区\""), "区 about a card is fine");
+    require(!learn::blocked_expression("吐槽道具没什么用", "用\"纯纯垃圾\""), "垃圾 about an item is fine");
+    require(learn::blocked_expression("调侃对方不行", "用\"你怎么这么区\""), "区 said to you is not");
+    require(learn::blocked_expression("吐槽某个人很差劲", "用\"纯纯垃圾\""), "垃圾 about a person is not");
+    require(learn::blocked_expression("觉得离谱", "用\"弱智吧\""), "slurs are blocked whatever the target");
 }
 
 void test_learnable_text() {
