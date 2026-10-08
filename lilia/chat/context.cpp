@@ -227,6 +227,9 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         // MaiBot's person profiles: background for the planner only.
         user += "\n\n群友资料（她已经知道这些，别让她再问一遍；内部参考，别逐字复述；和眼前的聊天冲突时以聊天为准）：\n" + input.people;
     }
+    if (!input.recall.empty()) {
+        user += "\n\n聊天回想（以前聊过的相关内容，内部参考；自然相关时才用，别生硬复述）：\n" + input.recall;
+    }
     if (!input.decisions.empty()) {
         user += std::format("\n\n{}最近几次的判断（旧到新）：\n", input.info.name);
         for (const auto &decision : input.decisions) user += "- " + decision + "\n";

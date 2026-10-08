@@ -76,6 +76,23 @@ struct MemoryChunk {
     std::string vector;
 };
 
+/// An incremental summary of a stretch of chat (empty `summary`: nothing
+/// worth keeping, a checkpoint only). `cues` are newline-separated recall
+/// cues; `cue_vectors` their embeddings, concatenated like `vector`.
+struct ChatSummary {
+    i64 id = 0;
+    ChatKey chat;
+    i64 first_row = 0;
+    i64 last_row = 0;
+    i64 start_time = 0;
+    i64 end_time = 0;
+    std::string summary;
+    std::string cues;
+    std::string model;
+    std::string vector;
+    std::string cue_vectors;
+};
+
 /// A stable fact about a person, quoted from their own message. `fact` is
 /// written about "TA"; `vector` as in MemoryChunk.
 struct PersonFact {
@@ -156,6 +173,14 @@ struct Store {
 
     /// Drops chunks embedded by any other model (their vectors are not comparable).
     Result<void> delete_chunks_except(std::string_view model);
+
+    Result<void> add_summary(const ChatSummary &summary);
+
+    /// The last message row covered by summaries of `chat` (0: none).
+    Result<i64> last_summary_row(const ChatKey &chat);
+
+    /// Summaries of `chat`, oldest first; `limit` > 0 keeps only the newest.
+    Result<std::vector<ChatSummary>> summaries(const ChatKey &chat, usize limit);
 
     Result<void> add_fact(const PersonFact &fact);
 

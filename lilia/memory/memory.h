@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -83,6 +84,30 @@ std::vector<ExtractedFact> parse_facts(const std::vector<provider::OutputItem> &
 /// "对芒果过敏；住在杭州": facts about TA, newest first, joined.
 std::string render_facts(const std::vector<store::PersonFact> &facts);
 
+// Rolling chat summaries (MaiBot's incremental chat summary and mid-term
+// recall): every `summary_messages` messages of a chat get one summary of
+// what is new, seeing the previous ones, plus recall cues. Summaries are
+// searchable; their cues bring them back when the chat returns to a topic
+// that has scrolled out of view.
+
+struct SummaryResult {
+    std::string summary;
+    std::vector<std::string> cues;
+};
+
+/// `previous` (oldest first) are shown for context only.
+FactRequest build_summary_request(std::string_view prompt, const std::vector<store::ChatSummary> &previous, std::string_view lines);
+
+/// Reads record_summary; nullopt when the tool was not called. An empty
+/// summary is a valid "nothing new" answer.
+std::optional<SummaryResult> parse_summary(const std::vector<provider::OutputItem> &items);
+
+/// "[10-05 21:00 至 22:30 的聊天摘要] ..." as a rankable chunk.
+store::MemoryChunk summary_chunk(const store::ChatSummary &summary, i32 utc_offset_minutes);
+
+/// The concatenated cue vectors of a summary, split by `dimensions`.
+std::vector<std::vector<float>> split_vectors(std::string_view bytes, usize dimensions);
+
 struct Memory {
     Memory(const MemoryConfig &config, std::string self_name, i32 utc_offset_minutes, store::Store &store);
 
@@ -100,6 +125,14 @@ struct Memory {
     /// (same text, or cosine >= the duplicate threshold). True if stored.
     lighter::Task<bool> remember(store::PersonFact fact);
 
+    /// Summarizes the next `summary_messages` messages of `chat` if that many
+    /// are waiting (called by index()). Needs `summarizer`.
+    lighter::Task<> summarize(store::ChatKey chat);
+
+    /// A summary whose cues match the last few messages of `log` well enough,
+    /// among those that end before `log` begins; empty when none does.
+    lighter::Task<std::string> recall(store::ChatKey chat, std::vector<store::StoredMessage> log);
+
     /// "群友资料" lines for these people (QQ number, display name), with
     /// their newest facts; empty when none has any.
     std::string people_notes(const std::vector<std::pair<i64, std::string>> &people);
@@ -110,6 +143,9 @@ struct Memory {
     i32 utc_offset_minutes;
     store::Store &store;
     lighter::http::Client http;
+    /// Writes summaries; null leaves summarizing off.
+    std::optional<provider::Provider> summarizer;
+    std::string summarizer_model;
     std::vector<store::ChatKey> indexing; ///< chats with an index() running
     std::vector<store::ChatKey> again;    ///< asked again while running
 };

@@ -120,6 +120,8 @@ Task<int> run_app(const Config &config) {
     memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
     if (config.memory.enabled) {
         responder.memory = &memory;
+        memory.summarizer = make_learner(config.model);
+        memory.summarizer_model = config.model.planner_model;
         // Vectors of another model are not comparable; drop them and rebuild.
         if (auto dropped = store->delete_chunks_except(config.memory.embedding_model); dropped.has_error())
             log::error("memory: {}", dropped.error().message());

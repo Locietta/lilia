@@ -8,8 +8,8 @@ namespace lilia::store {
 namespace {
 
 // 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
-// 6: person_facts.
-constexpr int k_schema_version = 6;
+// 6: person_facts. 7: chat_summaries.
+constexpr int k_schema_version = 7;
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -99,6 +99,22 @@ CREATE TABLE IF NOT EXISTS person_facts (
     vector BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS person_facts_by_person ON person_facts (person_id, time);
+
+CREATE TABLE IF NOT EXISTS chat_summaries (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    first_row INTEGER NOT NULL,
+    last_row INTEGER NOT NULL,
+    start_time INTEGER NOT NULL,
+    end_time INTEGER NOT NULL,
+    summary TEXT NOT NULL,
+    cues TEXT NOT NULL,
+    model TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    cue_vectors BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_summaries_by_chat ON chat_summaries (chat_type, chat_id, last_row);
 )sql";
 
 Result<Store> initialize(Result<Database> opened, bool file_backed) {
@@ -160,7 +176,7 @@ Result<void> Store::add_message(const StoredMessage &message) {
 }
 
 Result<std::vector<StoredMessage>> Store::recent_messages(const ChatKey &chat, usize limit) {
-    auto statement = database.prepare("SELECT message_id, sender_id, sender_name, time, segments, text, from_self FROM messages "
+    auto statement = database.prepare("SELECT message_id, sender_id, sender_name, time, segments, text, from_self, id FROM messages "
                                       "WHERE chat_type = ?1 AND chat_id = ?2 ORDER BY time DESC, id DESC LIMIT ?3");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, chat.type);
@@ -181,6 +197,7 @@ Result<std::vector<StoredMessage>> Store::recent_messages(const ChatKey &chat, u
             .segments_json = statement->column_text(4),
             .text = statement->column_text(5),
             .from_self = statement->column_int(6) != 0,
+            .row_id = statement->column_int(7),
         });
     }
     std::ranges::reverse(messages);
@@ -275,6 +292,64 @@ Result<void> Store::delete_chunks_except(std::string_view model) {
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, model);
     return statement->run();
+}
+
+Result<void> Store::add_summary(const ChatSummary &summary) {
+    auto statement = database.prepare("INSERT INTO chat_summaries (chat_type, chat_id, first_row, last_row, start_time, end_time, summary, "
+                                      "cues, model, vector, cue_vectors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, summary.chat.type);
+    statement->bind(2, summary.chat.id);
+    statement->bind(3, summary.first_row);
+    statement->bind(4, summary.last_row);
+    statement->bind(5, summary.start_time);
+    statement->bind(6, summary.end_time);
+    statement->bind(7, summary.summary);
+    statement->bind(8, summary.cues);
+    statement->bind(9, summary.model);
+    statement->bind_blob(10, summary.vector);
+    statement->bind_blob(11, summary.cue_vectors);
+    return statement->run();
+}
+
+Result<i64> Store::last_summary_row(const ChatKey &chat) {
+    auto statement = database.prepare("SELECT COALESCE(MAX(last_row), 0) FROM chat_summaries WHERE chat_type = ?1 AND chat_id = ?2");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    return *row ? statement->column_int(0) : 0;
+}
+
+Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize limit) {
+    auto statement = database.prepare("SELECT * FROM (SELECT id, first_row, last_row, start_time, end_time, summary, cues, model, vector, "
+                                      "cue_vectors FROM chat_summaries "
+                                      "WHERE chat_type = ?1 AND chat_id = ?2 ORDER BY last_row DESC LIMIT ?3) ORDER BY last_row");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, limit == 0 ? i64{-1} : static_cast<i64>(limit));
+    std::vector<ChatSummary> summaries;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        summaries.push_back({
+            .id = statement->column_int(0),
+            .chat = chat,
+            .first_row = statement->column_int(1),
+            .last_row = statement->column_int(2),
+            .start_time = statement->column_int(3),
+            .end_time = statement->column_int(4),
+            .summary = statement->column_text(5),
+            .cues = statement->column_text(6),
+            .model = statement->column_text(7),
+            .vector = statement->column_blob(8),
+            .cue_vectors = statement->column_blob(9),
+        });
+    }
+    return summaries;
 }
 
 Result<void> Store::add_fact(const PersonFact &fact) {

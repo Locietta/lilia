@@ -1,0 +1,227 @@
+#include "memory.h"
+
+#include <algorithm>
+#include <chrono>
+#include <format>
+
+#include <glaze/json.hpp>
+
+#include <lighter/async/runtime/timeout.h>
+
+#include <xmake/bin2obj/summary_md.hpp>
+
+#include <lilia/chat/context.h>
+#include <lilia/log.h>
+
+namespace lilia::memory {
+
+using lighter::Task;
+
+namespace {
+
+constexpr usize k_max_cues = 5;
+
+const glz::generic *field(const glz::generic &object, std::string_view key) {
+    if (!object.is_object()) return nullptr;
+    const auto &map = object.get_object();
+    const auto it = map.find(key);
+    return it == map.end() ? nullptr : &it->second;
+}
+
+provider::ToolDefinition record_summary_tool() {
+    glz::generic cue_schema;
+    std::ignore = glz::read_json(cue_schema, R"({"type": "string"})");
+    provider::SchemaProperty cues{.type = "array", .description = "3 到 5 句回想线索；没有新内容时为空"};
+    cues.items.emplace(std::move(cue_schema));
+    return {
+        .name = "record_summary",
+        .description = "提交这段聊天的增量摘要和回想线索",
+        .input_schema = {.properties = {{"summary", {.type = "string", .description = "新内容的摘要；没有就写空字符串"}},
+                                        {"recall_cues", std::move(cues)}},
+                         .required = {"summary", "recall_cues"}},
+    };
+}
+
+/// with_timeout takes lighter's error type; hand the outcome through as a value.
+Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
+    auto outcome = co_await std::move(call);
+    co_return outcome;
+}
+
+constexpr std::chrono::seconds k_summary_deadline{90};
+
+std::string local_time(i64 unix_seconds, i32 utc_offset_minutes) {
+    return std::format("{:%m-%d %H:%M}", std::chrono::sys_seconds(std::chrono::seconds(unix_seconds + i64{utc_offset_minutes} * 60)));
+}
+
+} // namespace
+
+FactRequest build_summary_request(std::string_view prompt, const std::vector<store::ChatSummary> &previous, std::string_view lines) {
+    FactRequest request;
+    provider::append_system(request.history, std::string(prompt));
+    std::string user;
+    std::string earlier;
+    for (const auto &summary : previous) {
+        if (!summary.summary.empty()) earlier += "- " + summary.summary + "\n";
+    }
+    if (!earlier.empty()) user += "以前的摘要（只用来理解上下文，别照抄）：\n" + earlier + "\n";
+    user += "新的群聊记录：\n";
+    user += lines;
+    provider::append_user(request.history, std::move(user));
+    request.tools.push_back(record_summary_tool());
+    return request;
+}
+
+std::optional<SummaryResult> parse_summary(const std::vector<provider::OutputItem> &items) {
+    for (const auto &item : items) {
+        const auto *call = std::get_if<provider::ToolCallItem>(&item);
+        if (!call || call->call.name != "record_summary") continue;
+        SummaryResult result;
+        if (const auto *summary = field(call->call.input, "summary"); summary && summary->is_string())
+            result.summary = summary->get_string();
+        if (const auto *cues = field(call->call.input, "recall_cues"); cues && cues->is_array()) {
+            for (const auto &cue : cues->get_array()) {
+                if (cue.is_string() && !cue.get_string().empty() && result.cues.size() < k_max_cues)
+                    result.cues.push_back(cue.get_string());
+            }
+        }
+        // Cues without a summary have nothing to bring back.
+        if (result.summary.empty()) result.cues.clear();
+        return result;
+    }
+    return std::nullopt;
+}
+
+store::MemoryChunk summary_chunk(const store::ChatSummary &summary, i32 utc_offset_minutes) {
+    return {
+        .id = -summary.id,
+        .chat = summary.chat,
+        .first_row = summary.first_row,
+        .last_row = summary.last_row,
+        .start_time = summary.start_time,
+        .end_time = summary.end_time,
+        .text = std::format("[{} 至 {} 的聊天摘要] {}\n", local_time(summary.start_time, utc_offset_minutes),
+                            local_time(summary.end_time, utc_offset_minutes), summary.summary),
+        .model = summary.model,
+        .vector = summary.vector,
+    };
+}
+
+std::vector<std::vector<float>> split_vectors(std::string_view bytes, usize dimensions) {
+    std::vector<std::vector<float>> vectors;
+    const usize size = dimensions * sizeof(float);
+    if (size == 0) return vectors;
+    for (usize offset = 0; offset + size <= bytes.size(); offset += size) vectors.push_back(decode_vector(bytes.substr(offset, size)));
+    return vectors;
+}
+
+Task<> Memory::summarize(store::ChatKey chat) {
+    if (!summarizer || config.summary_messages == 0) co_return;
+    for (;;) {
+        auto last = store.last_summary_row(chat);
+        if (last.has_error()) co_return;
+        auto messages = store.messages_after(chat, *last, config.summary_messages);
+        if (messages.has_error() || messages->size() < config.summary_messages) co_return;
+        auto previous = store.summaries(chat, 2);
+        const auto prompt = chat::fill_template({reinterpret_cast<const char *>(xmake::summary_md.data()), xmake::summary_md.size()},
+                                                {{"name", self_name}});
+        const auto request = build_summary_request(prompt, previous.has_value() ? *previous : std::vector<store::ChatSummary>{},
+                                                   display_text(*messages, self_name, utc_offset_minutes));
+
+        std::vector<provider::OutputItem> items;
+        const provider::StreamCallbacks callbacks{
+            .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); }};
+        const i64 started = now();
+        // Past the deadline the call counts as failed; a hang must not block indexing.
+        auto settled =
+            co_await lighter::with_timeout(settle((*summarizer)->complete(request.history, request.tools, callbacks)), k_summary_deadline);
+        auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
+                                                    Error::api("timeout", "summary call exceeded its deadline", "", true))) :
+                                                *std::move(settled);
+        store::LlmCall call{.time = started, .chat = chat, .model = summarizer_model};
+        if (completion.has_error()) {
+            call.error = completion.error().message();
+        } else {
+            call.input_tokens = completion->usage.input_tokens;
+            call.output_tokens = completion->usage.output_tokens;
+            call.cache_read_tokens = completion->usage.cache_read_tokens;
+            call.request_id = completion->request_id;
+        }
+        std::ignore = store.add_llm_call(call);
+        if (completion.has_error()) {
+            log::warn("memory: summary call failed: {}", call.error);
+            co_return;
+        }
+        const auto result = parse_summary(items);
+        if (!result) {
+            log::warn("memory: the summary call did not use record_summary");
+            co_return;
+        }
+
+        store::ChatSummary summary{
+            .chat = chat,
+            .first_row = messages->front().row_id,
+            .last_row = messages->back().row_id,
+            .start_time = messages->front().time,
+            .end_time = messages->back().time,
+            .summary = result->summary,
+            .model = config.embedding_model,
+        };
+        if (!result->summary.empty()) {
+            std::vector<std::string> texts{result->summary};
+            texts.insert(texts.end(), result->cues.begin(), result->cues.end());
+            auto vectors = co_await embed(texts);
+            if (vectors.has_error() || vectors->size() != texts.size()) {
+                log::warn("memory: cannot embed a summary; will retry");
+                co_return;
+            }
+            summary.vector = encode_vector(vectors->front());
+            for (usize i = 1; i < vectors->size(); ++i) {
+                summary.cues += (i > 1 ? "\n" : "") + result->cues[i - 1];
+                summary.cue_vectors += encode_vector((*vectors)[i]);
+            }
+        }
+        if (auto added = store.add_summary(summary); added.has_error()) {
+            log::error("memory: {}", added.error().message());
+            co_return;
+        }
+        log::info("memory: summary of {}:{} ({} messages): {}", chat.type, chat.id, messages->size(),
+                  result->summary.empty() ? "(nothing new)" : result->summary);
+    }
+}
+
+Task<std::string> Memory::recall(store::ChatKey chat, std::vector<store::StoredMessage> log) {
+    if (log.empty() || config.recall_messages == 0) co_return std::string();
+    auto summaries = store.summaries(chat, 0);
+    if (summaries.has_error()) co_return std::string();
+    // Only summaries that have scrolled out of view are worth bringing back.
+    const i64 first_visible = log.front().row_id;
+    std::erase_if(*summaries, [&](const store::ChatSummary &summary) {
+        return summary.summary.empty() || summary.model != config.embedding_model ||
+               (first_visible > 0 && summary.last_row >= first_visible);
+    });
+    if (summaries->empty()) co_return std::string();
+
+    const std::vector<store::StoredMessage> recent(log.end() - static_cast<std::ptrdiff_t>(std::min(log.size(), config.recall_messages)),
+                                                   log.end());
+    auto vectors = co_await embed({embed_text(recent, self_name)});
+    if (vectors.has_error() || vectors->empty()) co_return std::string();
+    const auto &query = vectors->front();
+
+    const store::ChatSummary *best = nullptr;
+    double best_score = 0;
+    for (const auto &summary : *summaries) {
+        double score = cosine(decode_vector(summary.vector), query);
+        for (const auto &cue : split_vectors(summary.cue_vectors, query.size())) score = std::max(score, cosine(cue, query));
+        if (score > best_score) {
+            best_score = score;
+            best = &summary;
+        }
+    }
+    log::debug("memory: recall best {:.2f} in {}:{}", best_score, chat.type, chat.id);
+    if (!best || best_score < config.recall_score) co_return std::string();
+    log::info("memory: recalled a summary of {}:{} ({:.2f})", chat.type, chat.id, best_score);
+    co_return summary_chunk(*best, utc_offset_minutes).text;
+}
+
+} // namespace lilia::memory

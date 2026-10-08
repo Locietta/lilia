@@ -223,6 +223,8 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
     if (config.memory.enabled) {
         memory.now = [&sim, base] { return base + sim; };
+        memory.summarizer = make_learner(config.model);
+        memory.summarizer_model = config.model.planner_model;
         responder.memory = &memory;
     }
     i64 next_id = 1'000'000;

@@ -57,6 +57,8 @@ struct PlannerInput {
     bool memory_search = false;
     /// "- 名字：事实；事实" lines about the people in the new messages.
     std::string people;
+    /// A summary of older chat the recent messages bring to mind.
+    std::string recall;
     /// Set on the extra turn right after a reply: the message she answered.
     /// The other new messages are offered once more.
     std::optional<i64> just_replied;

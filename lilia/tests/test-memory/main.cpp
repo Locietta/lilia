@@ -147,6 +147,50 @@ void test_facts() {
     require(db->facts(8, 0)->empty() && db->facts(7, 0)->size() == 2, "per person; 0 lists all");
 }
 
+void test_summaries() {
+    const std::vector<store::ChatSummary> previous{{.summary = "阿紫说周六去成都"}, {.summary = ""}};
+    const auto request = memory::build_summary_request("PROMPT", previous, "[10-05 21:00] a: 定了\n");
+    std::string user;
+    for (const auto &part : request.history.back().parts) {
+        if (const auto *text = std::get_if<provider::TextPart>(&part)) user += text->text;
+    }
+    require(user.find("以前的摘要（只用来理解上下文，别照抄）：\n- 阿紫说周六去成都\n") != std::string::npos &&
+                user.find("新的群聊记录：\n[10-05 21:00] a: 定了") != std::string::npos,
+            "previous non-empty summaries come first, then the new lines");
+    require(request.tools.size() == 1 && request.tools[0].name == "record_summary", "record_summary tool");
+
+    provider::ToolCallItem call{.call = {.id = "t", .name = "record_summary"}};
+    require(!glz::read_json(call.call.input, R"({"summary": "定了周六去成都", "recall_cues": ["聊到成都", "", "周六的安排"]})"), "parse");
+    auto parsed = memory::parse_summary({provider::OutputItem(call)});
+    require(parsed && parsed->summary == "定了周六去成都" && parsed->cues == std::vector<std::string>({"聊到成都", "周六的安排"}),
+            "summary and non-empty cues");
+    require(!glz::read_json(call.call.input, R"({"summary": "", "recall_cues": ["x"]})"), "parse");
+    parsed = memory::parse_summary({provider::OutputItem(call)});
+    require(parsed && parsed->summary.empty() && parsed->cues.empty(), "nothing new is a valid answer, without cues");
+    require(!memory::parse_summary({}), "no tool call is no answer");
+
+    const auto chunk = memory::summary_chunk(
+        {.id = 3, .start_time = 1'791'032'700, .end_time = 1'791'036'300, .summary = "定了周六去成都", .vector = "v"}, 480);
+    require(chunk.text == "[10-03 21:05 至 10-03 22:05 的聊天摘要] 定了周六去成都\n" && chunk.id == -3 && chunk.vector == "v",
+            "a summary ranks as a chunk");
+    const auto cues = memory::encode_vector({1, 2}) + memory::encode_vector({3, 4});
+    require(memory::split_vectors(cues, 2) == std::vector<std::vector<float>>({{1, 2}, {3, 4}}), "cue vectors split by dimension");
+
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    const store::ChatKey chat{.type = "group", .id = 1};
+    for (const i64 last : {i64{10}, i64{20}, i64{30}}) {
+        require(db->add_summary({.chat = chat, .first_row = last - 9, .last_row = last, .summary = std::to_string(last), .model = "m"})
+                    .has_value(),
+                "add summary");
+    }
+    require(*db->last_summary_row(chat) == 30, "last summarized row");
+    auto newest = db->summaries(chat, 2);
+    require(newest.has_value() && newest->size() == 2 && newest->front().summary == "20" && newest->back().summary == "30",
+            "the newest summaries, oldest first");
+    require(db->summaries(chat, 0)->size() == 3, "0 lists all");
+}
+
 } // namespace
 
 int main() {
@@ -157,6 +201,7 @@ int main() {
         test_rank_and_render();
         test_store();
         test_facts();
+        test_summaries();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

@@ -242,6 +242,7 @@ Task<> Memory::index(store::ChatKey chat) {
             }
         }
         if (stored > 0) log::info("memory: indexed {} chunk(s) of {}:{}", stored, chat.type, chat.id);
+        co_await summarize(chat);
         // A full scan means more history is waiting (the first backfill).
         more = messages->size() == k_scan_messages && stored > 0;
         if (const auto it = std::ranges::find(again, chat); it != again.end()) {
@@ -264,6 +265,13 @@ Task<std::vector<Hit>> Memory::search(store::ChatKey chat, std::string query) {
     if (chunks.has_error()) {
         log::error("memory: {}", chunks.error().message());
         co_return std::vector<Hit>{};
+    }
+    // Summaries compete with raw chunks; they cover more ground per hit.
+    if (auto summaries = store.summaries(chat, 0); summaries.has_value()) {
+        for (const auto &summary : *summaries) {
+            if (!summary.summary.empty() && summary.model == config.embedding_model)
+                chunks->push_back(summary_chunk(summary, utc_offset_minutes));
+        }
     }
     auto hits = rank(*std::move(chunks), vectors->front(), keywords(query), config.search_results, config.min_score);
     log::info("memory: search \"{}\" in {}:{} -> {} hit(s){}", query, chat.type, chat.id, hits.size(),

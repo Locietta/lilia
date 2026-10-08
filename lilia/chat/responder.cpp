@@ -567,6 +567,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         planner_input.people = memory->people_notes(people);
         if (!planner_input.people.empty()) log::debug("{} notes on people:\n{}", describe(chat), planner_input.people);
     }
+    if (memory) planner_input.recall = co_await memory->recall(chat, log_lines);
     const auto request = build_planner_request(planner_input);
 
     const auto selection = start_selection(this, chat, log_lines);
