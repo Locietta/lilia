@@ -164,6 +164,13 @@ struct MemoryConfig {
     double min_score = 0.35;
     /// Searches the planner may run before deciding.
     usize max_searches = 2;
+    /// Learn facts about the person she answers (from their own words).
+    bool facts = true;
+    /// Facts shown per person, and the similarity that counts as a repeat.
+    usize facts_per_person = 6;
+    /// Measured with Qwen3-Embedding-0.6B: paraphrases ~0.86-0.88, different
+    /// facts ("学吉他" vs "学钢琴") ~0.75.
+    double duplicate_fact_score = 0.82;
 };
 
 struct Config {

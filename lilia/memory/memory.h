@@ -8,6 +8,8 @@
 #include <lighter/http/client.h>
 
 #include <lilia/config.h>
+#include <lilia/provider/history.h>
+#include <lilia/provider/provider.h>
 #include <lilia/error.h>
 #include <lilia/store/store.h>
 
@@ -55,6 +57,32 @@ std::string embed_text(const std::vector<store::StoredMessage> &messages, std::s
 /// Search results as the planner and the writer see them.
 std::string render_hits(const std::vector<Hit> &hits);
 
+// Facts about people (MaiBot's person-fact writeback): extracted after she
+// answers someone, only from that person's own words, each with a verbatim
+// quote that is checked here; written about "TA" and keyed by QQ number.
+
+struct FactRequest {
+    provider::History history;
+    std::vector<provider::ToolDefinition> tools;
+};
+
+struct ExtractedFact {
+    std::string fact;
+    std::string quote;
+    usize source = 0; ///< 0-based index into the person's own messages
+};
+
+/// The person's own messages are numbered; the nearby chat is context only.
+FactRequest build_fact_request(std::string_view prompt, std::string_view person, const std::vector<store::StoredMessage> &own,
+                               const std::vector<store::StoredMessage> &context, std::string_view self_name);
+
+/// Reads record_facts, keeping facts whose quote really is in the cited
+/// message (spaces ignored) and whose length is sane; at most 5.
+std::vector<ExtractedFact> parse_facts(const std::vector<provider::OutputItem> &items, const std::vector<store::StoredMessage> &own);
+
+/// "对芒果过敏；住在杭州": facts about TA, newest first, joined.
+std::string render_facts(const std::vector<store::PersonFact> &facts);
+
 struct Memory {
     Memory(const MemoryConfig &config, std::string self_name, i32 utc_offset_minutes, store::Store &store);
 
@@ -67,6 +95,14 @@ struct Memory {
 
     /// The best chunks of `chat` for `query`.
     lighter::Task<std::vector<Hit>> search(store::ChatKey chat, std::string query);
+
+    /// Stores `fact` unless the person already has one meaning the same
+    /// (same text, or cosine >= the duplicate threshold). True if stored.
+    lighter::Task<bool> remember(store::PersonFact fact);
+
+    /// "群友资料" lines for these people (QQ number, display name), with
+    /// their newest facts; empty when none has any.
+    std::string people_notes(const std::vector<std::pair<i64, std::string>> &people);
 
     std::move_only_function<i64()> now;
     const MemoryConfig &config;

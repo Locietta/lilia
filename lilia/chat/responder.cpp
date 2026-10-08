@@ -14,6 +14,7 @@
 #include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/timeout.h>
 
+#include <xmake/bin2obj/facts_md.hpp>
 #include <xmake/bin2obj/persona_md.hpp>
 #include <xmake/bin2obj/planner_md.hpp>
 #include <xmake/bin2obj/select_md.hpp>
@@ -55,6 +56,12 @@ constexpr usize k_decision_memory = 6;
 constexpr usize k_min_candidates = 5;
 constexpr usize k_selector_context = 10;
 constexpr usize k_max_habits = 3;
+/// Facts: notes for this many people per turn; evidence is the person's last
+/// few messages (at least this many characters) plus the last lines of chat.
+constexpr usize k_people_notes = 3;
+constexpr usize k_fact_own_messages = 3;
+constexpr usize k_min_fact_evidence = 6;
+constexpr usize k_fact_context = 8;
 /// How long a reply waits for a selection still running after the planner.
 constexpr i64 k_selection_wait_seconds = 4;
 /// She holds back once she wrote this many of the last `k_self_window` messages.
@@ -342,6 +349,48 @@ std::shared_ptr<Selection> start_selection(Responder *r, const store::ChatKey &c
 
 } // namespace
 
+namespace {
+
+/// What she knows about the person she answers, for the writer.
+std::string known_about(Responder *r, const store::StoredMessage &target) {
+    if (!r->memory || !r->config.memory.facts || target.from_self) return {};
+    auto facts = r->store.facts(target.sender_id, r->config.memory.facts_per_person);
+    return facts.has_value() ? memory::render_facts(*facts) : std::string();
+}
+
+/// MaiBot's person-fact writeback: after she answers someone, learn stable
+/// facts from that person's own recent messages (checked against quotes).
+Task<> learn_facts(Responder *r, store::ChatKey chat, store::StoredMessage target, std::vector<store::StoredMessage> log) {
+    std::vector<store::StoredMessage> own;
+    for (auto it = log.rbegin(); it != log.rend() && own.size() < k_fact_own_messages; ++it) {
+        if (!it->from_self && it->sender_id == target.sender_id) own.push_back(*it);
+    }
+    std::ranges::reverse(own);
+    usize evidence = 0;
+    for (const auto &message : own) evidence += count_code_points(message.text);
+    if (evidence < k_min_fact_evidence) co_return;
+    const std::vector<store::StoredMessage> context(log.end() - static_cast<std::ptrdiff_t>(std::min(log.size(), k_fact_context)),
+                                                    log.end());
+    const auto prompt = fill_template(embedded(xmake::facts_md), {{"name", r->config.chat.name}});
+    const auto request = memory::build_fact_request(prompt, speaker(r, target), own, context, r->config.chat.name);
+    const auto items = co_await call_model(r, r->planner, r->config.model.planner_model, "facts", chat, request.history, request.tools);
+    if (!items) co_return;
+    const auto facts = memory::parse_facts(*items, own);
+    for (const auto &fact : facts) {
+        const auto &source = own[fact.source];
+        std::ignore = co_await r->memory->remember({
+            .person_id = target.sender_id,
+            .fact = fact.fact,
+            .quote = fact.quote,
+            .chat = chat,
+            .message_id = source.message_id,
+            .time = source.time,
+        });
+    }
+}
+
+} // namespace
+
 Responder::Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher,
                      provider::Provider writer, std::filesystem::path persona_path, Spawn spawn)
     : now([] { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }),
@@ -509,6 +558,15 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .just_replied = just_replied,
     };
     for (const auto &message : fresh) planner_input.fresh.push_back(message.message_id);
+    if (memory && config.memory.facts) {
+        std::vector<std::pair<i64, std::string>> people;
+        for (auto it = fresh.rbegin(); it != fresh.rend() && people.size() < k_people_notes; ++it) {
+            if (it->from_self || std::ranges::contains(people, it->sender_id, &std::pair<i64, std::string>::first)) continue;
+            people.emplace_back(it->sender_id, speaker(this, *it));
+        }
+        planner_input.people = memory->people_notes(people);
+        if (!planner_input.people.empty()) log::debug("{} notes on people:\n{}", describe(chat), planner_input.people);
+    }
     const auto request = build_planner_request(planner_input);
 
     const auto selection = start_selection(this, chat, log_lines);
@@ -605,6 +663,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .reference = reference,
         .habits = habits,
         .remembered = remembered,
+        .known = known_about(this, *target),
         .previous_reply =
             [&] {
                 const auto it = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
@@ -644,6 +703,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (!co_await send_and_record(this, chat, std::move(message))) break;
     }
     note_spoke(state.flow, now(), target->sender_id);
+
+    if (memory && config.memory.facts && !target->from_self) spawn(learn_facts(this, chat, *target, log_lines));
 
     std::string said;
     for (const auto &bubble : bubbles) said += (said.empty() ? "" : " ") + bubble;

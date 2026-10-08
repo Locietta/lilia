@@ -55,6 +55,8 @@ struct PlannerInput {
     std::vector<std::string> decisions;
     /// Offer the search_history tool (long-term memory is enabled).
     bool memory_search = false;
+    /// "- 名字：事实；事实" lines about the people in the new messages.
+    std::string people;
     /// Set on the extra turn right after a reply: the message she answered.
     /// The other new messages are offered once more.
     std::optional<i64> just_replied;
@@ -97,6 +99,8 @@ struct WriterInput {
     std::vector<std::string> habits;
     /// Older chat the planner looked up for this reply (search_history).
     std::string remembered;
+    /// Facts about the person she answers ("住在成都；在学吉他").
+    std::string known;
     /// What she already said to this same target, when she answers it again.
     std::string previous_reply;
     /// A random handful of phrases people in the groups actually say, to

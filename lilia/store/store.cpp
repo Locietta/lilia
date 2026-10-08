@@ -8,7 +8,8 @@ namespace lilia::store {
 namespace {
 
 // 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
-constexpr int k_schema_version = 5;
+// 6: person_facts.
+constexpr int k_schema_version = 6;
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -84,6 +85,20 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     vector BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS memory_chunks_by_chat ON memory_chunks (chat_type, chat_id, model, last_row);
+
+CREATE TABLE IF NOT EXISTS person_facts (
+    id INTEGER PRIMARY KEY,
+    person_id INTEGER NOT NULL,
+    fact TEXT NOT NULL,
+    quote TEXT NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    time INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    vector BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS person_facts_by_person ON person_facts (person_id, time);
 )sql";
 
 Result<Store> initialize(Result<Database> opened, bool file_backed) {
@@ -260,6 +275,49 @@ Result<void> Store::delete_chunks_except(std::string_view model) {
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, model);
     return statement->run();
+}
+
+Result<void> Store::add_fact(const PersonFact &fact) {
+    auto statement =
+        database.prepare("INSERT INTO person_facts (person_id, fact, quote, chat_type, chat_id, message_id, time, model, vector) "
+                         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, fact.person_id);
+    statement->bind(2, fact.fact);
+    statement->bind(3, fact.quote);
+    statement->bind(4, fact.chat.type);
+    statement->bind(5, fact.chat.id);
+    statement->bind(6, fact.message_id);
+    statement->bind(7, fact.time);
+    statement->bind(8, fact.model);
+    statement->bind_blob(9, fact.vector);
+    return statement->run();
+}
+
+Result<std::vector<PersonFact>> Store::facts(i64 person_id, usize limit) {
+    auto statement = database.prepare("SELECT id, fact, quote, chat_type, chat_id, message_id, time, model, vector FROM person_facts "
+                                      "WHERE person_id = ?1 ORDER BY time DESC, id DESC LIMIT ?2");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, person_id);
+    statement->bind(2, limit == 0 ? i64{-1} : static_cast<i64>(limit));
+    std::vector<PersonFact> facts;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        facts.push_back({
+            .id = statement->column_int(0),
+            .person_id = person_id,
+            .fact = statement->column_text(1),
+            .quote = statement->column_text(2),
+            .chat = {.type = statement->column_text(3), .id = statement->column_int(4)},
+            .message_id = statement->column_int(5),
+            .time = statement->column_int(6),
+            .model = statement->column_text(7),
+            .vector = statement->column_blob(8),
+        });
+    }
+    return facts;
 }
 
 Result<bool> Store::is_own_message(const ChatKey &chat, i64 message_id) {

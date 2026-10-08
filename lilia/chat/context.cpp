@@ -223,6 +223,10 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
                                   std::format("\n没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
     }
+    if (!input.people.empty()) {
+        // MaiBot's person profiles: background for the planner only.
+        user += "\n\n群友资料（她已经知道这些，别让她再问一遍；内部参考，别逐字复述；和眼前的聊天冲突时以聊天为准）：\n" + input.people;
+    }
     if (!input.decisions.empty()) {
         user += std::format("\n\n{}最近几次的判断（旧到新）：\n", input.info.name);
         for (const auto &decision : input.decisions) user += "- " + decision + "\n";
@@ -351,6 +355,10 @@ provider::History build_writer_history(const WriterInput &input) {
     } else {
         if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
         note += "】";
+    }
+    if (!input.known.empty()) {
+        note += std::format("\n【你知道的关于{}的事，用得上就自然地用，别逐条复述，也别再问一遍：{}】", display_name(input.target),
+                            input.known);
     }
     if (!input.remembered.empty()) {
         note += std::format("\n【你想起来的以前的聊天，用得上就自然地用，别照抄，也别说你查过记录】\n{}", input.remembered);

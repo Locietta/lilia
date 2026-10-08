@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include <glaze/json.hpp>
+
 #include <lilia/memory/memory.h>
 #include <lilia/store/store.h>
 #include <lilia/tests/support/fake_ws_peer.h>
@@ -89,6 +91,62 @@ void test_store() {
             "other models' chunks are dropped");
 }
 
+void test_facts() {
+    const std::vector<store::StoredMessage> own{message(1, 10, "阿紫", "我对芒果过敏 上次吃了全身起疹子"), message(2, 20, "阿紫", "芒果")};
+    const std::vector<store::StoredMessage> context{message(3, 15, "老王", "你对什么过敏来着"), message(4, 25, "", "记住了", true)};
+    const auto request = memory::build_fact_request("PROMPT", "阿紫", own, context, "莉莉娅");
+    std::string user;
+    for (const auto &part : request.history.back().parts) {
+        if (const auto *text = std::get_if<provider::TextPart>(&part)) user += text->text;
+    }
+    require(user.find("目标人物（TA）：阿紫") != std::string::npos && user.find("1. 我对芒果过敏") != std::string::npos &&
+                user.find("2. 芒果") != std::string::npos && user.find("老王: 你对什么过敏来着") != std::string::npos &&
+                user.find("莉莉娅: 记住了") != std::string::npos,
+            "own messages are numbered, the nearby chat is context");
+    require(request.tools.size() == 1 && request.tools[0].name == "record_facts", "record_facts tool");
+
+    provider::ToolCallItem call{.call = {.id = "t", .name = "record_facts"}};
+    require(!glz::read_json(call.call.input, R"({"facts": [
+        {"fact": "TA 对芒果过敏。", "source": "1", "quote": "我对芒果 过敏"},
+        {"fact": "TA住在杭州", "source": "1", "quote": "我住杭州"},
+        {"fact": "TA猫", "source": "1", "quote": "芒果"},
+        {"fact": "TA喜欢吃芒果冰淇淋", "source": "#3", "quote": "芒果"},
+        {"fact": "TA对芒果过敏很严重", "source": 2, "quote": "芒果"}
+    ]})"),
+            "fake tool input parses");
+    const auto facts = memory::parse_facts({provider::OutputItem(call)}, own);
+    require(facts.size() == 2 && facts[0].fact == "TA对芒果过敏" && facts[0].source == 0 && facts[1].source == 1,
+            "quotes must be in the cited message (spaces ignored); too short facts and unknown sources are dropped");
+
+    const std::vector<store::PersonFact> stored{{.fact = "TA住在杭州"}, {.fact = "对芒果过敏"}};
+    require(memory::render_facts(stored) == "住在杭州；对芒果过敏", "facts render without the TA subject");
+
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    require(db->add_fact({.person_id = 7,
+                          .fact = "TA对芒果过敏",
+                          .quote = "芒果",
+                          .chat = {.type = "group", .id = 1},
+                          .time = 10,
+                          .model = "m",
+                          .vector = "abcd"})
+                .has_value(),
+            "add fact");
+    require(db->add_fact({.person_id = 7,
+                          .fact = "TA住在杭州",
+                          .quote = "杭州",
+                          .chat = {.type = "group", .id = 1},
+                          .time = 20,
+                          .model = "m",
+                          .vector = "efgh"})
+                .has_value(),
+            "add fact");
+    auto loaded = db->facts(7, 1);
+    require(loaded.has_value() && loaded->size() == 1 && loaded->front().fact == "TA住在杭州" && loaded->front().vector == "efgh",
+            "newest fact first, limited, blob intact");
+    require(db->facts(8, 0)->empty() && db->facts(7, 0)->size() == 2, "per person; 0 lists all");
+}
+
 } // namespace
 
 int main() {
@@ -98,6 +156,7 @@ int main() {
         test_chunks();
         test_rank_and_render();
         test_store();
+        test_facts();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

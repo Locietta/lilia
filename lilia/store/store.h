@@ -76,6 +76,20 @@ struct MemoryChunk {
     std::string vector;
 };
 
+/// A stable fact about a person, quoted from their own message. `fact` is
+/// written about "TA"; `vector` as in MemoryChunk.
+struct PersonFact {
+    i64 id = 0;
+    i64 person_id = 0; ///< QQ number
+    std::string fact;
+    std::string quote;
+    ChatKey chat;
+    i64 message_id = 0;
+    i64 time = 0;
+    std::string model;
+    std::string vector;
+};
+
 /// A learned expression pattern: 当 situation 时，可以 style.
 struct Expression {
     i64 id = 0;
@@ -142,6 +156,11 @@ struct Store {
 
     /// Drops chunks embedded by any other model (their vectors are not comparable).
     Result<void> delete_chunks_except(std::string_view model);
+
+    Result<void> add_fact(const PersonFact &fact);
+
+    /// Facts about `person_id`, newest first; `limit` 0 returns all.
+    Result<std::vector<PersonFact>> facts(i64 person_id, usize limit);
 
     /// Deletes the patterns with these ids.
     Result<void> delete_expressions(const std::vector<i64> &ids);
