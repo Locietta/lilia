@@ -54,18 +54,19 @@ constexpr usize k_replied_memory = 20;
 constexpr usize k_requeued_memory = 500;
 constexpr usize k_decision_memory = 6;
 /// Expression selection: too few candidates skip the call; the selector sees
-/// this many recent lines and picks at most `k_max_habits`.
+/// this many recent lines.
 constexpr usize k_min_candidates = 5;
 constexpr usize k_selector_context = 10;
-constexpr usize k_max_habits = 3;
+/// MaiBot's fallback sample (without embeddings) and its MMR weighting.
+constexpr usize k_fallback_draw = 5;
+constexpr usize k_min_repeated = 10;
+constexpr double k_mmr_lambda = 0.85;
 /// Facts: notes for this many people per turn; evidence is the person's last
 /// few messages (at least this many characters) plus the last lines of chat.
 constexpr usize k_people_notes = 3;
 constexpr usize k_fact_own_messages = 3;
 constexpr usize k_min_fact_evidence = 6;
 constexpr usize k_fact_context = 8;
-/// How long a reply waits for a selection still running after the planner.
-constexpr i64 k_selection_wait_seconds = 4;
 /// She holds back once she wrote this many of the last `k_self_window` messages.
 constexpr usize k_self_window = 10;
 constexpr usize k_self_limit = 3;
@@ -136,6 +137,7 @@ Task<std::optional<i64>> send_message(Responder *r, const store::ChatKey &chat, 
 Task<bool> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Message message) {
     auto segments_json = glz::write_json(message).value_or("[]");
     auto text = onebot::render_plain(message);
+    auto plain = onebot::text_only(message);
     const auto id = co_await send_message(r, chat, std::move(message));
     if (!id) co_return false;
     auto stored = r->store.add_message({
@@ -149,6 +151,8 @@ Task<bool> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Mes
         .from_self = true,
     });
     if (stored.has_error()) log::error("cannot record sent message: {}", stored.error().message());
+    // Her own lines join the next learning batch as [SELF] context.
+    if (r->learner && chat.type == "group") r->learner->observe_own(chat.id, std::move(plain));
     co_return true;
 }
 
@@ -273,25 +277,35 @@ Task<> handle_admin(Responder *r, store::StoredMessage command, std::string argu
 
 std::string_view default_persona() { return embedded(xmake::persona_md); }
 
-std::vector<std::string> sample_habits(store::Store &store, usize count, std::mt19937 &rng) {
-    if (count == 0) return {};
-    auto rows = store.expressions(0);
-    if (rows.has_error() || rows->empty()) return {};
-    // Weighted by how often each was learned, mapped onto 1..5 like MaiBot,
-    // so common phrases come up more without crowding out the rest.
-    const auto [low, high] = std::ranges::minmax(*rows | std::views::transform(&store::Expression::count));
-    std::vector<double> weights;
-    for (const auto &row : *rows) {
-        weights.push_back(high == low ? 1.0 : 1.0 + 4.0 * static_cast<double>(row.count - low) / static_cast<double>(high - low));
+std::vector<store::Expression> sample_fallback(std::vector<store::Expression> pool, std::mt19937 &rng) {
+    if (pool.empty()) return {};
+    // MaiBot's fallback without embeddings: weights mapped from counts onto
+    // 1..5; five from everything, five from patterns learned more than once.
+    const auto [low, high] = std::ranges::minmax(pool | std::views::transform(&store::Expression::count));
+    const auto weight = [&](const store::Expression &row) {
+        return high == low ? 1.0 : 1.0 + 4.0 * static_cast<double>(row.count - low) / static_cast<double>(high - low);
+    };
+    std::vector<store::Expression> picked;
+    const auto draw = [&](const std::vector<const store::Expression *> &from, usize count) {
+        std::vector<double> weights;
+        for (const auto *row : from) weights.push_back(std::ranges::contains(picked, row->id, &store::Expression::id) ? 0.0 : weight(*row));
+        for (usize n = 0; n < count; ++n) {
+            if (std::ranges::all_of(weights, [](double w) { return w == 0; })) break;
+            std::discrete_distribution<usize> pick(weights.begin(), weights.end());
+            const auto index = pick(rng);
+            picked.push_back(*from[index]);
+            weights[index] = 0;
+        }
+    };
+    std::vector<const store::Expression *> everything;
+    std::vector<const store::Expression *> repeated;
+    for (const auto &row : pool) {
+        everything.push_back(&row);
+        if (row.count > 1) repeated.push_back(&row);
     }
-    std::vector<std::string> habits;
-    while (habits.size() < count && habits.size() < rows->size()) {
-        std::discrete_distribution<usize> pick(weights.begin(), weights.end());
-        const auto index = pick(rng);
-        habits.push_back(std::format("当{}时，可以{}", (*rows)[index].situation, (*rows)[index].style));
-        weights[index] = 0; // without replacement
-    }
-    return habits;
+    draw(everything, k_fallback_draw);
+    if (repeated.size() >= k_min_repeated) draw(repeated, k_fallback_draw);
+    return picked;
 }
 
 std::vector<std::string> sample_voice(store::Store &store, usize count) {
@@ -314,39 +328,85 @@ std::string speaker(const Responder *r, const store::StoredMessage &message) {
     return message.sender_name.empty() ? std::to_string(message.sender_id) : message.sender_name;
 }
 
-/// MaiBot's expression selector: a small call that sees the recent chat and
-/// picks 0-3 learned phrases that fit, out of a weighted sample. It runs in
-/// parallel with the planner (so it adds no delay before a reply) and
-/// therefore judges by the chat, not by the planner's intent.
-struct Selection {
-    std::vector<std::string> picked;
-    lighter::Event done;
-};
+/// MaiBot's expression selection, after the planner: candidates retrieved by
+/// embedding against the planner's intent and the chat (MMR for variety), or a
+/// weighted sample without embeddings; then a selector call with the recent
+/// chat picks 0 to `max_selected`. Picks are marked active.
+Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, std::vector<store::StoredMessage> log,
+                                             store::StoredMessage target, std::string intent) {
+    const auto &learning = r->config.learning;
+    if (!learning.enabled) co_return std::vector<std::string>{};
+    auto rows = r->store.expressions(0);
+    if (rows.has_error()) co_return std::vector<std::string>{};
+    std::erase_if(*rows, [&](const store::Expression &row) {
+        return (learning.checked_only && !row.checked) || !learn::shares(learning.expression_groups, chat.id, row.chat.id);
+    });
+    if (rows->size() < k_min_candidates) co_return std::vector<std::string>{};
 
-Task<> run_selection(Responder *r, store::ChatKey chat, learn::SelectionInput input, std::shared_ptr<Selection> out) {
+    std::vector<std::string> recent;
+    for (usize i = log.size() > k_selector_context ? log.size() - k_selector_context : 0; i < log.size(); ++i) {
+        recent.push_back(speaker(r, log[i]) + ": " + log[i].text);
+    }
+
+    std::vector<store::Expression> candidates;
+    if (r->memory) {
+        std::vector<const store::Expression *> embedded;
+        std::vector<std::vector<float>> vectors;
+        for (const auto &row : *rows) {
+            if (row.vector.empty() || row.model != r->memory->config.embedding_model) continue;
+            embedded.push_back(&row);
+            vectors.push_back(memory::decode_vector(row.vector));
+        }
+        if (embedded.size() >= k_min_candidates) {
+            std::string query = std::format("表达选择意图：{}\n要回应的消息：{}\n最近的聊天：\n", intent, target.text);
+            for (usize i = recent.size() > 3 ? recent.size() - 3 : 0; i < recent.size(); ++i) query += recent[i] + "\n";
+            auto embedded_query = co_await r->memory->embed({query});
+            if (embedded_query.has_value() && !embedded_query->empty()) {
+                for (const auto index : learn::mmr(vectors, embedded_query->front(), learning.candidates, k_mmr_lambda)) {
+                    candidates.push_back(*embedded[index]);
+                }
+            }
+        }
+    }
+    if (candidates.empty()) candidates = sample_fallback(*std::move(rows), r->rng);
+    if (candidates.empty()) co_return std::vector<std::string>{};
+
+    learn::SelectionInput input{
+        .recent = std::move(recent),
+        .target = speaker(r, target) + ": " + target.text,
+        .intent = intent,
+        .max_picks = learning.max_selected,
+    };
+    for (const auto &row : candidates) input.candidates.push_back(std::format("当{}时，可以{}", row.situation, row.style));
     const auto prompt = fill_template(embedded(xmake::select_md), {{"name", r->config.chat.name}});
     const auto request = learn::build_selection_request(prompt, input);
     const auto items = co_await call_model(r, r->planner, r->config.model.planner_model, "select", chat, request.history, request.tools);
-    if (items) {
-        for (const auto index : learn::parse_picks(*items, "select_expressions", "ids", input.candidates.size(), k_max_habits)) {
-            out->picked.push_back(input.candidates[index]);
-        }
-        log::info("{} picks {} of {} learned expression(s)", describe(chat), out->picked.size(), input.candidates.size());
+    if (!items) co_return std::vector<std::string>{};
+    std::vector<std::string> picked;
+    std::vector<i64> ids;
+    for (const auto index : learn::parse_picks(*items, "select_expressions", "ids", candidates.size(), learning.max_selected)) {
+        picked.push_back(input.candidates[index]);
+        ids.push_back(candidates[index].id);
     }
-    out->done.set();
+    std::ignore = r->store.touch_expressions(ids, r->now());
+    log::info("{} picks {} of {} learned expression(s)", describe(chat), picked.size(), candidates.size());
+    co_return picked;
 }
 
-std::shared_ptr<Selection> start_selection(Responder *r, const store::ChatKey &chat, const std::vector<store::StoredMessage> &log) {
-    if (!r->config.learning.enabled || log.empty()) return nullptr;
-    auto candidates = sample_habits(r->store, r->config.learning.candidates, r->rng);
-    if (candidates.size() < k_min_candidates) return nullptr;
-    learn::SelectionInput input{.target = speaker(r, log.back()) + ": " + log.back().text, .candidates = std::move(candidates)};
-    for (usize i = log.size() > k_selector_context ? log.size() - k_selector_context : 0; i < log.size(); ++i) {
-        input.recent.push_back(speaker(r, log[i]) + ": " + log[i].text);
+/// Slang meanings for the terms others use in `log` (MaiBot's jargon
+/// reference); empty when slang learning is off or nothing matches.
+std::string jargon_notes(Responder *r, const store::ChatKey &chat, const std::vector<store::StoredMessage> &log) {
+    if (!r->learner || !r->config.learning.jargon) return {};
+    auto terms = r->store.jargon_terms();
+    if (terms.has_error()) return {};
+    if (!r->config.learning.jargon_groups.empty()) {
+        std::erase_if(*terms, [&](const store::Jargon &term) {
+            auto chats = r->store.jargon_chats(term.id);
+            return term.created_by != "MANUAL" && chats.has_value() &&
+                   std::ranges::none_of(*chats, [&](i64 id) { return learn::shares(r->config.learning.jargon_groups, chat.id, id); });
+        });
     }
-    auto selection = std::make_shared<Selection>();
-    r->spawn(run_selection(r, chat, std::move(input), selection));
-    return selection;
+    return learn::jargon_reference(*terms, log, r->config.learning.jargon_matches);
 }
 
 } // namespace
@@ -630,9 +690,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (!planner_input.people.empty()) log::debug("{} notes on people:\n{}", describe(chat), planner_input.people);
     }
     if (memory) planner_input.recall = co_await memory->recall(chat, log_lines);
+    planner_input.jargon = jargon_notes(this, chat, log_lines);
     const auto request = build_planner_request(planner_input);
 
-    const auto selection = start_selection(this, chat, log_lines);
     // The planner may look things up (search_history) before deciding; each
     // result goes back to it as a tool result, then the tool is withdrawn.
     auto planner_history = request.history;
@@ -718,11 +778,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         log::info("search for {} returned {} bytes", describe(chat), reference.size());
         log::debug("search reference: {}", reference);
     }
-    std::vector<std::string> habits;
-    if (selection) {
-        std::ignore = co_await lighter::with_timeout(selection->done.wait(), std::chrono::seconds(k_selection_wait_seconds));
-        habits = selection->picked;
-    }
+    const auto habits = co_await select_habits(this, chat, log_lines, *target, plan.intent.empty() ? plan.brief : plan.intent);
     const auto history = build_writer_history({
         .persona = persona,
         .rules = writer_rules,

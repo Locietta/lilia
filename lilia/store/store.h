@@ -129,13 +129,58 @@ struct PersonFact {
     std::string vector;
 };
 
-/// A learned expression pattern: 当 situation 时，可以 style.
+/// A learned expression pattern: 当 situation 时，可以 style. `chat` is where
+/// it was learned (empty type: before schema 9, shared). `situations` lists
+/// every situation merged into it, newline-separated (MaiBot's content_list).
 struct Expression {
     i64 id = 0;
+    ChatKey chat;
     std::string situation;
     std::string style;
-    i64 count = 1; ///< times learned (from any group)
-    i64 last_active = 0;
+    std::string situations;
+    i64 count = 1; ///< times learned
+    i64 first_seen = 0;
+    i64 last_active = 0;  ///< learned or selected
+    bool checked = false; ///< approved by a person
+    std::string modified_by = "AI";
+    std::string model; ///< embedding model of `vector`
+    std::string vector;
+};
+
+/// One verdict of the learning review: "kept", "rejected" or "rescued".
+struct ExpressionReview {
+    i64 id = 0;
+    i64 time = 0;
+    ChatKey chat;
+    std::string situation;
+    std::string style;
+    std::string verdict;
+    std::string reason;
+};
+
+/// A slang term (MaiBot's jargon). `is_jargon`: -1 unknown yet, 0 ordinary
+/// word, 1 jargon. Meanings are inferred at count thresholds; MANUAL entries
+/// are never touched by inference.
+struct Jargon {
+    i64 id = 0;
+    std::string content;
+    std::string meaning;
+    i64 is_jargon = -1;
+    i64 count = 0;
+    i64 last_inference_count = 0;
+    bool complete = false;
+    std::string created_by = "AI";
+    i64 first_seen = 0;
+    i64 last_seen = 0;
+};
+
+/// Context where a slang term was seen: the line and three on each side,
+/// speakers anonymised.
+struct JargonEvidence {
+    i64 id = 0;
+    ChatKey chat;
+    std::string snippet;
+    i64 time = 0;
 };
 
 struct Store {
@@ -170,9 +215,47 @@ struct Store {
     /// images have been described).
     Result<void> update_message_text(const ChatKey &chat, i64 message_id, std::string_view text);
 
-    /// Adds a pattern, or counts it again when the style is already known
-    /// (the newest situation wins).
-    Result<void> learn_expression(std::string_view situation, std::string_view style, i64 now);
+    /// Adds a pattern learned in `chat`, or counts it again when that chat
+    /// already has the style (the newest situation leads; all are kept).
+    /// Returns its id.
+    Result<i64> learn_expression(const ChatKey &chat, std::string_view situation, std::string_view style, i64 now);
+
+    Result<void> set_expression_vector(i64 id, std::string_view model, std::string_view vector);
+
+    /// Marks patterns as selected now.
+    Result<void> touch_expressions(const std::vector<i64> &ids, i64 now);
+
+    /// A person approves (or withdraws approval of) a pattern.
+    Result<void> set_expression_checked(i64 id, bool checked);
+
+    Result<void> add_expression_review(const ExpressionReview &review);
+
+    /// Review verdicts, newest first; `verdict` empty lists all.
+    Result<std::vector<ExpressionReview>> expression_reviews(std::string_view verdict, usize limit);
+
+    Result<std::optional<ExpressionReview>> expression_review(i64 id);
+
+    /// All slang terms, most seen first.
+    Result<std::vector<Jargon>> jargon_terms();
+
+    Result<std::optional<Jargon>> jargon_by_content(std::string_view content);
+
+    /// Counts a sighting of `content` in `chat` with its evidence (the newest
+    /// `keep_evidence` are kept per term); creates the term. Returns it.
+    Result<Jargon> add_jargon_hit(std::string_view content, const ChatKey &chat, std::string_view snippet, i64 now, usize keep_evidence);
+
+    Result<std::vector<JargonEvidence>> jargon_evidence(i64 jargon_id, usize limit);
+
+    /// Chats (ids) a term has been seen in.
+    Result<std::vector<i64>> jargon_chats(i64 jargon_id);
+
+    /// Records an inference: meaning, verdict and the count it was made at.
+    Result<void> set_jargon_inference(i64 id, std::string_view meaning, i64 is_jargon, i64 at_count, bool complete);
+
+    /// A person defines (or redefines) a term; inference leaves it alone.
+    Result<void> set_jargon_manual(std::string_view content, std::string_view meaning, i64 now);
+
+    Result<void> delete_jargon(std::string_view content);
 
     /// Patterns, most counted first; `limit` 0 returns all of them.
     Result<std::vector<Expression>> expressions(usize limit);

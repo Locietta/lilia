@@ -129,7 +129,10 @@ std::string_view default_persona();
 
 /// Learned patterns offered to the planner: about a third the most counted,
 /// the rest random, shuffled; rendered "当X时，可以Y".
-std::vector<std::string> sample_habits(store::Store &store, usize count, std::mt19937 &rng);
+/// MaiBot's expression sample without embeddings: five weighted by count
+/// (mapped onto 1..5) from `pool`, five more from patterns learned more than
+/// once (when there are enough), without repeats.
+std::vector<store::Expression> sample_fallback(std::vector<store::Expression> pool, std::mt19937 &rng);
 
 /// Up to `count` distinct quoted phrases from random learned patterns.
 std::vector<std::string> sample_voice(store::Store &store, usize count);

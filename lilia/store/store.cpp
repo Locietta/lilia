@@ -11,8 +11,28 @@ namespace lilia::store {
 namespace {
 
 // 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
-// 6: person_facts. 7: chat_summaries. 8: stickers.
-constexpr int k_schema_version = 8;
+// 6: person_facts. 7: chat_summaries. 8: stickers. 9: expressions per chat
+// (rebuilt), expression_reviews, jargon.
+constexpr int k_schema_version = 9;
+
+constexpr std::string_view k_expressions_table = R"sql(
+CREATE TABLE expressions (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL DEFAULT '',
+    chat_id INTEGER NOT NULL DEFAULT 0,
+    situation TEXT NOT NULL,
+    style TEXT NOT NULL,
+    situations TEXT NOT NULL DEFAULT '',
+    count INTEGER NOT NULL DEFAULT 1,
+    first_seen INTEGER NOT NULL,
+    last_active INTEGER NOT NULL,
+    checked INTEGER NOT NULL DEFAULT 0,
+    modified_by TEXT NOT NULL DEFAULT 'AI',
+    model TEXT NOT NULL DEFAULT '',
+    vector BLOB NOT NULL DEFAULT x'',
+    UNIQUE (chat_type, chat_id, style)
+);
+)sql";
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -66,14 +86,47 @@ CREATE TABLE IF NOT EXISTS media (
 );
 CREATE INDEX IF NOT EXISTS media_by_sha1 ON media (sha1);
 
-CREATE TABLE IF NOT EXISTS expressions (
+CREATE TABLE IF NOT EXISTS expression_reviews (
     id INTEGER PRIMARY KEY,
+    time INTEGER NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
     situation TEXT NOT NULL,
-    style TEXT NOT NULL UNIQUE,
-    count INTEGER NOT NULL DEFAULT 1,
-    first_seen INTEGER NOT NULL,
-    last_active INTEGER NOT NULL
+    style TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    reason TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS jargon (
+    id INTEGER PRIMARY KEY,
+    content TEXT NOT NULL UNIQUE,
+    meaning TEXT NOT NULL DEFAULT '',
+    is_jargon INTEGER NOT NULL DEFAULT -1,
+    count INTEGER NOT NULL DEFAULT 0,
+    last_inference_count INTEGER NOT NULL DEFAULT 0,
+    complete INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL DEFAULT 'AI',
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS jargon_chats (
+    jargon_id INTEGER NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (jargon_id, chat_type, chat_id)
+);
+
+CREATE TABLE IF NOT EXISTS jargon_evidence (
+    id INTEGER PRIMARY KEY,
+    jargon_id INTEGER NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    snippet TEXT NOT NULL,
+    time INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS jargon_evidence_by_term ON jargon_evidence (jargon_id, time);
 
 CREATE TABLE IF NOT EXISTS memory_chunks (
     id INTEGER PRIMARY KEY,
@@ -157,6 +210,35 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
 
     auto created = store.database.execute(k_schema);
     if (created.has_error()) return lighter::outcome_error(std::move(created).error());
+    // Version 9 rebuilt expressions (per chat, merged situations, review
+    // flags, embeddings); older rows become shared AI-made patterns. Decided
+    // by what the table looks like, not by the version number.
+    const auto count_of = [&store](std::string_view sql) -> Result<i64> {
+        auto statement = store.database.prepare(sql);
+        if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        return *row ? statement->column_int(0) : 0;
+    };
+    auto table = count_of("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'expressions'");
+    if (table.has_error()) return lighter::outcome_error(std::move(table).error());
+    if (*table == 0) {
+        auto fresh = store.database.execute(std::string(k_expressions_table));
+        if (fresh.has_error()) return lighter::outcome_error(std::move(fresh).error());
+    } else {
+        auto rebuilt = count_of("SELECT COUNT(*) FROM pragma_table_info('expressions') WHERE name = 'chat_type'");
+        if (rebuilt.has_error()) return lighter::outcome_error(std::move(rebuilt).error());
+        if (*rebuilt == 0) {
+            auto migrated =
+                store.database.execute("ALTER TABLE expressions RENAME TO expressions_old;" + std::string(k_expressions_table) +
+                                       "INSERT INTO expressions (id, situation, style, situations, count, first_seen, last_active) "
+                                       "SELECT id, situation, style, situation, count, first_seen, last_active FROM expressions_old;"
+                                       "DROP TABLE expressions_old;");
+            if (migrated.has_error()) return lighter::outcome_error(std::move(migrated).error());
+        }
+    }
+    auto indexed = store.database.execute("CREATE INDEX IF NOT EXISTS expressions_by_chat ON expressions (chat_type, chat_id)");
+    if (indexed.has_error()) return lighter::outcome_error(std::move(indexed).error());
     // The media table predates its description column in versions 2 and 3.
     if (current == 2 || current == 3) {
         auto added = store.database.execute("ALTER TABLE media ADD COLUMN description TEXT NOT NULL DEFAULT ''");
@@ -599,21 +681,13 @@ Result<void> Store::update_message_text(const ChatKey &chat, i64 message_id, std
     return statement->run();
 }
 
-Result<void> Store::learn_expression(std::string_view situation, std::string_view style, i64 now) {
-    auto statement =
-        database.prepare("INSERT INTO expressions (situation, style, count, first_seen, last_active) VALUES (?1, ?2, 1, ?3, ?3) "
-                         "ON CONFLICT (style) DO UPDATE SET situation = ?1, count = count + 1, last_active = ?3");
-    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, situation);
-    statement->bind(2, style);
-    statement->bind(3, now);
-    return statement->run();
-}
-
 namespace {
 
 /// SQLite treats a negative LIMIT as no limit.
 i64 sql_limit(usize limit) { return limit == 0 ? -1 : static_cast<i64>(limit); }
+
+constexpr std::string_view k_expression_columns =
+    "id, chat_type, chat_id, situation, style, situations, count, first_seen, last_active, checked, modified_by, model, vector";
 
 Result<std::vector<Expression>> read_expressions(Statement &statement) {
     std::vector<Expression> rows;
@@ -623,10 +697,17 @@ Result<std::vector<Expression>> read_expressions(Statement &statement) {
         if (!*row) break;
         rows.push_back({
             .id = statement.column_int(0),
-            .situation = statement.column_text(1),
-            .style = statement.column_text(2),
-            .count = statement.column_int(3),
-            .last_active = statement.column_int(4),
+            .chat = {.type = statement.column_text(1), .id = statement.column_int(2)},
+            .situation = statement.column_text(3),
+            .style = statement.column_text(4),
+            .situations = statement.column_text(5),
+            .count = statement.column_int(6),
+            .first_seen = statement.column_int(7),
+            .last_active = statement.column_int(8),
+            .checked = statement.column_int(9) != 0,
+            .modified_by = statement.column_text(10),
+            .model = statement.column_text(11),
+            .vector = statement.column_blob(12),
         });
     }
     return rows;
@@ -634,10 +715,63 @@ Result<std::vector<Expression>> read_expressions(Statement &statement) {
 
 } // namespace
 
-Result<std::vector<Expression>> Store::random_expressions(usize skip_top, usize limit) {
+Result<i64> Store::learn_expression(const ChatKey &chat, std::string_view situation, std::string_view style, i64 now) {
     auto statement =
-        database.prepare("SELECT id, situation, style, count, last_active FROM expressions WHERE id NOT IN "
-                         "(SELECT id FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1) ORDER BY RANDOM() LIMIT ?2");
+        database.prepare("INSERT INTO expressions (chat_type, chat_id, situation, style, situations, count, first_seen, last_active) "
+                         "VALUES (?1, ?2, ?3, ?4, ?3, 1, ?5, ?5) "
+                         "ON CONFLICT (chat_type, chat_id, style) DO UPDATE SET situation = ?3, count = count + 1, last_active = ?5, "
+                         "situations = CASE WHEN instr(char(10) || situations || char(10), char(10) || ?3 || char(10)) > 0 THEN situations "
+                         "ELSE situations || char(10) || ?3 END "
+                         "RETURNING id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, situation);
+    statement->bind(4, style);
+    statement->bind(5, now);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    const i64 id = *row ? statement->column_int(0) : 0;
+    while (true) { // drain RETURNING so the statement completes
+        auto more = statement->step();
+        if (more.has_error() || !*more) break;
+    }
+    return id;
+}
+
+Result<void> Store::set_expression_vector(i64 id, std::string_view model, std::string_view vector) {
+    auto statement = database.prepare("UPDATE expressions SET model = ?2, vector = ?3 WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, model);
+    statement->bind_blob(3, vector);
+    return statement->run();
+}
+
+Result<void> Store::touch_expressions(const std::vector<i64> &ids, i64 now) {
+    for (const auto id : ids) {
+        auto statement = database.prepare("UPDATE expressions SET last_active = ?2 WHERE id = ?1");
+        if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+        statement->bind(1, id);
+        statement->bind(2, now);
+        if (auto ran = statement->run(); ran.has_error()) return ran;
+    }
+    return {};
+}
+
+Result<void> Store::set_expression_checked(i64 id, bool checked) {
+    auto statement = database.prepare("UPDATE expressions SET checked = ?2, modified_by = 'USER' WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, i64{checked ? 1 : 0});
+    return statement->run();
+}
+
+Result<std::vector<Expression>> Store::random_expressions(usize skip_top, usize limit) {
+    auto statement = database.prepare(std::format("SELECT {} FROM expressions WHERE id NOT IN "
+                                                  "(SELECT id FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1) "
+                                                  "ORDER BY RANDOM() LIMIT ?2",
+                                                  k_expression_columns));
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, static_cast<i64>(skip_top));
     statement->bind(2, sql_limit(limit));
@@ -646,10 +780,233 @@ Result<std::vector<Expression>> Store::random_expressions(usize skip_top, usize 
 
 Result<std::vector<Expression>> Store::expressions(usize limit) {
     auto statement =
-        database.prepare("SELECT id, situation, style, count, last_active FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1");
+        database.prepare(std::format("SELECT {} FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1", k_expression_columns));
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, sql_limit(limit));
     return read_expressions(*statement);
+}
+
+Result<void> Store::add_expression_review(const ExpressionReview &review) {
+    auto statement = database.prepare("INSERT INTO expression_reviews (time, chat_type, chat_id, situation, style, verdict, reason) "
+                                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, review.time);
+    statement->bind(2, review.chat.type);
+    statement->bind(3, review.chat.id);
+    statement->bind(4, review.situation);
+    statement->bind(5, review.style);
+    statement->bind(6, review.verdict);
+    statement->bind(7, review.reason);
+    return statement->run();
+}
+
+namespace {
+
+Result<std::vector<ExpressionReview>> read_reviews(Statement &statement) {
+    std::vector<ExpressionReview> reviews;
+    for (;;) {
+        auto row = statement.step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        reviews.push_back({
+            .id = statement.column_int(0),
+            .time = statement.column_int(1),
+            .chat = {.type = statement.column_text(2), .id = statement.column_int(3)},
+            .situation = statement.column_text(4),
+            .style = statement.column_text(5),
+            .verdict = statement.column_text(6),
+            .reason = statement.column_text(7),
+        });
+    }
+    return reviews;
+}
+
+} // namespace
+
+Result<std::vector<ExpressionReview>> Store::expression_reviews(std::string_view verdict, usize limit) {
+    auto statement = database.prepare("SELECT id, time, chat_type, chat_id, situation, style, verdict, reason FROM expression_reviews "
+                                      "WHERE ?1 = '' OR verdict = ?1 ORDER BY id DESC LIMIT ?2");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, verdict);
+    statement->bind(2, sql_limit(limit));
+    return read_reviews(*statement);
+}
+
+Result<std::optional<ExpressionReview>> Store::expression_review(i64 id) {
+    auto statement =
+        database.prepare("SELECT id, time, chat_type, chat_id, situation, style, verdict, reason FROM expression_reviews WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    auto reviews = read_reviews(*statement);
+    if (reviews.has_error()) return lighter::outcome_error(std::move(reviews).error());
+    if (reviews->empty()) return std::optional<ExpressionReview>{};
+    return std::optional<ExpressionReview>{std::move(reviews->front())};
+}
+
+namespace {
+
+constexpr std::string_view k_jargon_columns =
+    "id, content, meaning, is_jargon, count, last_inference_count, complete, created_by, first_seen, last_seen";
+
+Jargon read_jargon(const Statement &statement) {
+    return {
+        .id = statement.column_int(0),
+        .content = statement.column_text(1),
+        .meaning = statement.column_text(2),
+        .is_jargon = statement.column_int(3),
+        .count = statement.column_int(4),
+        .last_inference_count = statement.column_int(5),
+        .complete = statement.column_int(6) != 0,
+        .created_by = statement.column_text(7),
+        .first_seen = statement.column_int(8),
+        .last_seen = statement.column_int(9),
+    };
+}
+
+} // namespace
+
+Result<std::vector<Jargon>> Store::jargon_terms() {
+    auto statement = database.prepare(std::format("SELECT {} FROM jargon ORDER BY count DESC, last_seen DESC", k_jargon_columns));
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    std::vector<Jargon> terms;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        terms.push_back(read_jargon(*statement));
+    }
+    return terms;
+}
+
+Result<std::optional<Jargon>> Store::jargon_by_content(std::string_view content) {
+    auto statement = database.prepare(std::format("SELECT {} FROM jargon WHERE content = ?1", k_jargon_columns));
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, content);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    if (!*row) return std::optional<Jargon>{};
+    return std::optional<Jargon>{read_jargon(*statement)};
+}
+
+Result<Jargon> Store::add_jargon_hit(std::string_view content, const ChatKey &chat, std::string_view snippet, i64 now,
+                                     usize keep_evidence) {
+    const auto run = [this](std::string_view sql, const auto &bind) -> Result<void> {
+        auto statement = database.prepare(sql);
+        if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+        bind(*statement);
+        return statement->run();
+    };
+    auto upserted = run("INSERT INTO jargon (content, count, first_seen, last_seen) VALUES (?1, 1, ?2, ?2) "
+                        "ON CONFLICT (content) DO UPDATE SET count = count + 1, last_seen = ?2",
+                        [&](Statement &s) {
+                            s.bind(1, content);
+                            s.bind(2, now);
+                        });
+    if (upserted.has_error()) return lighter::outcome_error(std::move(upserted).error());
+    auto term = jargon_by_content(content);
+    if (term.has_error()) return lighter::outcome_error(std::move(term).error());
+    if (!*term) return lighter::outcome_error(Error::storage("jargon term vanished"));
+    const i64 id = (*term)->id;
+    auto counted = run("INSERT INTO jargon_chats (jargon_id, chat_type, chat_id, count) VALUES (?1, ?2, ?3, 1) "
+                       "ON CONFLICT (jargon_id, chat_type, chat_id) DO UPDATE SET count = count + 1",
+                       [&](Statement &s) {
+                           s.bind(1, id);
+                           s.bind(2, chat.type);
+                           s.bind(3, chat.id);
+                       });
+    if (counted.has_error()) return lighter::outcome_error(std::move(counted).error());
+    if (!snippet.empty()) {
+        auto added = run("INSERT INTO jargon_evidence (jargon_id, chat_type, chat_id, snippet, time) VALUES (?1, ?2, ?3, ?4, ?5)",
+                         [&](Statement &s) {
+                             s.bind(1, id);
+                             s.bind(2, chat.type);
+                             s.bind(3, chat.id);
+                             s.bind(4, snippet);
+                             s.bind(5, now);
+                         });
+        if (added.has_error()) return lighter::outcome_error(std::move(added).error());
+        auto trimmed = run("DELETE FROM jargon_evidence WHERE jargon_id = ?1 AND id NOT IN "
+                           "(SELECT id FROM jargon_evidence WHERE jargon_id = ?1 ORDER BY time DESC, id DESC LIMIT ?2)",
+                           [&](Statement &s) {
+                               s.bind(1, id);
+                               s.bind(2, static_cast<i64>(keep_evidence));
+                           });
+        if (trimmed.has_error()) return lighter::outcome_error(std::move(trimmed).error());
+    }
+    return **term;
+}
+
+Result<std::vector<JargonEvidence>> Store::jargon_evidence(i64 jargon_id, usize limit) {
+    auto statement = database.prepare("SELECT id, chat_type, chat_id, snippet, time FROM jargon_evidence WHERE jargon_id = ?1 "
+                                      "ORDER BY time DESC, id DESC LIMIT ?2");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, jargon_id);
+    statement->bind(2, sql_limit(limit));
+    std::vector<JargonEvidence> evidence;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        evidence.push_back({
+            .id = statement->column_int(0),
+            .chat = {.type = statement->column_text(1), .id = statement->column_int(2)},
+            .snippet = statement->column_text(3),
+            .time = statement->column_int(4),
+        });
+    }
+    return evidence;
+}
+
+Result<std::vector<i64>> Store::jargon_chats(i64 jargon_id) {
+    auto statement = database.prepare("SELECT chat_id FROM jargon_chats WHERE jargon_id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, jargon_id);
+    std::vector<i64> chats;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        chats.push_back(statement->column_int(0));
+    }
+    return chats;
+}
+
+Result<void> Store::set_jargon_inference(i64 id, std::string_view meaning, i64 is_jargon, i64 at_count, bool complete) {
+    auto statement = database.prepare("UPDATE jargon SET meaning = ?2, is_jargon = ?3, last_inference_count = ?4, complete = ?5 "
+                                      "WHERE id = ?1 AND created_by != 'MANUAL'");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, meaning);
+    statement->bind(3, is_jargon);
+    statement->bind(4, at_count);
+    statement->bind(5, i64{complete ? 1 : 0});
+    return statement->run();
+}
+
+Result<void> Store::set_jargon_manual(std::string_view content, std::string_view meaning, i64 now) {
+    auto statement =
+        database.prepare("INSERT INTO jargon (content, meaning, is_jargon, complete, created_by, first_seen, last_seen) VALUES (?1, ?2, 1, "
+                         "1, 'MANUAL', ?3, ?3) "
+                         "ON CONFLICT (content) DO UPDATE SET meaning = ?2, is_jargon = 1, complete = 1, created_by = 'MANUAL'");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, content);
+    statement->bind(2, meaning);
+    statement->bind(3, now);
+    return statement->run();
+}
+
+Result<void> Store::delete_jargon(std::string_view content) {
+    auto term = jargon_by_content(content);
+    if (term.has_error()) return lighter::outcome_error(std::move(term).error());
+    if (!*term) return {};
+    for (const std::string_view sql : {"DELETE FROM jargon_evidence WHERE jargon_id = ?1", "DELETE FROM jargon_chats WHERE jargon_id = ?1",
+                                       "DELETE FROM jargon WHERE id = ?1"}) {
+        auto statement = database.prepare(sql);
+        if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+        statement->bind(1, (*term)->id);
+        if (auto ran = statement->run(); ran.has_error()) return ran;
+    }
+    return {};
 }
 
 Result<void> Store::delete_expressions(const std::vector<i64> &ids) {

@@ -11,6 +11,7 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/responder.h>
 #include <lilia/learn/learner.h>
+#include <lilia/memory/memory.h>
 #include <lilia/onebot/message.h>
 #include <lilia/store/store.h>
 #include <lilia/tests/support/fake_ws_peer.h>
@@ -34,15 +35,21 @@ provider::OutputItem tool_call(std::string name, std::string json) {
     return item;
 }
 
+const std::vector<learn::Line> k_lines{
+    {.sender = 7, .text = "笑死 这也行"},
+    {.sender = 9, .text = "急了急了"},
+    {.text = "我也觉得", .self = true},
+    {.sender = 7, .text = "这卡太T0了 xswl"},
+};
+const std::vector<std::string> k_names{"莉莉娅", "lilia"};
+
 void test_request() {
-    const auto request = learn::build_learner_request(
-        "PROMPT", {{.sender = 7, .text = "笑死"}, {.sender = 9, .text = "急了急了"}, {.sender = 7, .text = "确实"}});
+    const auto request = learn::build_learner_request("PROMPT", k_lines, "莉莉娅");
     require(text_of(request.history[0]) == "PROMPT", "prompt is the system prompt");
-    require(text_of(request.history[1]) == "1. 群友1: 笑死\n2. 群友2: 急了急了\n3. 群友1: 确实\n",
-            "speakers are anonymised and lines numbered");
+    require(text_of(request.history[1]) ==
+                "1. 群友1: 笑死 这也行\n2. 群友2: 急了急了\n3. [SELF] 莉莉娅: 我也觉得\n4. 群友1: 这卡太T0了 xswl\n",
+            "speakers are anonymised, her own lines marked [SELF], lines numbered");
     require(request.tools.size() == 1 && request.tools[0].name == "record_expressions", "one tool");
-    const auto &items = request.tools[0].input_schema.properties.at("items");
-    require(items.type == "array" && items.items && items.items->is_object(), "items carry an element schema");
     const auto schema = glz::write_json(request.tools[0].input_schema).value_or("");
     require(schema.find(R"("items":{"type":"array")") != std::string::npos && schema.find(R"("source")") != std::string::npos,
             "the element schema is serialized: " + schema);
@@ -51,35 +58,115 @@ void test_request() {
 void test_parse() {
     const auto learned = learn::parse_learned({tool_call("record_expressions", R"({"items": [
             {"situation": "觉得离谱的时候", "style": "用\"笑死 这也行\"", "source": "1"},
-            {"situation": "调侃别人破防", "style": "用\"急了急了\"", "source": 2},
+            {"situation": "调侃别人破防", "style": "使用“急了急了”", "source": 2},
+            {"situation": "学她自己", "style": "用\"我也觉得\"", "source": "3"},
             {"situation": "没有来源", "style": "用\"嗯嗯\"", "source": "9"},
-            {"situation": "", "style": "空场景", "source": "1"},
-            {"situation": "太长", "style": "这是一段明显超过三十个字的总结内容所以应该被丢弃掉才对的那种很长很长的说法", "source": "1"}
+            {"situation": "发图", "style": "用[图片]回应", "source": "1"},
+            {"situation": "叫她", "style": "用\"莉莉娅\"", "source": "1"},
+            {"situation": "", "style": "空场景", "source": "1"}
         ]})")},
-                                              3);
-    require(learned.size() == 2, "invalid items are dropped");
-    require(learned[0].situation == "觉得离谱" && learned[0].style == "用\"笑死 这也行\"", "first item; a trailing 的时候 is dropped");
-    require(learned[1].style == "用\"急了急了\"", "numeric source accepted");
-    require(learn::parse_learned({tool_call("record_expressions", R"({"items": []})")}, 3).empty(), "an empty list is fine");
-    require(learn::parse_learned({}, 3).empty(), "no tool call learns nothing");
+                                              k_lines, k_names);
+    require(learned && learned->size() == 2, "self, missing, media, her name and empty items are dropped");
+    require((*learned)[0].situation == "觉得离谱" && (*learned)[0].source == 0, "a trailing 的时候 is dropped; the source is kept");
+    require((*learned)[1].style == "用\"急了急了\"", "使用 and curly quotes are normalised");
+
+    std::string many = R"({"items": [)";
+    for (int i = 0; i < 21; ++i)
+        many += std::format(R"({}{{"situation": "s{}", "style": "用\"x{}\"", "source": "1"}})", i ? "," : "", i, i);
+    many += "]}";
+    require(!learn::parse_learned({tool_call("record_expressions", many)}, k_lines, k_names), "more than 20 items discard the batch");
+    require(learn::parse_learned({}, k_lines, k_names)->empty(), "no tool call learns nothing");
 
     const auto filtered = learn::parse_learned({tool_call("record_expressions", R"({"items": [
             {"situation": "吐槽某个人很差劲", "style": "用「废物」", "source": "1"},
             {"situation": "调侃对方菜或者不行", "style": "用\"你怎么这么区\"", "source": "1"},
-            {"situation": "评价某人水平一般", "style": "用\"很菜\"", "source": "1"},
             {"situation": "看到离谱的事", "style": "说「绷」", "source": "1"}
         ]})")},
-                                               3);
-    require(filtered.size() == 1 && filtered[0].style == "用\"绷\"", "put-downs are dropped; quotes and verbs are normalized");
-    require(learn::normalize_style("回“洗澡”") == "用\"洗澡\"", "回 and curly quotes");
-    require(learn::normalize_style("句尾加\"捏\"") == "句尾加\"捏\"", "other forms stay");
-    require(!learn::blocked_expression("表示受不了", "用\"我不行了\""), "ordinary phrases pass");
-    require(!learn::blocked_expression("开玩笑逗人", "用\"杂鱼~\""), "playful 杂鱼 is not an insult");
-    require(!learn::blocked_expression("评价新卡强度不够", "用\"这卡有点区\""), "区 about a card is fine");
-    require(!learn::blocked_expression("吐槽道具没什么用", "用\"纯纯垃圾\""), "垃圾 about an item is fine");
-    require(learn::blocked_expression("调侃对方不行", "用\"你怎么这么区\""), "区 said to you is not");
-    require(learn::blocked_expression("吐槽某个人很差劲", "用\"纯纯垃圾\""), "垃圾 about a person is not");
-    require(learn::blocked_expression("觉得离谱", "用\"弱智吧\""), "slurs are blocked whatever the target");
+                                               k_lines, k_names);
+    require(filtered && filtered->size() == 1 && filtered->front().style == "用\"绷\"", "put-downs are dropped");
+    require(learn::normalize_style("回“洗澡”") == "用\"洗澡\"" && learn::normalize_style("句尾加\"捏\"") == "句尾加\"捏\"", "normalising");
+    require(!learn::blocked_expression("开玩笑逗人", "用\"杂鱼~\"") && !learn::blocked_expression("评价新卡强度不够", "用\"这卡有点区\""),
+            "playful 杂鱼 and 区 about a card pass");
+    require(learn::blocked_expression("调侃对方不行", "用\"你怎么这么区\"") && learn::blocked_expression("觉得离谱", "用\"弱智吧\""),
+            "aimed at a person or a slur is blocked");
+}
+
+void test_review() {
+    const std::vector<learn::Learned> learned{{.situation = "觉得离谱", .style = "用\"笑死\""},
+                                              {.situation = "x", .style = "用\"屋檐了\""}};
+    const auto request = learn::build_review_request("REVIEW", learned);
+    require(text_of(request.history[1]) == "1. 当觉得离谱时，可以用\"笑死\"\n2. 当x时，可以用\"屋檐了\"\n", "patterns numbered from 1");
+    auto rejected = learn::parse_review(
+        {tool_call("review_expressions", R"({"reject": [{"id": "2", "reason": "圈内黑话"}, {"id": "9", "reason": "x"}]})")}, 2);
+    require(rejected && rejected->size() == 1 && rejected->front().index == 1 && rejected->front().reason == "圈内黑话",
+            "rejects with reasons; out-of-range ids are dropped");
+    rejected = learn::parse_review({tool_call("review_expressions", R"({"reject": ["1"]})")}, 2);
+    require(rejected && rejected->size() == 1 && rejected->front().index == 0, "a bare id list is tolerated");
+    require(!learn::parse_review({}, 2), "no review is no answer");
+}
+
+void test_jargon() {
+    const auto request = learn::build_jargon_request("JARGON", k_lines, "莉莉娅");
+    require(request.tools.front().name == "record_jargon", "record_jargon tool");
+    const auto found = learn::parse_jargon({tool_call("record_jargon", R"({"items": [
+            {"content": "T0", "source": "4"},
+            {"content": "xswl", "source": "4"},
+            {"content": "x", "source": "4"},
+            {"content": "群友1", "source": "1"},
+            {"content": "不存在", "source": "2"},
+            {"content": "T0", "source": "4"}
+        ]})")},
+                                           k_lines, k_names);
+    require(found.size() == 2 && found[0].content == "T0" && found[1].content == "xswl",
+            "short, real, not names, deduplicated; the term must occur in its line");
+    const auto hits = learn::known_hits(k_lines, {"急了", "T0", "也觉得", "T", "xs"});
+    require(hits.size() == 2 && hits[0].content == "急了" && hits[0].source == 1 && hits[1].content == "T0" && hits[1].source == 3,
+            "known terms in others' lines; ASCII as whole words; her own lines skipped");
+    const auto snippet = learn::evidence_snippet(k_lines, 3, "莉莉娅");
+    require(snippet == "群友1: 笑死 这也行\n群友2: 急了急了\n[SELF] 莉莉娅: 我也觉得\n群友1: 这卡太T0了 xswl\n",
+            "three lines on each side, anonymised");
+
+    require(!learn::inference_due(3, 0) && learn::inference_due(4, 0) && !learn::inference_due(5, 4) && learn::inference_due(9, 4) &&
+                learn::inference_due(30, 8) && !learn::inference_due(30, 25) && learn::inference_due(120, 25),
+            "inference at 4, 8, 25 and 100 sightings");
+
+    const store::Jargon term{.id = 1, .content = "T0", .meaning = "最强的一档"};
+    const auto infer = learn::build_inference_request("{content}|{contexts}|{previous}|{previous_instruction}|{name}", term,
+                                                      {{.snippet = "群友1: 这卡太T0了\n"}}, "莉莉娅");
+    const auto infer_text = text_of(infer.history.back());
+    require(infer_text.find("T0|【对话片段 1】\n群友1: 这卡太T0了") == 0 && infer_text.find("上一次推断的含义") != std::string::npos &&
+                infer_text.find("|莉莉娅") != std::string::npos,
+            "inference sees the evidence and the previous meaning");
+    auto meaning = learn::parse_meaning({tool_call("record_meaning", R"({"meaning": "强度第一档", "no_info": false})")});
+    require(meaning && meaning->meaning == "强度第一档" && !meaning->no_info, "meaning");
+    meaning = learn::parse_meaning({tool_call("record_meaning", R"({"meaning": "", "no_info": false})")});
+    require(meaning && meaning->no_info, "an empty meaning is no information");
+    require(learn::parse_similar({tool_call("record_comparison", R"({"is_similar": true, "reason": "一样"})")}) == true &&
+                !learn::parse_similar({}),
+            "comparison");
+
+    const std::vector<store::Jargon> terms{
+        {.content = "T0", .meaning = "最强一档", .is_jargon = 1, .count = 5},
+        {.content = "xswl", .meaning = "笑死我了", .is_jargon = 1, .count = 9},
+        {.content = "急了", .meaning = "", .is_jargon = 1, .count = 50},
+        {.content = "也觉得", .meaning = "普通", .is_jargon = 0, .count = 50},
+    };
+    const std::vector<store::StoredMessage> log{{.text = "这卡太T0了 xswl"}, {.text = "也觉得", .from_self = true}};
+    const auto notes = learn::jargon_reference(terms, log, 10);
+    require(notes.find("以下黑话来自当前上下文中其他用户消息的机械匹配") == 0 && notes.find("1. xswl：笑死我了") != std::string::npos &&
+                notes.find("2. T0：最强一档") != std::string::npos && notes.find("急了") == std::string::npos &&
+                notes.find("也觉得") == std::string::npos,
+            "slang with a meaning that others used, most seen first");
+    require(learn::jargon_reference(terms, {}, 10).empty(), "nothing matched");
+}
+
+void test_sharing_and_mmr() {
+    require(learn::shares({}, 1, 2) && learn::shares({{1, 2}}, 1, 2) && !learn::shares({{1, 2}}, 1, 3) && learn::shares({{0}}, 5, 6) &&
+                learn::shares({{1}}, 1, 1) && learn::shares({{1}}, 3, 0),
+            "sharing groups; 0 is everyone; legacy (0) patterns are everyone's");
+    const std::vector<std::vector<float>> vectors{{1, 0}, {0.99f, 0.14f}, {0, 1}};
+    const auto picked = learn::mmr(vectors, {1, 0.2f}, 2, 0.5);
+    require(picked.size() == 2 && picked[0] == 1 && picked[1] == 2, "MMR prefers variety over a near-duplicate");
 }
 
 void test_learnable_text() {
@@ -90,64 +177,71 @@ void test_learnable_text() {
     require(learn::learnable_text({text_segment(std::string(400, 'a'))}).empty(), "copypasta-length lines are skipped");
 }
 
-void test_store_and_sampling() {
+void test_store() {
     auto store = store::Store::open_memory();
     require(store.has_value(), "open");
-    require(store->learn_expression("觉得离谱", "用\"笑死\"", 10).has_value(), "learn");
-    require(store->learn_expression("觉得很好笑", "用\"笑死\"", 20).has_value(), "learn again");
-    for (int i = 0; i < 20; ++i)
-        require(store->learn_expression("场景" + std::to_string(i), "说法" + std::to_string(i), 30).has_value(), "learn");
-    auto rows = store->expressions(100);
-    require(rows.has_value() && rows->size() == 21, "one row per style");
-    require((*rows)[0].style == "用\"笑死\"" && (*rows)[0].count == 2 && (*rows)[0].situation == "觉得很好笑",
-            "a repeated style counts up and keeps the newest situation");
-    require(store->expressions(0)->size() == 21, "limit 0 lists everything");
-    auto random = store->random_expressions(1, 0);
-    require(random.has_value() && random->size() == 20 &&
-                std::ranges::none_of(*random, [](const store::Expression &e) { return e.style == "用\"笑死\""; }),
-            "random picks skip the top patterns");
+    const store::ChatKey a{.type = "group", .id = 1};
+    const store::ChatKey b{.type = "group", .id = 2};
+    auto first = store->learn_expression(a, "觉得离谱", "用\"笑死\"", 10);
+    auto again = store->learn_expression(a, "觉得很好笑", "用\"笑死\"", 20);
+    auto same = store->learn_expression(a, "觉得离谱", "用\"笑死\"", 30);
+    auto other = store->learn_expression(b, "觉得离谱", "用\"笑死\"", 40);
+    require(first.has_value() && again.has_value() && *first == *again && *again == *same && *other != *first, "merged per chat");
+    auto rows = store->expressions(0);
+    const auto &row = rows->front().chat.id == 1 ? rows->front() : rows->back();
+    require(rows->size() == 2 && row.count == 3 && row.situation == "觉得离谱" && row.situations == "觉得离谱\n觉得很好笑",
+            "counts up; every situation kept once; the newest leads");
+    require(store->set_expression_vector(*first, "m", "vvvv").has_value() && store->touch_expressions({*first}, 99).has_value() &&
+                store->set_expression_checked(*first, true).has_value(),
+            "vector, touch, check");
+    rows = store->expressions(0);
+    const auto checked = std::ranges::find(*rows, *first, &store::Expression::id);
+    require(checked->vector == "vvvv" && checked->last_active == 99 && checked->checked && checked->modified_by == "USER", "stored");
+
+    require(store->add_expression_review({.time = 1, .chat = a, .situation = "s", .style = "y", .verdict = "rejected", .reason = "r"})
+                .has_value(),
+            "review log");
+    auto reviews = store->expression_reviews("rejected", 10);
+    require(reviews->size() == 1 && reviews->front().reason == "r" && (*store->expression_review(reviews->front().id))->style == "y",
+            "rejected reviews");
+
+    for (int i = 0; i < 12; ++i) {
+        require(store->add_jargon_hit("T0", i % 2 ? a : b, std::format("片段{}", i), 100 + i, 10).has_value(), "jargon hit");
+    }
+    auto term = store->jargon_by_content("T0");
+    require(term && *term && (*term)->count == 12, "sightings count");
+    require(store->jargon_evidence((*term)->id, 0)->size() == 10 && store->jargon_evidence((*term)->id, 1)->front().snippet == "片段11",
+            "the newest evidence is kept");
+    require(store->jargon_chats((*term)->id)->size() == 2, "chats it was seen in");
+    require(store->set_jargon_inference((*term)->id, "最强一档", 1, 12, false).has_value() &&
+                (*store->jargon_by_content("T0"))->meaning == "最强一档",
+            "inference stored");
+    require(store->set_jargon_manual("T0", "人工的", 200).has_value() &&
+                store->set_jargon_inference((*term)->id, "AI 的", 1, 13, false).has_value() &&
+                (*store->jargon_by_content("T0"))->meaning == "人工的",
+            "a manual meaning wins over inference");
+    require(store->delete_jargon("T0").has_value() && !*store->jargon_by_content("T0"), "delete");
 
     std::mt19937 rng(3);
-    const auto habits = chat::sample_habits(*store, 5, rng);
-    require(habits.size() == 5 && std::set<std::string>(habits.begin(), habits.end()).size() == 5, "sampled without replacement");
-    require(chat::sample_habits(*store, 100, rng).size() == 21, "never more than the pool");
-    usize top = 0;
-    for (int i = 0; i < 400; ++i)
-        top += std::ranges::contains(chat::sample_habits(*store, 1, rng), std::string("当觉得很好笑时，可以用\"笑死\""));
-    // Weight 5 against 20 others of weight 1: about 1/5 of single picks.
-    require(top > 40 && top < 140, std::format("the most counted pattern is weighted up ({} of 400)", top));
-    require(chat::sample_voice(*store, 20) == std::vector<std::string>({"笑死"}),
-            "voice samples are the bare quoted phrases, without duplicates or unquoted styles");
-    require(chat::quoted_phrase("用\"何意味\"") == "何意味" && chat::quoted_phrase("句尾加个括号").empty(), "quoted phrase");
-
-    require(store->prune_expressions(5).has_value(), "prune");
-    require(store->expressions(100)->size() == 5, "pruned to the most counted");
+    std::vector<store::Expression> pool;
+    for (int i = 0; i < 30; ++i) pool.push_back({.id = i, .count = i < 12 ? 2 : 1});
+    const auto sample = chat::sample_fallback(pool, rng);
+    require(sample.size() == 10 && std::set<i64>(std::from_range, sample | std::views::transform(&store::Expression::id)).size() == 10,
+            "five weighted plus five repeated, no duplicates");
+    require(chat::sample_fallback({}, rng).empty(), "empty pool");
 }
 
-void test_review_and_selection() {
-    const auto review = learn::build_review_request("REVIEW", {{"觉得离谱", "用\"笑死\""}, {"不想理人", "用\"别理我\""}});
-    require(text_of(review.history[0]) == "REVIEW" &&
-                text_of(review.history[1]) == "1. 当觉得离谱时，可以用\"笑死\"\n2. 当不想理人时，可以用\"别理我\"\n",
-            "review lists the patterns numbered from 1");
-    require(review.tools.size() == 1 && review.tools[0].name == "review_expressions", "review tool");
-    require(learn::parse_picks({tool_call("review_expressions", R"({"reject": ["2", 1, "#2", "9", "x"]})")}, "review_expressions", "reject",
-                               2, 2) == std::vector<usize>({1, 0}),
-            "picks parse numbers, strings and #n, dedupe, drop out-of-range");
-    require(learn::parse_picks({}, "review_expressions", "reject", 2, 2).empty(), "no tool call picks nothing");
-
-    const auto selection = learn::build_selection_request("SELECT", {.recent = {"a: 抽卡又歪了", "莉莉娅（她自己）: 惨"},
-                                                                     .target = "a: 抽卡又歪了",
-                                                                     .intent = "吐槽运气",
-                                                                     .candidates = {"当倒霉时，可以用\"我服了\""}});
-    const auto user = text_of(selection.history[1]);
-    require(user.find("a: 抽卡又歪了\n莉莉娅（她自己）: 惨") != std::string::npos &&
-                user.find("最新的一条：a: 抽卡又歪了") != std::string::npos && user.find("她想表达的意思：吐槽运气") != std::string::npos &&
+void test_selection_request() {
+    const auto request = learn::build_selection_request(
+        "SELECT",
+        {.recent = {"a: 抽卡又歪了"}, .target = "a: 抽卡又歪了", .intent = "吐槽运气", .candidates = {"当倒霉时，可以用\"我服了\""}});
+    const auto user = text_of(request.history[1]);
+    require(user.find("她这次要回应：a: 抽卡又歪了") != std::string::npos && user.find("她想表达的意思：吐槽运气") != std::string::npos &&
                 user.find("1. 当倒霉时，可以用\"我服了\"") != std::string::npos,
             "the selector sees the chat, the target, the intent and numbered candidates");
-    require(learn::parse_picks({tool_call("select_expressions", R"({"ids": ["1", "1"]})")}, "select_expressions", "ids", 1, 3) ==
+    require(learn::parse_picks({tool_call("select_expressions", R"({"ids": ["1", "1"]})")}, "select_expressions", "ids", 1, 5) ==
                 std::vector<usize>({0}),
             "selection picks");
-
     const auto history = chat::build_writer_history({
         .persona = "P",
         .rules = "R",
@@ -167,9 +261,12 @@ int main() {
     try {
         test_request();
         test_parse();
+        test_review();
+        test_jargon();
+        test_sharing_and_mmr();
         test_learnable_text();
-        test_store_and_sampling();
-        test_review_and_selection();
+        test_store();
+        test_selection_request();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

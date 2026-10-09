@@ -125,6 +125,10 @@ def start_model_server():
                 data = learner_answer()
             elif "review_expressions" in tools:
                 data = review_answer()
+            elif "record_jargon" in tools:
+                data = tool_answer(
+                    "record_jargon", {"items": [{"content": "这也行", "source": "2"}]}
+                )
             elif has_image(body):
                 data = sse(
                     [
@@ -573,11 +577,15 @@ def test_reply_and_reconnect(tmp_path):
 
     learners = [b for b in model_state["bodies"] if "record_expressions" in offered(b)]
     reviews = [b for b in model_state["bodies"] if "review_expressions" in offered(b)]
+    jargons = [b for b in model_state["bodies"] if "record_jargon" in offered(b)]
     visions = [b for b in model_state["bodies"] if has_image(b)]
     turns = [
         b
         for b in model_state["bodies"]
-        if b not in learners and b not in reviews and b not in visions
+        if b not in learners
+        and b not in reviews
+        and b not in jargons
+        and b not in visions
     ]
     assert len(visions) == 1, "the picture is described once; voice is not an image"
     image = visions[0]["messages"][0]["content"][0]
@@ -585,6 +593,7 @@ def test_reply_and_reconnect(tmp_path):
     assert base64.b64decode(image["source"]["data"]) == PNG_BYTES
     assert len(learners) == 1, "one learning batch from the ignored group"
     assert len(reviews) == 1, "the extracted patterns are reviewed before storing"
+    assert len(jargons) == 1, "the same batch is mined for slang"
     reviewed = reviews[0]["messages"][-1]["content"][0]["text"]
     assert (
         reviewed
@@ -631,11 +640,23 @@ def test_reply_and_reconnect(tmp_path):
         (GROUP, TRIGGER_ID, 0, "@lilia 你好呀"),
         (GROUP, 777, 1, "fake reply"),
     ], rows
-    learned = db.execute("SELECT situation, style, count FROM expressions").fetchall()
-    assert learned == [("觉得离谱", '用"笑死 这也行"', 1)], learned
+    learned = db.execute(
+        "SELECT chat_id, situation, style, count FROM expressions"
+    ).fetchall()
+    assert learned == [(IGNORED_GROUP, "觉得离谱", '用"笑死 这也行"', 1)], learned
+    verdicts = db.execute(
+        "SELECT style, verdict FROM expression_reviews ORDER BY id"
+    ).fetchall()
+    assert verdicts == [('用"笑死 这也行"', "kept"), ('用"别理我"', "rejected")], (
+        verdicts
+    )
+    slang = db.execute("SELECT content, count, is_jargon FROM jargon").fetchall()
+    assert slang == [("这也行", 1, -1)], slang
+    evidence = db.execute("SELECT snippet FROM jargon_evidence").fetchall()
+    assert evidence == [("群友1: 别理我\n群友1: 笑死 这也行\n",)], evidence
     assert db.execute(
         "SELECT count(*) FROM llm_calls WHERE chat_type = 'learn'"
-    ).fetchone() == (2,), "learning and review calls"
+    ).fetchone() == (3,), "learning, review and slang calls"
     calls = db.execute(
         "SELECT chat_id, model, input_tokens, output_tokens, error != '' FROM llm_calls "
         "WHERE chat_type = 'group' ORDER BY id"

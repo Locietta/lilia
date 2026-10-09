@@ -137,13 +137,35 @@ struct LearningConfig {
     bool enabled = true;
     /// Groups never learned from.
     std::vector<i64> exclude_groups;
-    /// Lines buffered per group before one learning call.
+    /// Others' lines buffered per group before one learning batch (her own
+    /// lines ride along as [SELF] context), at least this many seconds apart
+    /// per group, with at most `max_concurrent` batches running at once.
     usize batch_messages = 30;
+    i64 min_interval_seconds = 30;
+    usize max_concurrent = 3;
     /// Patterns beyond this are dropped (lowest count first); 0 keeps all.
     /// A pattern is a short row, so the pool is allowed to grow.
     usize max_expressions = 0;
-    /// Patterns sampled (weighted by count) for the selector per reply.
-    usize candidates = 10;
+    /// Candidates the selector sees per reply: retrieved by embedding against
+    /// the planner's intent (with MMR for variety), or a weighted sample when
+    /// there are no embeddings.
+    usize candidates = 30;
+    /// Patterns the selector may pick for one reply.
+    usize max_selected = 5;
+    /// Use only patterns a person has checked (`lilia expressions --check`).
+    bool checked_only = false;
+    /// Chats that share learned patterns: each inner list is a sharing group,
+    /// 0 stands for every chat. Empty: everything is shared.
+    std::vector<std::vector<i64>> expression_groups;
+    /// Slang learning (MaiBot's jargon): extract terms, infer meanings at
+    /// count thresholds, show them to the planner when they come up.
+    bool jargon = true;
+    /// Sharing groups for slang, as for expressions.
+    std::vector<std::vector<i64>> jargon_groups;
+    /// Evidence snippets kept per term (speakers anonymised).
+    usize jargon_evidence = 10;
+    /// Terms shown to the planner per turn.
+    usize jargon_matches = 10;
 };
 
 struct MemoryConfig {

@@ -37,6 +37,8 @@ void print_usage(FILE *output) {
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
                "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
+               "       lilia expressions --rejected | --rescue <review id> | --check <id> | --uncheck <id>\n"
+               "       lilia jargon [--limit <n>] | --set <term> <meaning> | --delete <term>\n"
                "       lilia --version | --help\n",
                output);
 }
@@ -114,7 +116,7 @@ Task<int> run_app(const Config &config) {
         archiver.vision_model = config.model.vision_model;
     }
     if (config.archive.enabled) responder.archiver = &archiver;
-    learn::Learner learner(config.learning, config.chat.name, *store, make_learner(config.model),
+    learn::Learner learner(config.learning, config.chat.name, config.chat.aliases, *store, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (config.learning.enabled) responder.learner = &learner;
     sticker::Collector collector(config.stickers, data_dir, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
@@ -130,6 +132,9 @@ Task<int> run_app(const Config &config) {
         responder.memory = &memory;
         memory.summarizer = make_learner(config.model);
         memory.summarizer_model = config.model.planner_model;
+        // Expressions are embedded for retrieval; catch up on older ones.
+        learner.embedder = &memory;
+        if (config.learning.enabled) tasks.spawn(learner.embed_missing());
         // Vectors of another model are not comparable; drop them and rebuild.
         if (auto dropped = store->delete_chunks_except(config.memory.embedding_model); dropped.has_error())
             log::error("memory: {}", dropped.error().message());
@@ -159,6 +164,8 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> stickers_db;
     std::optional<std::filesystem::path> learn_log;
     bool list_expressions = false;
+    bool jargon = false;
+    Manage manage;
     bool review = false;
     bool apply = false;
     std::vector<std::string> keep;
@@ -173,6 +180,10 @@ int main(int argc, char **argv) {
         first = 3;
     } else if (argc > 1 && std::string_view(argv[1]) == "expressions") {
         list_expressions = true;
+        first = 2;
+    } else if (argc > 1 && std::string_view(argv[1]) == "jargon") {
+        jargon = true;
+        manage.action = "list";
         first = 2;
     }
     for (int i = first; i < argc; ++i) {
@@ -203,8 +214,21 @@ int main(int argc, char **argv) {
             apply = true;
         } else if (arg == "--keep" && list_expressions && i + 1 < argc) {
             keep.emplace_back(argv[++i]);
-        } else if (arg == "--limit" && list_expressions && i + 1 < argc) {
+        } else if (arg == "--limit" && (list_expressions || jargon) && i + 1 < argc) {
             limit = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
+            manage.limit = limit;
+        } else if (arg == "--rejected" && list_expressions) {
+            manage.action = "rejected";
+        } else if ((arg == "--rescue" || arg == "--check" || arg == "--uncheck") && list_expressions && i + 1 < argc) {
+            manage.action = std::string(arg.substr(2));
+            manage.id = std::atoll(argv[++i]);
+        } else if (arg == "--set" && jargon && i + 2 < argc) {
+            manage.action = "set";
+            manage.term = argv[++i];
+            manage.meaning = argv[++i];
+        } else if (arg == "--delete" && jargon && i + 1 < argc) {
+            manage.action = "delete";
+            manage.term = argv[++i];
         } else {
             print_usage(stderr);
             return 2;
@@ -213,7 +237,7 @@ int main(int argc, char **argv) {
 
     const auto path = config_path.value_or(default_config_path());
     // Listing learned expressions reads the database only; no keys needed.
-    auto config = load_config(path, !list_expressions || review);
+    auto config = load_config(path, !(list_expressions || jargon) || review);
     if (config.has_error()) {
         log::error("{}: {}", path.string(), config.error().message());
         return 1;
@@ -223,7 +247,10 @@ int main(int argc, char **argv) {
         log::info("{} is valid", path.string());
         return 0;
     }
-    if (list_expressions && !review) return print_expressions(std::filesystem::path(config->data_dir) / "lilia.db", limit);
+    const auto database = std::filesystem::path(config->data_dir) / "lilia.db";
+    if (jargon) return manage_jargon(database, manage);
+    if (list_expressions && !manage.action.empty()) return manage_expressions(database, manage);
+    if (list_expressions && !review) return print_expressions(database, limit);
 
     lighter::EventLoop loop;
     auto interrupts = lighter::InterruptSource::create(loop);

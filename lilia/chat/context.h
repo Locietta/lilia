@@ -65,6 +65,8 @@ struct PlannerInput {
     std::string people;
     /// A summary of older chat the recent messages bring to mind.
     std::string recall;
+    /// Meanings of slang others use in the log ("以下黑话来自…").
+    std::string jargon;
     /// Set on the extra turn right after a reply: the message she answered.
     /// The other new messages are offered once more.
     std::optional<i64> just_replied;

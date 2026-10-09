@@ -93,6 +93,16 @@ latency is negligible at this scale.
      "当[情境]时，可以[说法]" patterns with counts, and the text is dropped.
      Other groups are read-only. The planner picks up to two of about 15
      candidates per reply.
+   - MaiBot-style learning (2026-10-09). Patterns are kept per source chat
+     (`expression_groups` decides which chats share them), reviewed before
+     storing with every verdict logged, embedded, and picked after the
+     planner by a selector call over MMR-ranked candidates. Jargon is mined
+     from the same batches: each sighting keeps an anonymised ±3-line
+     snippet (at most 10 per term), and the meaning is inferred at 4, 8, 25
+     and 100 sightings, with and without context; a term counts as slang
+     only when the two readings differ. Known terms in the recent chat reach
+     the planner as notes. Not ported: jieba word-frequency ranking,
+     clustering, behaviour learning.
    - Next: persona revisions proposed by reflection and approved by an admin,
      with every version kept.
 4. **Stickers (later).**

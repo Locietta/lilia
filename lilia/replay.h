@@ -43,6 +43,17 @@ lighter::Task<int> run_learn(Config config, std::filesystem::path log);
 /// Prints the learned expressions of a lilia.db (read-only).
 int print_expressions(const std::filesystem::path &database, usize limit);
 
+/// Hand management of what lilia learned (writes the database).
+struct Manage {
+    std::string action; ///< expressions: rejected | rescue | check | uncheck; jargon: list | set | delete
+    i64 id = 0;
+    std::string term;
+    std::string meaning;
+    usize limit = 100;
+};
+int manage_expressions(const std::filesystem::path &database, const Manage &request);
+int manage_jargon(const std::filesystem::path &database, const Manage &request);
+
 /// Runs the learning review over every stored expression and lists what it
 /// would reject (and blocked put-downs); `apply` deletes those rows. Styles
 /// containing any `keep` text are never rejected.

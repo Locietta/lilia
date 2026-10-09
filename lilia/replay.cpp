@@ -193,7 +193,12 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             co_return 1;
         }
         for (const auto &row : *rows) {
-            for (i64 i = 0; i < row.count; ++i) std::ignore = store->learn_expression(row.situation, row.style, row.last_active);
+            i64 id = 0;
+            for (i64 i = 0; i < row.count; ++i) {
+                if (auto added = store->learn_expression(row.chat, row.situation, row.style, row.last_active); added.has_value())
+                    id = *added;
+            }
+            if (id != 0 && !row.vector.empty()) std::ignore = store->set_expression_vector(id, row.model, row.vector);
         }
         print(std::format("(载入 {} 条学来的说法)", rows->size()));
     }
@@ -299,7 +304,7 @@ Task<int> run_learn(Config config, std::filesystem::path log) {
         co_return 1;
     }
     lighter::TaskGroup tasks(lighter::EventLoop::current());
-    learn::Learner learner(config.learning, config.chat.name, *store, make_learner(config.model),
+    learn::Learner learner(config.learning, config.chat.name, config.chat.aliases, *store, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     const usize batch = std::max<usize>(config.learning.batch_messages, 2);
     std::vector<learn::Line> lines;
@@ -334,7 +339,7 @@ Task<int> review_expressions(Config config, bool apply, std::vector<std::string>
     // The dry run cannot record its review calls in a read-only database.
     auto scratch = store::Store::open_memory();
     lighter::TaskGroup tasks(lighter::EventLoop::current());
-    learn::Learner learner(config.learning, config.chat.name, apply ? *store : *scratch, make_learner(config.model),
+    learn::Learner learner(config.learning, config.chat.name, config.chat.aliases, apply ? *store : *scratch, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     std::vector<i64> rejected;
     for (usize start = 0; start < rows->size(); start += k_review_batch) {
@@ -342,8 +347,8 @@ Task<int> review_expressions(Config config, bool apply, std::vector<std::string>
         std::vector<learn::Learned> batch;
         for (usize i = start; i < end; ++i) batch.push_back({.situation = (*rows)[i].situation, .style = (*rows)[i].style});
         // A co_await inside an if/for header crashes GCC 16.2.
-        const auto kept = co_await learner.review(0, batch);
-        if (!kept) {
+        const auto verdicts = co_await learner.review(0, batch);
+        if (!verdicts) {
             std::fprintf(stderr, "review call failed; stopping\n");
             co_return 1;
         }
@@ -352,9 +357,11 @@ Task<int> review_expressions(Config config, bool apply, std::vector<std::string>
             const bool blocked = learn::blocked_expression(row.situation, row.style);
             const bool protected_ =
                 std::ranges::any_of(keep, [&](const std::string &text) { return row.style.find(text) != std::string::npos; });
-            if (protected_ || (!blocked && std::ranges::contains(*kept, i - start))) continue;
+            const auto verdict = std::ranges::find(*verdicts, i - start, &learn::Rejected::index);
+            if (protected_ || (!blocked && verdict == verdicts->end())) continue;
             rejected.push_back(row.id);
-            print(std::format("  {}当{}时，可以{}", blocked ? "[屏蔽] " : "", row.situation, row.style));
+            print(std::format("  {}当{}时，可以{}{}", blocked ? "[屏蔽] " : "", row.situation, row.style,
+                              verdict != verdicts->end() && !verdict->reason.empty() ? "（" + verdict->reason + "）" : ""));
         }
     }
     print(std::format("({} 条中 {} 条不合适)", rows->size(), rejected.size()));
@@ -369,6 +376,79 @@ Task<int> review_expressions(Config config, bool apply, std::vector<std::string>
     co_return 0;
 }
 
+int manage_expressions(const std::filesystem::path &database, const Manage &request) {
+    auto store = request.action == "rejected" ? store::Store::open_readonly(database) : store::Store::open(database);
+    if (store.has_error()) {
+        std::fprintf(stderr, "%s\n", store.error().message().c_str());
+        return 1;
+    }
+    const i64 now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    if (request.action == "rejected") {
+        auto reviews = store->expression_reviews("rejected", request.limit);
+        if (reviews.has_error()) return 1;
+        for (const auto &review : *reviews) {
+            print(std::format("{:>5}  当{}时，可以{}（{}）", review.id, review.situation, review.style, review.reason));
+        }
+        print(std::format("({} 条被拒；用 --rescue <编号> 找回)", reviews->size()));
+        return 0;
+    }
+    if (request.action == "rescue") {
+        auto review = store->expression_review(request.id);
+        if (review.has_error() || !*review) {
+            std::fprintf(stderr, "no review %lld\n", static_cast<long long>(request.id));
+            return 1;
+        }
+        const auto &found = **review;
+        auto id = store->learn_expression(found.chat, found.situation, found.style, now);
+        if (id.has_error()) return 1;
+        std::ignore = store->set_expression_checked(*id, true);
+        std::ignore = store->add_expression_review({.time = now,
+                                                    .chat = found.chat,
+                                                    .situation = found.situation,
+                                                    .style = found.style,
+                                                    .verdict = "rescued",
+                                                    .reason = "人工找回"});
+        print(std::format("已找回并标记为人工确认：当{}时，可以{}（表达 {}）", found.situation, found.style, *id));
+        return 0;
+    }
+    if (request.action == "check" || request.action == "uncheck") {
+        if (auto marked = store->set_expression_checked(request.id, request.action == "check"); marked.has_error()) return 1;
+        print(std::format("表达 {} 已{}", request.id, request.action == "check" ? "标记为人工确认" : "取消人工确认"));
+        return 0;
+    }
+    return 2;
+}
+
+int manage_jargon(const std::filesystem::path &database, const Manage &request) {
+    auto store = request.action == "list" ? store::Store::open_readonly(database) : store::Store::open(database);
+    if (store.has_error()) {
+        std::fprintf(stderr, "%s\n", store.error().message().c_str());
+        return 1;
+    }
+    const i64 now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    if (request.action == "set") {
+        if (auto set = store->set_jargon_manual(request.term, request.meaning, now); set.has_error()) return 1;
+        print(std::format("已设定：{}：{}", request.term, request.meaning));
+        return 0;
+    }
+    if (request.action == "delete") {
+        if (auto deleted = store->delete_jargon(request.term); deleted.has_error()) return 1;
+        print(std::format("已删除：{}", request.term));
+        return 0;
+    }
+    auto terms = store->jargon_terms();
+    if (terms.has_error()) return 1;
+    usize shown = 0;
+    for (const auto &term : *terms) {
+        if (shown++ >= request.limit) break;
+        const auto verdict = term.is_jargon == 1 ? "黑话" : term.is_jargon == 0 ? "普通词" : "待定";
+        print(std::format("{:>4}  {}［{}{}］{}", term.count, term.content, verdict, term.created_by == "MANUAL" ? "，人工" : "",
+                          term.meaning.empty() ? "" : "：" + term.meaning));
+    }
+    print(std::format("({} 个词条)", terms->size()));
+    return 0;
+}
+
 int print_expressions(const std::filesystem::path &database, usize limit) {
     auto store = store::Store::open_readonly(database);
     if (store.has_error()) {
@@ -380,7 +460,10 @@ int print_expressions(const std::filesystem::path &database, usize limit) {
         std::fprintf(stderr, "%s\n", rows.error().message().c_str());
         return 1;
     }
-    for (const auto &row : *rows) print(std::format("{:>4}  当{}时，可以{}", row.count, row.situation, row.style));
+    for (const auto &row : *rows) {
+        print(std::format("{:>5} ×{:<3} 当{}时，可以{}{}{}", row.id, row.count, row.situation, row.style, row.checked ? "［人工确认］" : "",
+                          row.chat.id == 0 ? "" : std::format("［群 {}］", row.chat.id)));
+    }
     print(std::format("({} 条)", rows->size()));
     return 0;
 }
