@@ -107,6 +107,9 @@ void test_migration() {
                              "sha1 TEXT NOT NULL, path TEXT NOT NULL, bytes INTEGER NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, "
                              "error TEXT NOT NULL, time INTEGER NOT NULL, UNIQUE (chat_type, chat_id, message_id, segment_index)); "
                              "INSERT INTO media VALUES (1, 'group', 7, 1, 0, 'image', 'stored', 'old', 'p', 1, '', '', '', 1); "
+                             "CREATE TABLE expressions (id INTEGER PRIMARY KEY, situation TEXT NOT NULL, style TEXT NOT NULL UNIQUE, "
+                             "count INTEGER NOT NULL DEFAULT 1, first_seen INTEGER NOT NULL, last_active INTEGER NOT NULL); "
+                             "INSERT INTO expressions VALUES (4, '觉得离谱', '用\"笑死\"', 3, 1, 2); "
                              "PRAGMA user_version = 3;")
                     .has_value(),
                 "old schema");
@@ -117,6 +120,17 @@ void test_migration() {
         auto rows = migrated->message_media({.type = "group", .id = 7}, 1);
         require(rows.has_value() && rows->size() == 1 && rows->front().sha1 == "old" && rows->front().description.empty(),
                 "old rows survive with an empty description");
+        auto patterns = migrated->expressions(0);
+        require(patterns.has_value() && patterns->size() == 1 && patterns->front().id == 4 && patterns->front().count == 3 &&
+                    patterns->front().situations == "觉得离谱" && patterns->front().chat.id == 0,
+                "old patterns become shared ones");
+        require(migrated->database.execute("CREATE TABLE expressions_old (id INTEGER)").has_value(), "a leftover table");
+    }
+    {
+        auto reopened = store::Store::open(path);
+        require(reopened.has_value(), reopened ? std::string() : reopened.error().message());
+        auto leftover = reopened->database.prepare("SELECT COUNT(*) FROM sqlite_master WHERE name = 'expressions_old'");
+        require(leftover.has_value() && *leftover->step() && leftover->column_int(0) == 0, "the leftover table is dropped");
     }
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);

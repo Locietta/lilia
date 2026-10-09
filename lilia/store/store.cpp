@@ -199,11 +199,15 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
         if (wal.has_error()) return lighter::outcome_error(std::move(wal).error());
     }
 
-    auto version = store.database.prepare("PRAGMA user_version");
-    if (version.has_error()) return lighter::outcome_error(std::move(version).error());
-    auto row = version->step();
-    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
-    const auto current = *row ? version->column_int(0) : 0;
+    i64 current = 0;
+    {
+        // A statement left open blocks the DROP TABLE below.
+        auto version = store.database.prepare("PRAGMA user_version");
+        if (version.has_error()) return lighter::outcome_error(std::move(version).error());
+        auto row = version->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        current = *row ? version->column_int(0) : 0;
+    }
     if (current > k_schema_version) {
         return lighter::outcome_error(Error::storage("database schema version " + std::to_string(current) + " is newer than this build"));
     }
@@ -230,13 +234,19 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
         if (rebuilt.has_error()) return lighter::outcome_error(std::move(rebuilt).error());
         if (*rebuilt == 0) {
             auto migrated =
-                store.database.execute("ALTER TABLE expressions RENAME TO expressions_old;" + std::string(k_expressions_table) +
+                store.database.execute("BEGIN; ALTER TABLE expressions RENAME TO expressions_old;" + std::string(k_expressions_table) +
                                        "INSERT INTO expressions (id, situation, style, situations, count, first_seen, last_active) "
                                        "SELECT id, situation, style, situation, count, first_seen, last_active FROM expressions_old;"
-                                       "DROP TABLE expressions_old;");
-            if (migrated.has_error()) return lighter::outcome_error(std::move(migrated).error());
+                                       "DROP TABLE expressions_old; COMMIT;");
+            if (migrated.has_error()) {
+                (void) store.database.execute("ROLLBACK");
+                return lighter::outcome_error(std::move(migrated).error());
+            }
         }
     }
+    // Left behind by the first schema 9 build, whose DROP failed after the copy.
+    auto leftover = store.database.execute("DROP TABLE IF EXISTS expressions_old");
+    if (leftover.has_error()) return lighter::outcome_error(std::move(leftover).error());
     auto indexed = store.database.execute("CREATE INDEX IF NOT EXISTS expressions_by_chat ON expressions (chat_type, chat_id)");
     if (indexed.has_error()) return lighter::outcome_error(std::move(indexed).error());
     // The media table predates its description column in versions 2 and 3.
