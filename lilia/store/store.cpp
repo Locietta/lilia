@@ -925,7 +925,7 @@ Result<Jargon> Store::add_jargon_hit(std::string_view content, const ChatKey &ch
                            s.bind(3, chat.id);
                        });
     if (counted.has_error()) return lighter::outcome_error(std::move(counted).error());
-    if (!snippet.empty()) {
+    if (!snippet.empty() && keep_evidence > 0) {
         auto added = run("INSERT INTO jargon_evidence (jargon_id, chat_type, chat_id, snippet, time) VALUES (?1, ?2, ?3, ?4, ?5)",
                          [&](Statement &s) {
                              s.bind(1, id);

@@ -213,6 +213,8 @@ void test_store() {
     require(store->jargon_evidence((*term)->id, 0)->size() == 10 && store->jargon_evidence((*term)->id, 1)->front().snippet == "片段11",
             "the newest evidence is kept");
     require(store->jargon_chats((*term)->id)->size() == 2, "chats it was seen in");
+    auto counted_only = store->add_jargon_hit("xswl", a, "片段", 100, 0);
+    require(counted_only.has_value() && store->jargon_evidence(counted_only->id, 0)->empty(), "no evidence is written when none is kept");
     require(store->set_jargon_inference((*term)->id, "最强一档", 1, 12, false).has_value() &&
                 (*store->jargon_by_content("T0"))->meaning == "最强一档",
             "inference stored");
