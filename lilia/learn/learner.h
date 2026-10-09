@@ -32,6 +32,8 @@ namespace lilia::learn {
 //   each sighting keeps an anonymised snippet as evidence, and at 4, 8, 25
 //   and 100 sightings the meaning is inferred twice (from context, from the
 //   word alone) and compared: the same meaning means an ordinary word.
+// Batches of the chats she talks in also feed their high-frequency terms
+// (frequency.h), which rank slang in the jargon reference.
 
 struct Line {
     i64 sender = 0;
@@ -130,9 +132,12 @@ bool shares(const std::vector<std::vector<i64>> &groups, i64 a, i64 b);
 std::vector<usize> mmr(const std::vector<std::vector<float>> &vectors, const std::vector<float> &query, usize limit, double lambda);
 
 /// "以下黑话来自…" lines for the slang (is_jargon, with a meaning) that occurs
-/// in others' messages of `log`, ranked by count, at most `limit`; empty when
-/// none occurs.
-std::string jargon_reference(const std::vector<store::Jargon> &terms, const std::vector<store::StoredMessage> &log, usize limit);
+/// in others' messages of `log`, at most `limit`; empty when none occurs.
+/// Ranked as MaiBot does: by count, but slang that is also one of the chat's
+/// `frequent` terms comes first (marked "同时命中高频词"); ties go to the
+/// term seen earlier, then the longer one.
+std::string jargon_reference(const std::vector<store::Jargon> &terms, const std::vector<store::StoredMessage> &log,
+                             const std::vector<store::FrequentTerm> &frequent, usize limit);
 
 /// What the selector sees at reply time: recent chat lines ("昵称: 内容"),
 /// the message she answers, her intent, and candidates "当X时，可以Y".
@@ -171,9 +176,13 @@ struct Learner {
     /// Her own line in a group, as [SELF] context for the next batch.
     void observe_own(i64 group, std::string text);
 
-    /// One batch: expressions (extract, review, store) and slang. Returns the
-    /// stored patterns.
+    /// One batch: frequent terms (chats in `frequency_chats` only),
+    /// expressions (extract, review, store) and slang. Returns the stored
+    /// patterns.
     lighter::Task<std::vector<Learned>> learn(i64 group, std::vector<Line> lines);
+
+    /// Others' lines of one batch into `chat`'s high-frequency terms.
+    void count_frequent_terms(const store::ChatKey &chat, const std::vector<Line> &lines);
 
     /// The review call alone; nullopt when it failed. Recorded for `group`.
     lighter::Task<std::optional<std::vector<Rejected>>> review(i64 group, const std::vector<Learned> &learned);
@@ -202,6 +211,9 @@ struct Learner {
     Spawn spawn;
     /// Embeds patterns when set (the memory module's local service).
     memory::Memory *embedder = nullptr;
+    /// Chats whose high-frequency terms are kept: the ones she talks in, the
+    /// only place they are used (the jargon reference).
+    std::vector<i64> frequency_chats;
     std::map<i64, std::vector<Line>> buffers;
     std::map<i64, i64> last_batch;
     usize running = 0;

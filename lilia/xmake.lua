@@ -6,8 +6,10 @@ target("lilia-core")
     set_kind("static")
     -- public, so the generated <xmake/version/lilia.hpp> reaches dependents
     add_rules("utils.version.cpp")
-    add_rules("utils.bin2obj.cpp", {extensions = {".md"}})
+    add_rules("utils.bin2obj.cpp", {extensions = {".md", ".txt"}})
     add_files("prompts/*.md")
+    -- jieba's dictionary and HMM model, for learn/segment.cpp
+    add_files("data/jieba/*.txt")
     add_files("config.cpp", "replay.cpp", "archive/*.cpp", "chat/*.cpp", "learn/*.cpp", "memory/*.cpp", "net/*.cpp", "onebot/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "sticker/*.cpp", "store/*.cpp", "tools/*.cpp")
     add_packages("lighter", {public = true})
     add_packages("sqlite3")

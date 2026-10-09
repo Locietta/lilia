@@ -101,8 +101,14 @@ latency is negligible at this scale.
      snippet (at most 10 per term), and the meaning is inferred at 4, 8, 25
      and 100 sightings, with and without context; a term counts as slang
      only when the two readings differ. Known terms in the recent chat reach
-     the planner as notes. Not ported: jieba word-frequency ranking,
-     clustering, behaviour learning.
+     the planner as notes. Not ported: clustering, behaviour learning.
+   - High-frequency terms (2026-10-09). `learn/segment.*` ports jieba's
+     default `cut` (dictionary DAG plus HMM, jieba's own data embedded);
+     `learn/frequency.*` ports MaiBot's word-frequency service. Batches of
+     the chats she talks in keep a ranked table of their frequent words and
+     phrases (top 1000); slang that is also a frequent term leads the
+     jargon notes. Other groups get no table: MaiBot only reads the current
+     chat's.
    - Next: persona revisions proposed by reflection and approved by an admin,
      with every version kept.
 4. **Stickers (later).**

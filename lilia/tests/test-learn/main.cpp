@@ -10,7 +10,9 @@
 
 #include <lilia/chat/context.h>
 #include <lilia/chat/responder.h>
+#include <lilia/learn/frequency.h>
 #include <lilia/learn/learner.h>
+#include <lilia/learn/segment.h>
 #include <lilia/memory/memory.h>
 #include <lilia/onebot/message.h>
 #include <lilia/store/store.h>
@@ -152,12 +154,21 @@ void test_jargon() {
         {.content = "也觉得", .meaning = "普通", .is_jargon = 0, .count = 50},
     };
     const std::vector<store::StoredMessage> log{{.text = "这卡太T0了 xswl"}, {.text = "也觉得", .from_self = true}};
-    const auto notes = learn::jargon_reference(terms, log, 10);
-    require(notes.find("以下黑话来自当前上下文中其他用户消息的机械匹配") == 0 && notes.find("1. xswl：笑死我了") != std::string::npos &&
-                notes.find("2. T0：最强一档") != std::string::npos && notes.find("急了") == std::string::npos &&
+    const auto notes = learn::jargon_reference(terms, log, {}, 10);
+    require(notes.find("以下黑话来自当前上下文中其他用户消息的机械匹配") == 0 && notes.find("1. xswl：笑死我了\n") != std::string::npos &&
+                notes.find("2. T0：最强一档\n") != std::string::npos && notes.find("急了") == std::string::npos &&
                 notes.find("也觉得") == std::string::npos,
             "slang with a meaning that others used, most seen first");
-    require(learn::jargon_reference(terms, {}, 10).empty(), "nothing matched");
+    require(learn::jargon_reference(terms, {}, {}, 10).empty(), "nothing matched");
+    const auto boosted = learn::jargon_reference(terms, log, {{.term = "t0", .occurrence_count = 3, .rank = 1}}, 10);
+    require(boosted.find("1. T0：最强一档，同时命中高频词\n") != std::string::npos &&
+                boosted.find("2. xswl：笑死我了\n") != std::string::npos,
+            "slang that is also a frequent term of the chat comes first");
+    const std::vector<store::StoredMessage> later{{.text = "xswl"}, {.text = "T0 还是 xswl"}};
+    const std::vector<store::Jargon> even{{.content = "T0", .meaning = "a", .is_jargon = 1, .count = 5},
+                                          {.content = "xswl", .meaning = "b", .is_jargon = 1, .count = 5}};
+    require(learn::jargon_reference(even, later, {}, 10).find("1. xswl：b\n2. T0：a\n") != std::string::npos,
+            "equal counts: the term seen earlier first");
 }
 
 void test_sharing_and_mmr() {
@@ -257,6 +268,75 @@ void test_selection_request() {
             "picked habits reach the writer");
 }
 
+std::string joined(const auto &words) {
+    std::string out;
+    for (const auto &word : words) {
+        if (!out.empty()) out += '/';
+        out += word;
+    }
+    return out;
+}
+
+/// Expected cuts come from Python jieba 0.42.1 (jieba.cut, default mode).
+void test_segment() {
+    const std::vector<std::pair<std::string_view, std::string_view>> cases{
+        {"我来到北京清华大学", "我/来到/北京/清华大学"},
+        {"他来到了网易杭研大厦", "他/来到/了/网易/杭研/大厦"},
+        {"小明硕士毕业于中国科学院计算所，后在日本京都大学深造", "小明/硕士/毕业/于/中国科学院/计算所/，/后/在/日本京都大学/深造"},
+        {"这卡太T0了 xswl", "这卡/太/T0/了/ /xswl"},
+        {"笑死 这也行😂", "笑/死/ /这/也/行/😂"},
+        {"iPhone15的价格是5999.99元，涨了3.5%", "iPhone15/的/价格/是/5999.99/元/，/涨/了/3.5%"},
+        {"C++和c#都能写，A-B测试", "C++/和/c#/都/能/写/，/A/-/B/测试"},
+        {"一个emoji🐱和全角，标点！", "一个/emoji/🐱/和/全角/，/标点/！"},
+        {"第一行\r\n第二行", "第一行/\r\n/第二行"},
+    };
+    for (const auto &[text, expected] : cases) {
+        require(joined(learn::cut(text)) == expected, std::format("cut {}: {}", text, joined(learn::cut(text))));
+    }
+    require(learn::cut("").empty(), "nothing to cut");
+}
+
+/// Expected terms and tallies come from MaiBot's message_word_frequency_service.py.
+void test_frequency() {
+    const auto terms = learn::meaningful_terms("我用 C++ 和 node.js 写了个机器人 https://x.com/a @小明 [CQ:face,id=1]");
+    require(joined(terms) == "我用/c++/node/js/机器人/node.js",
+            "noise removed, stop words and single characters dropped, tech terms added: " + joined(terms));
+    require(joined(learn::term_phrases(terms)) == "c++ node/node js/c++ node js", "phrases of 2 and 3 tokens");
+    const auto chat = learn::meaningful_terms("这卡太T0了 xswl 哈哈哈 123 ！！");
+    require(joined(chat) == "这卡/t0/xswl" && joined(learn::term_phrases(chat)) == "t0 xswl", "laughter, numbers and punctuation dropped");
+    require(learn::normalize_term("  《Hello   World》 ") == "hello world", "token normalisation");
+    require(learn::normalize_match_text(" XSWL  好耶\n ") == "xswl 好耶", "match normalisation");
+    const auto tallies = learn::count_terms({"白龙卡组真好玩", "白龙卡组又赢了", "今天打白龙", "C++ 写机器人", "c++ 写 bot"});
+    require(tallies.size() == 2 && tallies[0].term == "白龙卡组" && tallies[0].count == 2 && tallies[0].message_count == 2 &&
+                tallies[1].term == "c++" && tallies[1].count == 2,
+            "terms seen twice or more, longer first on ties");
+
+    auto store = store::Store::open_memory();
+    require(store.has_value(), "open");
+    const store::ChatKey a{.type = "group", .id = 1};
+    const store::ChatKey b{.type = "group", .id = 2};
+    require(store
+                ->merge_frequent_terms(
+                    a, {{.term = "白龙", .count = 3, .message_count = 2}, {.term = "卡组", .count = 3, .message_count = 3}}, 10, 2)
+                .has_value(),
+            "merge");
+    require(store
+                ->merge_frequent_terms(a, {{.term = "白龙", .count = 2, .message_count = 2}, {.term = "x", .count = 1, .message_count = 1}},
+                                       20, 2)
+                .has_value(),
+            "merge again");
+    require(store->merge_frequent_terms(b, {{.term = "白龙", .count = 9, .message_count = 9}}, 20, 2).has_value(), "another chat");
+    const auto kept = store->frequent_terms(a);
+    require(kept.has_value() && kept->size() == 2, "capped at max_terms");
+    require((*kept)[0].term == "白龙" && (*kept)[0].occurrence_count == 5 && (*kept)[0].message_count == 4 && (*kept)[0].rank == 1 &&
+                (*kept)[0].created_at == 10 && (*kept)[0].updated_at == 20,
+            "counts add up; ranked by occurrences");
+    require((*kept)[1].term == "卡组" && (*kept)[1].rank == 2 && (*kept)[0].frequency == 5.0 / 8.0 &&
+                (*kept)[1].message_frequency == 3.0 / 7.0,
+            "the weakest term is dropped; frequencies are shares of the kept terms");
+    require(store->frequent_terms(b)->front().occurrence_count == 9, "chats are separate");
+}
+
 } // namespace
 
 int main() {
@@ -269,6 +349,8 @@ int main() {
         test_learnable_text();
         test_store();
         test_selection_request();
+        test_segment();
+        test_frequency();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

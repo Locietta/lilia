@@ -183,6 +183,27 @@ struct JargonEvidence {
     i64 time = 0;
 };
 
+/// Occurrences of a word or phrase in one batch of messages.
+struct TermTally {
+    std::string term;
+    i64 count = 0;
+    i64 message_count = 0; ///< messages it occurs in
+};
+
+/// A chat's high-frequency word or phrase (MaiBot's HighFrequencyTerm):
+/// running totals, ranked from 1 by occurrences; frequencies are shares of
+/// the chat's kept terms.
+struct FrequentTerm {
+    std::string term;
+    i64 occurrence_count = 0;
+    i64 message_count = 0;
+    i64 rank = 0;
+    double frequency = 0;
+    double message_frequency = 0;
+    i64 created_at = 0;
+    i64 updated_at = 0;
+};
+
 struct Store {
     static Result<Store> open(const std::filesystem::path &path);
     /// Existing database without schema changes; for inspection tools.
@@ -256,6 +277,14 @@ struct Store {
     Result<void> set_jargon_manual(std::string_view content, std::string_view meaning, i64 now);
 
     Result<void> delete_jargon(std::string_view content);
+
+    /// Adds a batch's tallies to `chat`'s high-frequency terms, keeps the top
+    /// `max_terms` (by occurrences, then messages, longer first, then text)
+    /// and re-ranks them.
+    Result<void> merge_frequent_terms(const ChatKey &chat, const std::vector<TermTally> &tallies, i64 now, usize max_terms);
+
+    /// A chat's high-frequency terms, by rank.
+    Result<std::vector<FrequentTerm>> frequent_terms(const ChatKey &chat);
 
     /// Patterns, most counted first; `limit` 0 returns all of them.
     Result<std::vector<Expression>> expressions(usize limit);

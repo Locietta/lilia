@@ -41,6 +41,7 @@ struct Statement {
     Result<void> run();
 
     i64 column_int(int index) const;
+    double column_double(int index) const;
     std::string column_text(int index) const;
     std::string column_blob(int index) const;
 

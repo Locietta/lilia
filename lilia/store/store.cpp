@@ -13,7 +13,7 @@ namespace {
 // 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
 // 6: person_facts. 7: chat_summaries. 8: stickers. 9: expressions per chat
 // (rebuilt), expression_reviews, jargon.
-constexpr int k_schema_version = 9;
+constexpr int k_schema_version = 10;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -127,6 +127,21 @@ CREATE TABLE IF NOT EXISTS jargon_evidence (
     time INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jargon_evidence_by_term ON jargon_evidence (jargon_id, time);
+
+CREATE TABLE IF NOT EXISTS frequent_terms (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    term TEXT NOT NULL,
+    occurrence_count INTEGER NOT NULL DEFAULT 0,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    rank INTEGER NOT NULL DEFAULT 0,
+    frequency REAL NOT NULL DEFAULT 0,
+    message_frequency REAL NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (chat_type, chat_id, term)
+);
 
 CREATE TABLE IF NOT EXISTS memory_chunks (
     id INTEGER PRIMARY KEY,
@@ -1017,6 +1032,84 @@ Result<void> Store::delete_jargon(std::string_view content) {
         if (auto ran = statement->run(); ran.has_error()) return ran;
     }
     return {};
+}
+
+Result<void> Store::merge_frequent_terms(const ChatKey &chat, const std::vector<TermTally> &tallies, i64 now, usize max_terms) {
+    if (tallies.empty()) return {};
+    // MaiBot's order, also for which terms survive the cap.
+    constexpr std::string_view k_order = "occurrence_count DESC, message_count DESC, length(term) DESC, term";
+    const auto run = [this, &chat](std::string_view sql, const auto &bind) -> Result<void> {
+        auto statement = database.prepare(sql);
+        if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+        statement->bind(1, chat.type);
+        statement->bind(2, chat.id);
+        bind(*statement);
+        return statement->run();
+    };
+    if (auto begun = database.execute("BEGIN"); begun.has_error()) return begun;
+    const auto merged = [&]() -> Result<void> {
+        for (const auto &tally : tallies) {
+            if (tally.term.empty()) continue;
+            auto added =
+                run("INSERT INTO frequent_terms (chat_type, chat_id, term, occurrence_count, message_count, created_at, updated_at) "
+                    "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) ON CONFLICT (chat_type, chat_id, term) DO UPDATE SET "
+                    "occurrence_count = occurrence_count + excluded.occurrence_count, "
+                    "message_count = message_count + excluded.message_count, updated_at = excluded.updated_at",
+                    [&](Statement &s) {
+                        s.bind(3, tally.term);
+                        s.bind(4, tally.count);
+                        s.bind(5, tally.message_count);
+                        s.bind(6, now);
+                    });
+            if (added.has_error()) return added;
+        }
+        auto capped = run(std::format("DELETE FROM frequent_terms WHERE chat_type = ?1 AND chat_id = ?2 AND id NOT IN "
+                                      "(SELECT id FROM frequent_terms WHERE chat_type = ?1 AND chat_id = ?2 ORDER BY {} LIMIT ?3)",
+                                      k_order),
+                          [&](Statement &s) { s.bind(3, static_cast<i64>(max_terms)); });
+        if (capped.has_error()) return capped;
+        return run(
+            std::format("UPDATE frequent_terms SET rank = ranked.rank, "
+                        "frequency = CASE WHEN ranked.occurrences > 0 THEN CAST(frequent_terms.occurrence_count AS REAL) / "
+                        "ranked.occurrences ELSE 0 END, "
+                        "message_frequency = CASE WHEN ranked.messages > 0 THEN CAST(frequent_terms.message_count AS REAL) / "
+                        "ranked.messages ELSE 0 END "
+                        "FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY {}) AS rank, SUM(occurrence_count) OVER () AS occurrences, "
+                        "SUM(message_count) OVER () AS messages FROM frequent_terms WHERE chat_type = ?1 AND chat_id = ?2) AS ranked "
+                        "WHERE frequent_terms.id = ranked.id",
+                        k_order),
+            [](Statement &) {});
+    }();
+    if (merged.has_error()) {
+        (void) database.execute("ROLLBACK");
+        return merged;
+    }
+    return database.execute("COMMIT");
+}
+
+Result<std::vector<FrequentTerm>> Store::frequent_terms(const ChatKey &chat) {
+    auto statement = database.prepare("SELECT term, occurrence_count, message_count, rank, frequency, message_frequency, created_at, "
+                                      "updated_at FROM frequent_terms WHERE chat_type = ?1 AND chat_id = ?2 ORDER BY rank");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    std::vector<FrequentTerm> terms;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        terms.push_back({
+            .term = statement->column_text(0),
+            .occurrence_count = statement->column_int(1),
+            .message_count = statement->column_int(2),
+            .rank = statement->column_int(3),
+            .frequency = statement->column_double(4),
+            .message_frequency = statement->column_double(5),
+            .created_at = statement->column_int(6),
+            .updated_at = statement->column_int(7),
+        });
+    }
+    return terms;
 }
 
 Result<void> Store::delete_expressions(const std::vector<i64> &ids) {

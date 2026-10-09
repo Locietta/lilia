@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -18,7 +19,9 @@
 #include <lilia/archive/archiver.h>
 #include <lilia/chat/responder.h>
 #include <lilia/config.h>
+#include <lilia/learn/frequency.h>
 #include <lilia/learn/learner.h>
+#include <lilia/learn/segment.h>
 #include <lilia/log.h>
 #include <lilia/onebot/session.h>
 #include <lilia/replay.h>
@@ -39,6 +42,7 @@ void print_usage(FILE *output) {
                "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
                "       lilia expressions --rejected | --rescue <review id> | --check <id> | --uncheck <id>\n"
                "       lilia jargon [--limit <n>] | --set <term> <meaning> | --delete <term>\n"
+               "       lilia segment [--terms | --count <n>] < lines.txt\n"
                "       lilia --version | --help\n",
                output);
 }
@@ -119,6 +123,7 @@ Task<int> run_app(const Config &config) {
     learn::Learner learner(config.learning, config.chat.name, config.chat.aliases, *store, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (config.learning.enabled) responder.learner = &learner;
+    learner.frequency_chats = config.chat.groups;
     sticker::Collector collector(config.stickers, data_dir, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (config.stickers.enabled) {
         if (!config.model.vision_model.empty()) {
@@ -171,6 +176,42 @@ int main(int argc, char **argv) {
     std::vector<std::string> keep;
     usize limit = 100;
     bool check_only = false;
+    if (argc >= 2 && std::string_view(argv[1]) == "segment") {
+        // Debugging aids, one stdin line per message: jieba words of each
+        // line joined by "/"; --terms: its meaningful terms; --count <n>: the
+        // frequent-term tallies of every n lines ("term<TAB>count<TAB>messages").
+        const std::string_view mode = argc >= 3 ? argv[2] : "";
+        const auto batch = static_cast<usize>(argc >= 4 ? std::max(1, std::atoi(argv[3])) : 30);
+        const auto join = [](const auto &words) {
+            std::string joined;
+            for (const auto &word : words) {
+                if (!joined.empty()) joined += '/';
+                joined += word;
+            }
+            return joined;
+        };
+        std::vector<std::string> lines;
+        const auto flush = [&] {
+            for (const auto &tally : learn::count_terms(lines))
+                std::printf("%s\t%lld\t%lld\n", tally.term.c_str(), static_cast<long long>(tally.count),
+                            static_cast<long long>(tally.message_count));
+            std::printf("--\n");
+            lines.clear();
+        };
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            if (mode == "--terms") {
+                std::printf("%s\n", join(learn::meaningful_terms(line)).c_str());
+            } else if (mode == "--count") {
+                lines.push_back(line);
+                if (lines.size() == batch) flush();
+            } else {
+                std::printf("%s\n", join(learn::cut(line)).c_str());
+            }
+        }
+        if (!lines.empty()) flush();
+        return 0;
+    }
     int first = 1;
     if (argc > 2 && std::string_view(argv[1]) == "replay") {
         replay_log = argv[2];

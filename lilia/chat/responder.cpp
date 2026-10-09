@@ -406,7 +406,9 @@ std::string jargon_notes(Responder *r, const store::ChatKey &chat, const std::ve
                    std::ranges::none_of(*chats, [&](i64 id) { return learn::shares(r->config.learning.jargon_groups, chat.id, id); });
         });
     }
-    return learn::jargon_reference(*terms, log, r->config.learning.jargon_matches);
+    auto frequent = r->store.frequent_terms(chat);
+    return learn::jargon_reference(*terms, log, frequent.has_value() ? *frequent : std::vector<store::FrequentTerm>{},
+                                   r->config.learning.jargon_matches);
 }
 
 } // namespace

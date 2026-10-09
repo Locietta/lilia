@@ -55,6 +55,8 @@ Result<void> Statement::run() {
 
 i64 Statement::column_int(int index) const { return sqlite3_column_int64(value, index); }
 
+double Statement::column_double(int index) const { return sqlite3_column_double(value, index); }
+
 std::string Statement::column_blob(int index) const {
     const auto *bytes = static_cast<const char *>(sqlite3_column_blob(value, index));
     if (!bytes) return {};

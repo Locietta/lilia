@@ -8,6 +8,7 @@
 #include <format>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -24,6 +25,7 @@
 
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
+#include <lilia/learn/frequency.h>
 #include <lilia/log.h>
 #include <lilia/memory/memory.h>
 #include <lilia/onebot/message.h>
@@ -476,27 +478,61 @@ std::vector<usize> mmr(const std::vector<std::vector<float>> &vectors, const std
     return chosen;
 }
 
-std::string jargon_reference(const std::vector<store::Jargon> &terms, const std::vector<store::StoredMessage> &log, usize limit) {
+std::string jargon_reference(const std::vector<store::Jargon> &terms, const std::vector<store::StoredMessage> &log,
+                             const std::vector<store::FrequentTerm> &frequent, usize limit) {
+    // MaiBot's maisaka/jargon_context_matcher.py: each slang term is placed
+    // at the first of the others' messages it occurs in; slang that is also
+    // one of the chat's frequent terms ranks above all the rest.
+    std::vector<std::string> texts;
+    for (const auto &message : log) {
+        if (auto text = normalize_match_text(message.text); !message.from_self && !text.empty()) texts.push_back(std::move(text));
+    }
+    std::vector<std::pair<const store::Jargon *, std::string>> candidates;
+    for (const auto &term : terms) {
+        if (term.is_jargon != 1 || term.meaning.empty() || chat::count_code_points(term.content) < k_min_jargon_code_points) continue;
+        if (auto key = normalize_match_text(term.content); !key.empty()) candidates.emplace_back(&term, std::move(key));
+    }
+    std::unordered_map<std::string, const store::FrequentTerm *> frequent_by_term;
+    for (const auto &term : frequent) frequent_by_term.try_emplace(normalize_match_text(term.term), &term);
     struct Match {
         const store::Jargon *term;
         double score;
+        usize first;
+        bool frequent;
     };
     std::vector<Match> matches;
-    for (const auto &term : terms) {
-        if (term.is_jargon != 1 || term.meaning.empty() || chat::count_code_points(term.content) < k_min_jargon_code_points) continue;
-        // The latest message it appears in; later ones weigh a little more.
-        for (usize i = log.size(); i-- > 0;) {
-            if (log[i].from_self || !occurs(log[i].text, term.content)) continue;
-            matches.push_back({.term = &term, .score = static_cast<double>(term.count) - 0.01 * static_cast<double>(log.size() - 1 - i)});
-            break;
+    std::unordered_set<std::string> matched;
+    for (usize index = 0; index < texts.size(); ++index) {
+        for (const auto &[candidate, key] : candidates) {
+            const auto &term = *candidate;
+            if (matched.contains(key) || !occurs(texts[index], key)) continue;
+            const auto hit = frequent_by_term.find(key);
+            double bonus = 0;
+            if (hit != frequent_by_term.end()) {
+                bonus = 1000.0 + static_cast<double>(hit->second->occurrence_count) * 2.0;
+                if (hit->second->rank > 0) bonus += std::max(0.0, 100.0 - static_cast<double>(hit->second->rank));
+            }
+            matches.push_back({.term = &term,
+                               .score = static_cast<double>(term.count) + bonus - static_cast<double>(index) * 0.01,
+                               .first = index,
+                               .frequent = hit != frequent_by_term.end()});
+            matched.insert(key);
         }
     }
     if (matches.empty()) return {};
-    std::ranges::sort(matches, [](const Match &a, const Match &b) { return a.score > b.score; });
+    std::ranges::sort(matches, [](const Match &a, const Match &b) {
+        if (a.score != b.score) return a.score > b.score;
+        if (a.first != b.first) return a.first < b.first;
+        const auto la = chat::count_code_points(a.term->content);
+        const auto lb = chat::count_code_points(b.term->content);
+        if (la != lb) return la > lb;
+        return a.term->content < b.term->content;
+    });
     if (matches.size() > limit) matches.resize(limit);
     std::string text = "以下黑话来自当前上下文中其他用户消息的机械匹配，仅作理解聊天语境的参考：\n";
     for (usize i = 0; i < matches.size(); ++i)
-        text += std::format("{}. {}：{}\n", i + 1, matches[i].term->content, matches[i].term->meaning);
+        text += std::format("{}. {}：{}{}\n", i + 1, matches[i].term->content, matches[i].term->meaning,
+                            matches[i].frequent ? "，同时命中高频词" : "");
     return text;
 }
 
@@ -631,9 +667,24 @@ Task<std::optional<std::vector<Rejected>>> Learner::review(i64 group, const std:
     co_return parse_review(*items, learned.size());
 }
 
+void Learner::count_frequent_terms(const store::ChatKey &chat, const std::vector<Line> &lines) {
+    std::vector<std::string> texts;
+    for (const auto &line : lines) {
+        if (!line.self) texts.push_back(line.text);
+    }
+    const auto tallies = count_terms(texts);
+    if (tallies.empty()) return;
+    if (auto merged = store.merge_frequent_terms(chat, tallies, now(), k_max_frequent_terms); merged.has_error()) {
+        log::error("cannot store frequent terms: {}", merged.error().message());
+        return;
+    }
+    log::info("frequent terms: {} counted in group {}", tallies.size(), chat.id);
+}
+
 Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
     const i64 started = now();
     const store::ChatKey chat{.type = "group", .id = group};
+    if (std::ranges::contains(frequency_chats, group)) count_frequent_terms(chat, lines);
     std::vector<Learned> stored;
     const auto items = co_await run_call(this, group, build_learner_request(prompt, lines, name), "learning");
     if (items) {

@@ -41,3 +41,19 @@ The SQLite statement helpers in `lilia/store/sqlite.*` were extracted from the
 file-local helpers in `liminal/session/store.cpp`. The build scaffolding
 (root `xmake.lua`, `pixi.toml`, formatting, hooks and remote test scripts) and
 `lilia/xmake/rules/version.lua` were adapted from liminal.
+
+# Third-party data
+
+## jieba 0.42.1 (MIT, `lilia/data/jieba/`)
+
+`lilia/learn/segment.cpp` ports jieba's default `jieba.cut` and embeds its
+data. `jieba_dict.txt` is jieba's `dict.txt` byte for byte; `jieba_hmm.txt`
+holds the HMM tables of `finalseg/prob_*.py`, one entry per line, written by
+`scripts/jieba_data.py` from the PyPI sdist. `LICENSE` is jieba's. Verified on
+2026-10-09: identical tokens to Python jieba on 136,370 distinct lines (3.55M
+tokens) of Chinese docs, prompts and code.
+
+`lilia/learn/frequency.cpp` ports MaiBot's
+`src/services/message_word_frequency_service.py` (`f9ec367`); on the same
+lines its terms and its per-batch tallies (4,546 batches of 30) match the
+Python code exactly.
