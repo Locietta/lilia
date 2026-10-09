@@ -10,6 +10,8 @@ target("lilia-core")
     add_files("prompts/*.md")
     -- jieba's dictionary and HMM model, for learn/segment.cpp
     add_files("data/jieba/*.txt")
+    -- pypinyin readings, for chat/typos.cpp
+    add_files("data/pinyin/*.txt")
     add_files("config.cpp", "replay.cpp", "archive/*.cpp", "chat/*.cpp", "learn/*.cpp", "memory/*.cpp", "net/*.cpp", "onebot/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "sticker/*.cpp", "store/*.cpp", "tools/*.cpp")
     add_packages("lighter", {public = true})
     add_packages("sqlite3")

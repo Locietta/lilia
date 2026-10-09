@@ -17,7 +17,9 @@
 #include <lighter/async/runtime/interrupt.h>
 
 #include <lilia/archive/archiver.h>
+#include <lilia/chat/delivery.h>
 #include <lilia/chat/responder.h>
+#include <lilia/chat/typos.h>
 #include <lilia/config.h>
 #include <lilia/learn/frequency.h>
 #include <lilia/learn/learner.h>
@@ -42,7 +44,7 @@ void print_usage(FILE *output) {
                "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
                "       lilia expressions --rejected | --rescue <review id> | --check <id> | --uncheck <id>\n"
                "       lilia jargon [--limit <n>] | --set <term> <meaning> | --delete <term>\n"
-               "       lilia segment [--terms | --count <n>] < lines.txt\n"
+               "       lilia segment [--terms | --count <n> | --bench | --pieces | --homophones] < lines.txt\n"
                "       lilia --version | --help\n",
                output);
 }
@@ -231,7 +233,23 @@ int main(int argc, char **argv) {
             return 0;
         }
         while (std::getline(std::cin, line)) {
-            if (mode == "--terms") {
+            if (mode == "--pieces") {
+                // Reply pieces before merging: text \x1f separator, pieces split by \x1e.
+                std::string out;
+                for (const auto &piece : chat::split_pieces(line)) out += piece.text + "\x1f" + piece.separator + "\x1e";
+                std::printf("%s\n", out.c_str());
+            } else if (mode == "--homophones") {
+                // Typo candidates for a character or a word (min_freq 9, no tone errors).
+                const auto chars = learn::utf8_chars(line);
+                std::vector<std::string> out;
+                if (chars.size() == 1) {
+                    for (const auto c : chat::similar_chars(chars[0].cp, chat::reading_of(chars[0].cp), "", 9))
+                        out.push_back(learn::encode_utf8(c));
+                } else {
+                    out = chat::word_homophones(line, 9);
+                }
+                std::printf("%s\n", join(out).c_str());
+            } else if (mode == "--terms") {
                 std::printf("%s\n", join(learn::meaningful_terms(line)).c_str());
             } else if (mode == "--count") {
                 lines.push_back(line);

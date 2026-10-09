@@ -77,6 +77,23 @@ struct ModelConfig {
     bool web_search = true;
 };
 
+/// Homophone typos in casual replies (MaiBot's chinese_typo, same defaults).
+struct TypoConfig {
+    bool enabled = true;
+    /// Chance a single-character word is mistyped; inside an n-character
+    /// word each character gets error_rate * 0.7^(n-1).
+    double error_rate = 0.01;
+    /// Homophones less frequent than this (character frequency, 0..1000)
+    /// are never used.
+    double min_freq = 9;
+    /// Chance the homophones of another tone are considered too.
+    double tone_error_rate = 0.1;
+    /// Chance a whole word is swapped for a homophone word.
+    double word_replace_rate = 0.006;
+    /// The follow-up correction quotes the mistyped message.
+    bool correction_quote = true;
+};
+
 struct ChatConfig {
     /// Only these groups are logged and answered.
     std::vector<i64> groups;
@@ -106,6 +123,7 @@ struct ChatConfig {
     std::string handoff = "intent";
     /// Typing-delay speed for multi-message replies; 0 sends immediately.
     double typing_speed = 1.0;
+    TypoConfig typos;
     /// How long a turn waits for new images to be described.
     u32 image_wait_seconds = 8;
     /// Input plus output tokens per local calendar day across all chats.

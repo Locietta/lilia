@@ -7,6 +7,8 @@
 #include <lilia/chat/delivery.h>
 #include <lilia/chat/flow.h>
 #include <lilia/chat/trigger.h>
+#include <lilia/chat/typos.h>
+#include <lilia/learn/segment.h>
 #include <lilia/onebot/message.h>
 #include <lilia/tests/support/fake_ws_peer.h>
 
@@ -247,31 +249,49 @@ void test_flow() {
     require(!chat::should_plan(quiet, shy, 1000), "talk_value 0 only reacts when addressed");
 }
 
+std::vector<std::string> texts(const std::vector<chat::Segment> &segments) {
+    std::vector<std::string> out;
+    for (const auto &segment : segments) out.push_back(segment.text);
+    return out;
+}
+
+/// Expected pieces come from MaiBot's _split_into_sentence_segments with
+/// merging switched off.
 void test_bubbles() {
-    require(chat::split_bubbles("好耶。\n\n我也在追") == std::vector<std::string>({"好耶", "我也在追"}), "one bubble per line, no period");
-    require(chat::split_bubbles("一\n二\n三\n四") == std::vector<std::string>({"一", "二", "三 四"}), "extra lines merge into the last");
-    const std::string paragraph = "这一集的作画确实有点崩，尤其是打斗那段。不过剧情推进得还挺快的！下周应该会好一点吧？反正我会接着看";
-    const auto pieces = chat::split_bubbles(paragraph);
-    require(pieces.size() == 3 && pieces[0] == "这一集的作画确实有点崩，尤其是打斗那段" && pieces[1] == "不过剧情推进得还挺快的！",
-            "a long line splits after sentence ends");
-    require(chat::split_bubbles("啊？？真的假的").size() == 1, "short lines stay whole");
-    require(chat::split_bubbles("骂的又不是你，圈内撕版权和抢饭碗呗，个人小项目拿它当草稿参考又没啥") ==
+    using chat::Segment;
+    require(chat::split_pieces("好耶。\n我也在追") == std::vector<Segment>({{"好耶", "。"}, {"我也在追", ""}}),
+            "marks split and are dropped");
+    require(texts(chat::split_pieces("骂的又不是你，圈内撕版权和抢饭碗呗，个人小项目拿它当草稿参考又没啥")) ==
                 std::vector<std::string>({"骂的又不是你", "圈内撕版权和抢饭碗呗", "个人小项目拿它当草稿参考又没啥"}),
-            "a long sentence breaks at commas, without the comma");
-    require(chat::split_bubbles("工具就是工具 拿来提高效率没问题 最烦的是拿ai图装成自己画的") ==
-                std::vector<std::string>({"工具就是工具", "拿来提高效率没问题", "最烦的是拿ai图装成自己画的"}),
-            "spaces between CJK clauses break too");
-    require(chat::split_bubbles("好耶，我也在追，作画真的好") == std::vector<std::string>({"好耶，我也在追，作画真的好"}),
-            "a short line with commas stays one message");
-    require(chat::split_bubbles("独立游戏小成本用 AI 出图挺好的，真不用太在意那些骂声") ==
-                std::vector<std::string>({"独立游戏小成本用 AI 出图挺好的", "真不用太在意那些骂声"}),
-            "spaces around Latin words are not breaks");
-    require(chat::split_bubbles("use godot for a small demo project instead").size() == 1, "spaces in English do not split");
-    require(
-        chat::split_bubbles("一，二，三，四，五，六，七，八，九，十，十一，十二，十三，十四，十五，十六，十七，十八，十九，二十").size() ==
-            3,
-        "comma pieces of one sentence merge back to at most three");
-    require(chat::split_bubbles("  \n ").empty(), "blank text has no bubbles");
+            "commas split");
+    require(texts(chat::split_pieces("独立游戏小成本用 AI 出图挺好的，真不用太在意那些骂声")) ==
+                std::vector<std::string>({"独立游戏小成本用", "AI", "出图挺好的", "真不用太在意那些骂声"}),
+            "spaces split unless between Latin letters or digits");
+    require(chat::split_pieces("他说：\"别急，等会儿\"然后就走了").size() == 1, "not inside quotes");
+    require(texts(chat::split_pieces("时间是 10:30, 别迟到")) == std::vector<std::string>({"时间是", "10:30", "别迟到"}), "colons");
+    require(chat::split_pieces("use godot for a small demo").size() == 1, "English stays whole");
+    require(texts(chat::split_pieces("这个 - 那个 好吧")) == std::vector<std::string>({"这个 - 那个", "好吧"}), "not beside a dash");
+    require(chat::split_pieces("“一，二”三，四").size() == 1, "a curly quote never closes (as in MaiBot)");
+    require(chat::split_pieces("  \n ").empty() && chat::split_pieces("好").size() == 1, "blank text; short text stays whole");
+
+    // Merging only joins neighbours back together with their separator.
+    for (unsigned seed = 0; seed < 50; ++seed) {
+        std::mt19937 rng(seed);
+        const auto merged = chat::split_segments("骂的又不是你，圈内撕版权和抢饭碗呗，个人小项目拿它当草稿参考又没啥", rng);
+        std::string joined;
+        for (const auto &segment : merged) joined += segment.text + segment.separator;
+        require(joined == "骂的又不是你，圈内撕版权和抢饭碗呗，个人小项目拿它当草稿参考又没啥" && !merged.empty() && merged.size() <= 3,
+                "merging keeps the text");
+    }
+
+    const std::vector<Segment> six{{"一", "，"}, {"二", "，"}, {"三", "，"}, {"四", "，"}, {"五", "，"}, {"六", ""}};
+    require(texts(chat::pack_segments(six, 3)) == std::vector<std::string>({"一，二", "三，四", "五，六"}), "packed evenly");
+    auto corrected = six;
+    corrected[5].quote_previous = true;
+    const auto packed = chat::pack_segments(corrected, 3);
+    require(texts(packed) == std::vector<std::string>({"一，二", "三，四，五", "六"}) && packed[2].quote_previous,
+            "a correction keeps its own message");
+    require(chat::pack_segments(six, 8).size() == 6, "few enough: unchanged");
     require(chat::whole_message(" 第一段很长，很长很长很长很长很长很长很长。\n\n第二段 \n") ==
                 std::vector<std::string>({"第一段很长，很长很长很长很长很长很长很长。\n第二段"}),
             "a long reply stays one message with its lines");
@@ -291,10 +311,54 @@ void test_bubbles() {
     require(chat::strip_asides("没写完（笑") == "没写完（笑", "an unclosed bracket stays");
     require(chat::strip_asides("其实——也还行") == "其实，也还行", "a dash becomes a comma");
 
-    std::mt19937 rng(7);
-    require(chat::typing_delay("在", 1.0, rng) == std::chrono::milliseconds(600), "short bubbles take the minimum");
-    require(chat::typing_delay(std::string(300, 'a'), 1.0, rng) == std::chrono::milliseconds(6000), "long bubbles are capped");
-    require(chat::typing_delay("在", 0.0, rng) == std::chrono::milliseconds(0), "speed 0 sends immediately");
+    require(chat::typing_delay("在", 1.0) == std::chrono::milliseconds(1200), "a lone character: 1.2s");
+    require(chat::typing_delay("好耶ok", 1.0) == std::chrono::milliseconds(900), "0.3s per Han character, 0.15s per other");
+    require(chat::typing_delay("好耶ok", 2.0) == std::chrono::milliseconds(450), "faster typing");
+    require(chat::typing_delay("在", 0.0) == std::chrono::milliseconds(0), "speed 0 sends immediately");
+}
+
+/// Expected candidates come from MaiBot's ChineseTypoGenerator.
+void test_typos() {
+    require(chat::reading_of(U'做') == "zuo4" && chat::readings_of("银行") == std::vector<std::string>({"yin2", "hang2"}),
+            "readings, in context for dictionary words");
+    require(chat::similar_chars(U'做', "zuo4", "", 9) == std::vector<char32_t>({U'作', U'坐', U'座'}),
+            "frequent homophones, likeliest first");
+    require(chat::similar_chars(U'在', "zai4", "", 9).empty(), "much rarer homophones are never used");
+    require(chat::similar_chars(U'在', "zai4", "zai3", 9).empty() && !chat::similar_chars(U'做', "zuo4", "zuo3", 9).empty(),
+            "another tone adds candidates");
+    require(chat::word_homophones("事实", 9) == std::vector<std::string>({"适时"}) && chat::word_homophones("时候", 9).empty(),
+            "homophone words from the dictionary");
+    require(std::abs(chat::char_frequency(U'做') - 60.577678) < 1e-5, "character frequency from jieba's dictionary");
+
+    lilia::TypoConfig always{.error_rate = 1.0, .tone_error_rate = 0.0, .word_replace_rate = 0.0};
+    int changed = 0;
+    for (unsigned seed = 0; seed < 40; ++seed) {
+        std::mt19937 rng(seed);
+        const auto typoed = chat::make_typos("我来做饭", always, rng);
+        const auto before = learn::utf8_chars("我来做饭");
+        const auto after = learn::utf8_chars(typoed.text);
+        require(after.size() == before.size(), "one character for one: " + typoed.text);
+        for (usize i = 0; i < before.size(); ++i) {
+            if (after[i].cp == before[i].cp) continue;
+            const auto allowed = chat::similar_chars(before[i].cp, chat::reading_of(before[i].cp), "", 9);
+            require(std::ranges::contains(allowed, after[i].cp), "only homophone candidates replace characters: " + typoed.text);
+        }
+        if (typoed.text != "我来做饭") ++changed;
+        require(typoed.correction.empty() || typoed.text != "我来做饭", "a correction only for a typo");
+    }
+    require(changed > 0, "typos happen at error rate 1");
+    lilia::TypoConfig never{.error_rate = 0.0, .word_replace_rate = 0.0};
+    std::mt19937 rng(1);
+    require(chat::add_typos({{"我来做饭", "，"}}, never, rng) == std::vector<chat::Segment>({{"我来做饭", "，"}}), "no typos at rate 0");
+    lilia::TypoConfig off{.enabled = false, .error_rate = 1.0};
+    require(chat::add_typos({{"我来做饭", ""}}, off, rng).front().text == "我来做饭", "disabled");
+    bool quoted = false;
+    for (unsigned seed = 0; seed < 200 && !quoted; ++seed) {
+        std::mt19937 r(seed);
+        const auto out = chat::add_typos({{"我来做饭", ""}}, always, r);
+        if (out.size() == 2) quoted = out[1].quote_previous && out[1].text.size() == std::string("做").size();
+    }
+    require(quoted, "a correction follows its typo, quoting it");
 }
 void test_clean_reply() {
     const chat::ChatInfo info{.self_id = k_self, .self_name = "lilia"};
@@ -326,6 +390,7 @@ int main() {
         test_writer();
         test_flow();
         test_bubbles();
+        test_typos();
         test_clean_reply();
         return 0;
     } catch (const std::exception &e) {

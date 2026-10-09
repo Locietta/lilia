@@ -41,6 +41,26 @@ char32_t next_char(std::string_view text, usize &at) {
     return cp;
 }
 
+std::string encode_utf8(char32_t c) {
+    std::string out;
+    if (c < 0x80) {
+        out += static_cast<char>(c);
+    } else if (c < 0x800) {
+        out += static_cast<char>(0xC0 | (c >> 6));
+        out += static_cast<char>(0x80 | (c & 0x3F));
+    } else if (c < 0x10000) {
+        out += static_cast<char>(0xE0 | (c >> 12));
+        out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (c & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (c >> 18));
+        out += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (c & 0x3F));
+    }
+    return out;
+}
+
 std::vector<Utf8Char> utf8_chars(std::string_view text) {
     std::vector<Utf8Char> chars;
     chars.reserve(text.size());
@@ -90,6 +110,7 @@ public:
     /// FREQ[fragment] > 0 for the fragment that leads to `node`.
     bool is_word(u32 node) const { return log_freq_[node] < 1.0; }
     double log_freq(u32 node) const { return log_freq_[node]; }
+    i64 freq(u32 node) const { return freq_[node]; }
     double log_total() const { return log_total_; }
 
     static Dictionary load(std::string_view data) {
@@ -127,6 +148,7 @@ public:
         d.mask_ = capacity - 1;
         d.shift_ = static_cast<int>(64 - std::countr_zero(capacity));
         d.log_freq_.assign(1, k_no_word);
+        d.freq_.assign(1, 0);
         // In file order, so a word listed twice keeps its last frequency
         // while both count in the total, as in gen_pfdict.
         for (const auto &entry : entries) {
@@ -138,6 +160,7 @@ public:
                 node = next;
             }
             d.log_freq_[node] = entry.freq > 0 ? std::log(static_cast<double>(entry.freq)) - d.log_total_ : k_no_word;
+            d.freq_[node] = static_cast<u32>(std::max<i64>(entry.freq, 0));
         }
         return d;
     }
@@ -152,6 +175,7 @@ private:
         const auto created = static_cast<u32>(log_freq_.size());
         if (created > k_child_mask) throw std::length_error("jieba dictionary too large for the trie");
         log_freq_.push_back(k_no_word);
+        freq_.push_back(0);
         const u64 key = (static_cast<u64>(node) << k_char_bits) | c;
         u64 at = (key * 0x9E3779B97F4A7C15ull) >> shift_;
         while (slots_[at] != 0) at = (at + 1) & mask_;
@@ -163,6 +187,7 @@ private:
     u64 mask_ = 0;
     int shift_ = 64;
     std::vector<double> log_freq_;
+    std::vector<u32> freq_; ///< raw, for dictionary_frequency (the largest is 318,825)
     double log_total_ = 0;
 };
 
@@ -466,5 +491,37 @@ std::vector<std::string_view> cut(std::string_view text) {
     }
     return out;
 }
+
+i64 dictionary_frequency(std::string_view word) {
+    const auto &dict = dictionary();
+    auto node = Dictionary::k_root;
+    for (usize at = 0; at < word.size();) {
+        node = dict.child(node, next_char(word, at));
+        if (node == Dictionary::k_none) return 0;
+    }
+    return node == Dictionary::k_root ? 0 : dict.freq(node);
+}
+
+void for_each_dictionary_entry(const std::function<void(std::string_view, i64)> &visit) {
+    const auto data = as_text(xmake::jieba_dict_txt);
+    for (usize start = 0; start < data.size();) {
+        auto end = data.find('\n', start);
+        if (end == std::string_view::npos) end = data.size();
+        auto line = data.substr(start, end - start);
+        start = end + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.remove_suffix(1);
+        const auto space = line.find(' ');
+        if (line.empty() || space == std::string_view::npos) continue;
+        auto rest = line.substr(space + 1);
+        rest = rest.substr(0, rest.find(' '));
+        i64 freq = 0;
+        std::from_chars(rest.data(), rest.data() + rest.size(), freq);
+        visit(line.substr(0, space), freq);
+    }
+}
+
+u32 dictionary_child(u32 node, char32_t c) { return dictionary().child(node, c); }
+
+i64 dictionary_node_frequency(u32 node) { return node == Dictionary::k_root ? 0 : dictionary().freq(node); }
 
 } // namespace lilia::learn

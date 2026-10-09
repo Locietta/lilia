@@ -2,14 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <set>
+
+#include <lilia/learn/segment.h>
 
 namespace lilia::chat {
 
 namespace {
-
-/// Lines longer than this are broken up the way people type: one sentence,
-/// or a few clauses, per message.
-constexpr usize k_bubble_code_points = 16;
 
 std::string_view trim(std::string_view text) {
     constexpr std::string_view k_space = " \t\r\n";
@@ -18,86 +17,6 @@ std::string_view trim(std::string_view text) {
     const auto last = text.find_last_not_of(k_space);
     return text.substr(first, last - first + 1);
 }
-
-/// Breaks after "。！？!?" (keeping the mark) so a long paragraph becomes
-/// several messages.
-std::vector<std::string> split_sentences(std::string_view line) {
-    static constexpr std::array<std::string_view, 5> k_ends{"。", "！", "？", "!", "?"};
-    std::vector<std::string> pieces;
-    std::string current;
-    for (usize i = 0; i < line.size();) {
-        bool ended = false;
-        for (const auto end : k_ends) {
-            if (line.substr(i).starts_with(end)) {
-                current += end;
-                i += end.size();
-                ended = true;
-                break;
-            }
-        }
-        if (!ended) {
-            current.push_back(line[i++]);
-            continue;
-        }
-        // Keep runs like "？？" or "！？" together.
-        bool more = false;
-        for (const auto end : k_ends) more = more || line.substr(i).starts_with(end);
-        if (more) continue;
-        if (auto piece = trim(current); !piece.empty()) pieces.emplace_back(piece);
-        current.clear();
-    }
-    if (auto piece = trim(current); !piece.empty()) pieces.emplace_back(piece);
-    return pieces;
-}
-
-/// A space between two non-ASCII characters ("工具就是工具 拿来") separates
-/// clauses; one next to a Latin word ("用 AI 出图") does not.
-bool clause_space(std::string_view text, usize i) {
-    if (text[i] != ' ' || i == 0 || i + 1 >= text.size()) return false;
-    // A continuation byte before means the previous character was multi-byte;
-    // a lead byte after means the next one is.
-    return (static_cast<unsigned char>(text[i - 1]) & 0xC0) == 0x80 && static_cast<unsigned char>(text[i + 1]) >= 0xC0;
-}
-
-/// Breaks after "，,；;" and after a space between CJK clauses (keeping the
-/// separator), then packs the clauses greedily into chunks of `limit` code
-/// points; a single longer clause stays whole.
-std::vector<std::string> split_clauses(std::string_view sentence, usize limit) {
-    static constexpr std::array<std::string_view, 4> k_marks{"，", "；", ",", ";"};
-    std::vector<std::string> clauses;
-    usize start = 0;
-    for (usize i = 0; i < sentence.size();) {
-        usize width = 0;
-        for (const auto mark : k_marks) {
-            if (sentence.substr(i).starts_with(mark)) width = mark.size();
-        }
-        if (width == 0 && clause_space(sentence, i)) width = 1;
-        if (width == 0) {
-            ++i;
-            continue;
-        }
-        i += width;
-        clauses.emplace_back(sentence.substr(start, i - start));
-        start = i;
-    }
-    if (start < sentence.size()) clauses.emplace_back(sentence.substr(start));
-
-    std::vector<std::string> chunks;
-    for (auto &clause : clauses) {
-        if (!chunks.empty() && count_code_points(chunks.back()) + count_code_points(clause) <= limit) {
-            chunks.back() += clause;
-        } else {
-            chunks.push_back(std::move(clause));
-        }
-    }
-    return chunks;
-}
-
-struct Piece {
-    std::string text;          ///< raw, with its trailing separator
-    bool mid_sentence = false; ///< cut at a comma; merging it with the next piece reads naturally
-    bool line_end = false;     ///< last piece of a line; merging needs a space
-};
 
 /// What is actually sent: no trailing comma, semicolon, period or space.
 std::string finish(std::string_view text) {
@@ -164,54 +83,6 @@ usize count_code_points(std::string_view text) {
     return static_cast<usize>(std::ranges::count_if(text, [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; }));
 }
 
-std::vector<std::string> split_bubbles(std::string_view text, usize max_bubbles) {
-    std::vector<Piece> pieces;
-    while (!text.empty()) {
-        const auto newline = text.find('\n');
-        const auto line = trim(text.substr(0, newline));
-        text = newline == std::string_view::npos ? std::string_view{} : text.substr(newline + 1);
-        if (line.empty()) continue;
-        if (count_code_points(line) <= k_bubble_code_points) {
-            pieces.push_back({.text = std::string(line)});
-        } else {
-            for (auto &sentence : split_sentences(line)) {
-                auto chunks = split_clauses(sentence, k_bubble_code_points);
-                for (usize i = 0; i < chunks.size(); ++i)
-                    pieces.push_back({.text = std::move(chunks[i]), .mid_sentence = i + 1 < chunks.size()});
-            }
-        }
-        pieces.back().line_end = true;
-    }
-    if (max_bubbles == 0) max_bubbles = 1;
-    // Too many: merge the shortest neighbouring pair, preferring pieces of
-    // one sentence; ties go to the later pair.
-    while (pieces.size() > max_bubbles) {
-        usize best = 0;
-        std::pair<int, usize> best_cost{2, 0};
-        for (usize i = 0; i + 1 < pieces.size(); ++i) {
-            const std::pair<int, usize> cost{pieces[i].mid_sentence ? 0 : 1,
-                                             count_code_points(pieces[i].text) + count_code_points(pieces[i + 1].text)};
-            if (cost <= best_cost) {
-                best = i;
-                best_cost = cost;
-            }
-        }
-        auto &left = pieces[best];
-        auto right = std::move(pieces[best + 1]);
-        pieces.erase(pieces.begin() + static_cast<std::ptrdiff_t>(best + 1));
-        // Pieces keep their separators ("，", a space), so only lines need one added.
-        if (left.line_end) left.text += ' ';
-        left.text += right.text;
-        left.mid_sentence = right.mid_sentence;
-        left.line_end = right.line_end;
-    }
-    std::vector<std::string> bubbles;
-    for (const auto &piece : pieces) {
-        if (auto bubble = finish(piece.text); !bubble.empty()) bubbles.push_back(std::move(bubble));
-    }
-    return bubbles;
-}
-
 std::string first_lines(std::string_view text, usize count) {
     std::string out;
     usize kept = 0;
@@ -241,11 +112,215 @@ std::vector<std::string> whole_message(std::string_view text) {
     return {};
 }
 
-std::chrono::milliseconds typing_delay(std::string_view bubble, double speed, std::mt19937 &rng) {
+namespace {
+
+bool is_unicode_space(char32_t c) {
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) ||
+           c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+
+bool is_quote(char32_t c) {
+    return c == U'"' || c == U'\'' || c == U'“' || c == U'”' || c == U'‘' || c == U'’' || c == U'「' || c == U'」' || c == U'『' ||
+           c == U'』';
+}
+
+bool is_separator(char32_t c) { return c == U'，' || c == U',' || c == U' ' || c == U'。' || c == U';' || c == U'\n'; }
+
+/// str.isdigit() or is_english_letter() in MaiBot.
+bool is_latin_or_digit(char32_t c) {
+    return (c >= U'0' && c <= U'9') || (c >= 0xFF10 && c <= 0xFF19) || (c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z');
+}
+
+/// re.sub(r"[^\S\r\n]*[\r\n]+[^\S\r\n]*", " ", text).strip(): line breaks
+/// (and the spaces around them) become one space each run.
+std::string flatten_lines(std::string_view text) {
+    const auto chars = learn::utf8_chars(text);
+    std::string out;
+    for (usize i = 0; i < chars.size();) {
+        if (!is_unicode_space(chars[i].cp)) {
+            out += text.substr(chars[i].begin, chars[i].end - chars[i].begin);
+            ++i;
+            continue;
+        }
+        auto end = i;
+        usize breaks = 0;
+        bool in_break = false;
+        for (; end < chars.size() && is_unicode_space(chars[end].cp); ++end) {
+            const bool newline = chars[end].cp == U'\n' || chars[end].cp == U'\r';
+            if (newline && !in_break) ++breaks;
+            in_break = newline;
+        }
+        if (breaks == 0) {
+            out += text.substr(chars[i].begin, chars[end - 1].end - chars[i].begin);
+        } else {
+            out.append(breaks, ' ');
+        }
+        i = end;
+    }
+    // .strip()
+    const auto stripped = learn::utf8_chars(out);
+    usize first = 0;
+    usize last = stripped.size();
+    while (first < last && is_unicode_space(stripped[first].cp)) ++first;
+    while (last > first && is_unicode_space(stripped[last - 1].cp)) --last;
+    return first == last ? std::string() : out.substr(stripped[first].begin, stripped[last - 1].end - stripped[first].begin);
+}
+
+} // namespace
+
+namespace {
+
+/// The pieces of `text` (MaiBot's first pass, before merging), keeping the
+/// empty ones that only carry a space or newline.
+std::vector<Segment> raw_pieces(std::string_view text) {
+    const auto chars = learn::utf8_chars(text);
+    const usize n = chars.size();
+    const auto piece = [&](usize i) { return std::string(text.substr(chars[i].begin, chars[i].end - chars[i].begin)); };
+    // Which characters sit inside paired quotes. A quote closes only on the
+    // same character (or any ASCII quote on an ASCII one), as in MaiBot, so
+    // “…” never closes.
+    std::vector<bool> inside(n, false);
+    bool in_quote = false;
+    char32_t opened = 0;
+    for (usize i = 0; i < n; ++i) {
+        const auto c = chars[i].cp;
+        if (!is_quote(c)) {
+            inside[i] = in_quote;
+        } else if (!in_quote) {
+            in_quote = true;
+            opened = c;
+        } else if (c == opened || ((c == U'"' || c == U'\'') && (opened == U'"' || opened == U'\''))) {
+            in_quote = false;
+            opened = 0;
+        }
+    }
+    std::vector<Segment> segments;
+    std::string current;
+    for (usize i = 0; i < n; ++i) {
+        const auto c = chars[i].cp;
+        if (!is_separator(c)) {
+            current += piece(i);
+            continue;
+        }
+        bool split = !inside[i];
+        if (split && c != U'\n') {
+            const auto colon = [](char32_t x) { return x == U':' || x == U'：'; };
+            if ((i > 0 && colon(chars[i - 1].cp)) || (i + 1 < n && colon(chars[i + 1].cp))) split = false;
+            if (split && c == U' ' && i > 0 && i + 1 < n) {
+                const auto prev = chars[i - 1].cp;
+                const auto next = chars[i + 1].cp;
+                const auto dash = [](char32_t x) { return x == U'-' || x == U'—'; };
+                if (dash(prev) || dash(next) || (is_latin_or_digit(prev) && is_latin_or_digit(next))) split = false;
+            }
+        }
+        if (!split) {
+            current += piece(i);
+        } else {
+            if (!current.empty()) {
+                segments.push_back({.text = std::move(current), .separator = piece(i)});
+            } else if (c == U' ' || c == U'\n') {
+                segments.push_back({.separator = piece(i)});
+            }
+            current.clear();
+        }
+    }
+    if (!current.empty()) segments.push_back({.text = std::move(current)});
+    if (segments.empty()) return {{.text = std::string(text)}};
+    return segments;
+}
+
+/// The last pass: pieces with text, line breaks flattened to spaces.
+std::vector<Segment> finish_pieces(std::vector<Segment> merged) {
+    std::vector<Segment> out;
+    for (auto &segment : merged) {
+        if (auto flat = flatten_lines(segment.text); !flat.empty())
+            out.push_back({.text = std::move(flat), .separator = segment.separator});
+    }
+    return out;
+}
+
+} // namespace
+
+std::vector<Segment> split_pieces(std::string_view text) {
+    if (learn::utf8_chars(text).size() < 3)
+        return text.empty() ? std::vector<Segment>{} : std::vector<Segment>{{.text = std::string(text)}};
+    return finish_pieces(raw_pieces(text));
+}
+
+std::vector<Segment> split_segments(std::string_view text, std::mt19937 &rng) {
+    std::uniform_real_distribution<double> chance(0.0, 1.0);
+    const auto chars = learn::utf8_chars(text);
+    const usize n = chars.size();
+    if (n == 0) return {};
+    if (n < 3) {
+        if (chance(rng) < 0.01) {
+            std::vector<Segment> singles;
+            for (const auto &c : chars) singles.push_back({.text = std::string(text.substr(c.begin, c.end - c.begin))});
+            return singles;
+        }
+        return {{.text = std::string(text)}};
+    }
+    auto segments = raw_pieces(text);
+
+    // Merge neighbours at random; short replies merge more.
+    const double merge = 1.0 - (n < 12 ? 0.2 : n < 32 ? 0.6 : 0.7);
+    std::vector<Segment> merged;
+    for (usize i = 0; i < segments.size();) {
+        auto &here = segments[i];
+        if (i + 1 < segments.size() && !here.text.empty() && here.separator != "\n" && chance(rng) < merge) {
+            auto &next = segments[i + 1];
+            merged.push_back({.text = next.text.empty() ? here.text : here.text + here.separator + next.text, .separator = next.separator});
+            i += 2;
+        } else {
+            merged.push_back(std::move(here));
+            ++i;
+        }
+    }
+    return finish_pieces(std::move(merged));
+}
+
+std::vector<Segment> pack_segments(std::vector<Segment> segments, usize max_count) {
+    if (segments.size() <= max_count) return segments;
+    if (max_count == 0) return {};
+    const usize count = segments.size();
+    std::set<usize> starts{0};
+    for (usize i = 1; i < count && starts.size() < max_count; ++i) {
+        if (segments[i].quote_previous) starts.insert(i);
+    }
+    // Then MaiBot's even split fills the remaining groups.
+    usize start = 0;
+    for (usize group = 0; group < max_count && starts.size() < max_count; ++group) {
+        const usize remaining = count - start;
+        const usize groups_left = max_count - group;
+        starts.insert(start);
+        start += (remaining + groups_left - 1) / groups_left;
+    }
+    const std::vector<usize> sorted(starts.begin(), starts.end());
+    std::vector<Segment> packed;
+    for (usize g = 0; g < sorted.size(); ++g) {
+        const usize end = g + 1 < sorted.size() ? sorted[g + 1] : count;
+        Segment joined{.separator = segments[end - 1].separator, .quote_previous = segments[sorted[g]].quote_previous};
+        for (usize i = sorted[g]; i < end; ++i) {
+            joined.text += segments[i].text;
+            if (i + 1 < end) joined.text += segments[i].separator;
+        }
+        packed.push_back(std::move(joined));
+    }
+    return packed;
+}
+
+std::chrono::milliseconds typing_delay(std::string_view bubble, double speed) {
     if (speed <= 0) return std::chrono::milliseconds(0);
-    std::uniform_real_distribution<double> jitter(0.8, 1.25);
-    const double seconds = std::clamp(0.2 * static_cast<double>(count_code_points(bubble)) * jitter(rng), 0.6, 6.0) / speed;
-    return std::chrono::milliseconds(static_cast<i64>(seconds * 1000));
+    const auto chars = learn::utf8_chars(bubble);
+    const auto han = [](char32_t c) { return c >= 0x4E00 && c <= 0x9FFF; };
+    const auto han_count = std::ranges::count_if(chars, [&](const learn::Utf8Char &c) { return han(c.cp); });
+    double seconds = 0;
+    if (han_count == 1 && count_code_points(trim(bubble)) == 1) {
+        seconds = 0.3 * 3 + 0.3;
+    } else {
+        for (const auto &c : chars) seconds += han(c.cp) ? 0.3 : 0.15;
+    }
+    return std::chrono::milliseconds(static_cast<i64>(seconds / speed * 1000));
 }
 
 } // namespace lilia::chat

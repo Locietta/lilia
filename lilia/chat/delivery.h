@@ -12,12 +12,33 @@ namespace lilia::chat {
 
 using namespace lighter::types;
 
-/// Splits a cleaned reply into at most `max_bubbles` QQ messages, the way
-/// people type: one per line; a long line becomes one message per sentence,
-/// and a long sentence is broken at commas (or spaces between CJK clauses).
-/// Extra pieces merge with their shortest neighbour. Bubbles do not end in
-/// "。" or a comma.
-std::vector<std::string> split_bubbles(std::string_view text, usize max_bubbles = 3);
+/// One piece of a reply on its way out: the text, the separator that
+/// followed it in the reply (restored when pieces are packed together), and
+/// whether it is a typo correction that quotes the message before it.
+struct Segment {
+    std::string text;
+    std::string separator;
+    bool quote_previous = false;
+    bool operator==(const Segment &) const = default;
+};
+
+/// MaiBot's rule splitter (_split_into_sentence_segments): breaks at "，"
+/// "," "。" ";", spaces and newlines, dropping the mark; never inside quotes,
+/// next to a colon, beside a dash, or at a space between Latin letters or
+/// digits; a newline always breaks. Neighbouring pieces then merge at random
+/// (pairwise, never across a newline) with probability 0.8 for text under 12
+/// characters, 0.4 under 32 and 0.3 otherwise. Text under 3 characters stays
+/// whole, except 1% of the time it goes out one character at a time.
+std::vector<Segment> split_segments(std::string_view text, std::mt19937 &rng);
+
+/// split_segments without the random merging (and without the 1% split into
+/// single characters): the pieces before they merge.
+std::vector<Segment> split_pieces(std::string_view text);
+
+/// MaiBot's _merge_processed_segments_to_max_count: packs `segments` into at
+/// most `max_count` messages of about even size, restoring separators; a
+/// typo correction keeps starting a message of its own when possible.
+std::vector<Segment> pack_segments(std::vector<Segment> segments, usize max_count);
 
 /// The first `count` non-blank lines of `text`. Each line is a complete
 /// message, so this drops add-on messages without cutting anything short.
@@ -36,8 +57,10 @@ std::string fit_length(std::string_view text, usize max_code_points);
 /// Characters (UTF-8 code points) in `text`.
 usize count_code_points(std::string_view text);
 
-/// How long a person would take to type `bubble`: about 0.2s per character
-/// with some jitter, between 0.6s and 6s, scaled by `speed` (0 disables).
-std::chrono::milliseconds typing_delay(std::string_view bubble, double speed, std::mt19937 &rng);
+/// MaiBot's calculate_typing_time, the pause before the second and later
+/// messages of a reply: 0.3s per Han character and 0.15s per other
+/// character (1.2s for a lone Han character), divided by `speed`; 0 for
+/// speed 0.
+std::chrono::milliseconds typing_delay(std::string_view bubble, double speed);
 
 } // namespace lilia::chat

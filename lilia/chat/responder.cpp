@@ -24,6 +24,7 @@
 
 #include <lilia/chat/delivery.h>
 #include <lilia/chat/trigger.h>
+#include <lilia/chat/typos.h>
 #include <lilia/log.h>
 #include <lilia/onebot/message.h>
 #include <lilia/net/codec.h>
@@ -70,8 +71,12 @@ constexpr usize k_fact_context = 8;
 /// She holds back once she wrote this many of the last `k_self_window` messages.
 constexpr usize k_self_window = 10;
 constexpr usize k_self_limit = 3;
-/// Messages per casual (short / normal) reply.
+/// Lines kept from a casual (short / normal) reply.
 constexpr usize k_casual_messages = 2;
+/// MaiBot's response_splitter: more pieces than this go out as one message;
+/// the rest are packed into at most this many messages.
+constexpr usize k_max_pieces = 8;
+constexpr usize k_max_messages = 3;
 
 store::ChatKey chat_key(const onebot::MessageEvent &event) {
     if (event.is_group()) return {.type = "group", .id = *event.group_id};
@@ -133,13 +138,14 @@ Task<std::optional<i64>> send_message(Responder *r, const store::ChatKey &chat, 
     co_return sent->message_id;
 }
 
-/// Sends one message and records it as lilia's own.
-Task<bool> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Message message) {
+/// Sends one message and records it as lilia's own; its id, or nullopt when
+/// it could not be sent.
+Task<std::optional<i64>> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Message message) {
     auto segments_json = glz::write_json(message).value_or("[]");
     auto text = onebot::render_plain(message);
     auto plain = onebot::text_only(message);
     const auto id = co_await send_message(r, chat, std::move(message));
-    if (!id) co_return false;
+    if (!id) co_return std::nullopt;
     auto stored = r->store.add_message({
         .chat = chat,
         .message_id = *id,
@@ -153,7 +159,7 @@ Task<bool> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Mes
     if (stored.has_error()) log::error("cannot record sent message: {}", stored.error().message());
     // Her own lines join the next learning batch as [SELF] context.
     if (r->learner && chat.type == "group") r->learner->observe_own(chat.id, std::move(plain));
-    co_return true;
+    co_return id;
 }
 
 /// with_timeout takes lighter's error type; this hands the provider's
@@ -819,20 +825,43 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     // A long reply is on purpose (an explanation, a copypasta): one message.
     // Casual replies: at most two messages. Models like a point-elaboration-
     // conclusion triple, which reads as AI; the extra lines are add-ons.
+    // Casual replies go out the way MaiBot sends them: split at punctuation,
+    // neighbours merged at random, a homophone typo now and then (sometimes
+    // corrected right after), at most three messages.
     const bool deliberate = plan.style == ReplyStyle::LONG && style_override.empty();
-    const auto bubbles = deliberate ? whole_message(reply) : split_bubbles(first_lines(reply, k_casual_messages), k_casual_messages);
+    std::vector<Segment> segments;
+    if (deliberate) {
+        for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
+    } else {
+        const auto casual = first_lines(reply, k_casual_messages);
+        segments = add_typos(split_segments(casual, rng), settings.typos, rng);
+        if (segments.size() > k_max_pieces) {
+            segments.clear();
+            for (auto &whole : whole_message(casual)) segments.push_back({.text = std::move(whole)});
+        }
+        segments = pack_segments(std::move(segments), k_max_messages);
+    }
+    std::vector<std::string> bubbles;
+    for (const auto &segment : segments) bubbles.push_back(segment.text);
     if (bubbles.empty()) {
         log::warn("writer returned an empty reply for {}", describe(chat));
         co_return;
     }
     if (observer) observer(chat, plan, bubbles);
 
-    for (usize i = 0; i < bubbles.size(); ++i) {
-        if (realtime) co_await lighter::sleep(typing_delay(bubbles[i], settings.typing_speed, rng));
+    std::optional<i64> previous;
+    for (usize i = 0; i < segments.size(); ++i) {
+        // Only later messages wait for "typing"; the first goes out at once.
+        if (realtime && i > 0) co_await lighter::sleep(typing_delay(segments[i].text, settings.typing_speed));
         onebot::Message message;
-        if (i == 0 && plan.quote && chat.type == "group") message.push_back(onebot::reply_segment(plan.target));
-        message.push_back(onebot::text_segment(bubbles[i]));
-        if (!co_await send_and_record(this, chat, std::move(message))) break;
+        if (i == 0 && plan.quote && chat.type == "group") {
+            message.push_back(onebot::reply_segment(plan.target));
+        } else if (segments[i].quote_previous && previous) {
+            message.push_back(onebot::reply_segment(*previous));
+        }
+        message.push_back(onebot::text_segment(segments[i].text));
+        previous = co_await send_and_record(this, chat, std::move(message));
+        if (!previous) break;
     }
     if (!plan.sticker.empty()) {
         if (realtime) co_await lighter::sleep(std::chrono::milliseconds(800));
