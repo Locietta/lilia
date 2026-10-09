@@ -111,7 +111,8 @@ std::vector<std::vector<float>> split_vectors(std::string_view bytes, usize dime
 struct Memory {
     Memory(const MemoryConfig &config, std::string self_name, i32 utc_offset_minutes, store::Store &store);
 
-    /// Embeds `texts` through the OpenAI-compatible /v1/embeddings endpoint.
+    /// Embeds `texts` through the OpenAI-compatible embeddings endpoint
+    /// (embedding_url + embedding_path).
     lighter::Task<Result<std::vector<std::vector<float>>>> embed(std::vector<std::string> texts);
 
     /// Chunks and embeds the messages of `chat` not covered yet (the whole

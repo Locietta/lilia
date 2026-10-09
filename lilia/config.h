@@ -173,7 +173,10 @@ struct MemoryConfig {
     /// service (deployment/embedding).
     bool enabled = false;
     std::string embedding_url = "http://127.0.0.1:8090";
-    /// Stored with every vector; changing it drops and rebuilds all chunks.
+    /// OpenAI-style embeddings route: /v1/embeddings (llama.cpp) or
+    /// /v3/embeddings (OpenVINO Model Server).
+    std::string embedding_path = "/v1/embeddings";
+    /// Sent as the request's model and stored with every vector; changing it drops and rebuilds all chunks.
     std::string embedding_model = "Qwen3-Embedding-0.6B";
     /// Prepended to search queries in Qwen3-Embedding's instruction format;
     /// empty sends the query as is.

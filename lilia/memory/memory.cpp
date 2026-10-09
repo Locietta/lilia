@@ -182,7 +182,7 @@ Memory::Memory(const MemoryConfig &config, std::string self_name, i32 utc_offset
 Task<Result<std::vector<std::vector<float>>>> Memory::embed(std::vector<std::string> texts) {
     auto body = glz::write_json(EmbeddingRequest{.input = std::move(texts), .model = config.embedding_model});
     if (!body) co_return lighter::outcome_error(Error::protocol("cannot encode the embedding request"));
-    auto request = http.on().post(config.embedding_url + "/v1/embeddings");
+    auto request = http.on().post(config.embedding_url + config.embedding_path);
     request.json_text(*std::move(body));
     request.timeout(std::chrono::seconds(60));
     auto response = co_await std::move(request).send();
