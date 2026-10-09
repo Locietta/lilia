@@ -14,7 +14,11 @@ struct Utf8Char {
     usize end = 0;
 };
 
-/// Decodes UTF-8; a stray byte becomes U+FFFD of one byte.
+/// Decodes the character at `text[at]` and moves `at` past it; a stray byte
+/// becomes U+FFFD of one byte.
+char32_t next_char(std::string_view text, usize &at);
+
+/// Decodes UTF-8 (see next_char).
 std::vector<Utf8Char> utf8_chars(std::string_view text);
 
 /// Chinese word segmentation: a port of jieba 0.42.1's `jieba.cut` in its

@@ -199,6 +199,37 @@ int main(int argc, char **argv) {
             lines.clear();
         };
         std::string line;
+        if (mode == "--bench") {
+            // Timings without output: loading, cutting, terms, 30-line tallies.
+            std::vector<std::string> all;
+            usize bytes = 0;
+            while (std::getline(std::cin, line)) {
+                bytes += line.size() + 1;
+                all.push_back(line);
+            }
+            const auto time = [](auto &&work) {
+                const auto started = std::chrono::steady_clock::now();
+                work();
+                return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            };
+            usize tokens = 0;
+            const double load = time([] { learn::cut("好"); });
+            const double cut = time([&] {
+                for (const auto &text : all) tokens += learn::cut(text).size();
+            });
+            const double terms = time([&] {
+                for (const auto &text : all) learn::meaningful_terms(text);
+            });
+            const double tallies = time([&] {
+                for (usize start = 0; start < all.size(); start += 30)
+                    learn::count_terms({all.begin() + static_cast<std::ptrdiff_t>(start),
+                                        all.begin() + static_cast<std::ptrdiff_t>(std::min(all.size(), start + 30))});
+            });
+            std::fprintf(stderr, "%zu lines, %.1f MB, %zu tokens\nload %.0f ms\ncut %.0f ms (%.1f MB/s)\nterms %.0f ms\ntallies %.0f ms\n",
+                         all.size(), static_cast<double>(bytes) / 1e6, tokens, load, cut, static_cast<double>(bytes) / 1e3 / cut, terms,
+                         tallies);
+            return 0;
+        }
         while (std::getline(std::cin, line)) {
             if (mode == "--terms") {
                 std::printf("%s\n", join(learn::meaningful_terms(line)).c_str());

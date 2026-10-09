@@ -98,8 +98,28 @@ std::string to_utf8(std::u32string_view text) {
 }
 
 bool has_cjk(std::u32string_view text) { return std::ranges::any_of(text, is_cjk); }
-usize count_cjk(std::u32string_view text) { return static_cast<usize>(std::ranges::count_if(text, is_cjk)); }
-bool has_latin(std::u32string_view text) { return std::ranges::any_of(text, is_latin); }
+
+/// What the frequency rules need to know about a token, in one pass.
+struct Shape {
+    usize length = 0; ///< characters
+    usize cjk = 0;
+    bool latin = false;
+    bool numeric = true;     ///< [\d._+-]+
+    bool punctuation = true; ///< [\W_]+
+};
+
+Shape shape_of(std::string_view text) {
+    Shape shape;
+    for (usize at = 0; at < text.size();) {
+        const auto c = next_char(text, at);
+        ++shape.length;
+        shape.cjk += is_cjk(c) ? 1 : 0;
+        shape.latin = shape.latin || is_latin(c);
+        shape.numeric = shape.numeric && (is_digit(c) || c == U'.' || c == U'_' || c == U'+' || c == U'-');
+        shape.punctuation = shape.punctuation && (!is_word(c) || c == U'_');
+    }
+    return shape;
+}
 
 /// re.sub(pattern, " ", text) for a pattern given as a matcher: the length
 /// of the match at `at`, 0 for none.
@@ -131,10 +151,21 @@ bool starts_with_folded(std::u32string_view text, usize at, std::u32string_view 
     return true;
 }
 
+/// Whether `text` could hold a URL, CQ code or @mention (all need one of
+/// "://", "www." in any case, "[" or "@").
+bool may_have_noise(std::string_view text) {
+    if (text.find_first_of("@[") != std::string_view::npos || text.find("://") != std::string_view::npos) return true;
+    for (auto dot = text.find('.'); dot != std::string_view::npos; dot = text.find('.', dot + 1)) {
+        if (dot >= 3 && std::ranges::all_of(text.substr(dot - 3, 3), [](char c) { return c == 'w' || c == 'W'; })) return true;
+    }
+    return false;
+}
+
 /// _remove_tokenization_noise: URLs, then CQ codes, then @mentions.
-std::u32string remove_noise(std::u32string_view text) {
+std::string remove_noise(std::string_view text) {
+    if (!may_have_noise(text)) return std::string(text);
     // https?://\S+|www\.\S+ (case-insensitive)
-    auto cleaned = replace_matches(text, [](std::u32string_view t, usize at) -> usize {
+    auto cleaned = replace_matches(code_points(text), [](std::u32string_view t, usize at) -> usize {
         for (const std::u32string_view prefix : {U"https://", U"http://", U"www."}) {
             if (!starts_with_folded(t, at, prefix)) continue;
             if (const auto run = non_space_run(t, at + prefix.size()); run > 0) return prefix.size() + run;
@@ -148,44 +179,67 @@ std::u32string remove_noise(std::u32string_view text) {
         return close == std::u32string_view::npos || close == at + 4 ? 0 : close - at + 1;
     });
     // @\S+
-    return replace_matches(cleaned, [](std::u32string_view t, usize at) -> usize {
+    return to_utf8(replace_matches(cleaned, [](std::u32string_view t, usize at) -> usize {
         if (t[at] != U'@') return 0;
         const auto run = non_space_run(t, at + 1);
         return run > 0 ? run + 1 : 0;
-    });
+    }));
 }
 
-bool is_tech_char(char32_t c) {
-    return is_latin(c) || (c >= U'0' && c <= U'9') || c == U'_' || c == U'+' || c == U'.' || c == U'/' || c == U'#' || c == U'-';
+bool is_tech_byte(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '+' || c == '.' || c == '/' ||
+           c == '#' || c == '-';
 }
-bool is_ascii_word(char32_t c) { return is_latin(c) || (c >= U'0' && c <= U'9') || c == U'_'; }
+bool is_ascii_word_byte(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
 
 /// _TECH_TERM_RE: (?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_+./#-]{1,})(?![A-Za-z0-9_])
-std::vector<std::u32string> tech_terms(std::u32string_view text) {
-    std::vector<std::u32string> terms;
+/// over bytes: its classes are ASCII, and no byte of a multi-byte character
+/// is ASCII.
+std::vector<std::string_view> tech_terms(std::string_view text) {
+    std::vector<std::string_view> terms;
     for (usize i = 0; i < text.size();) {
-        if (!is_latin(text[i]) || (i > 0 && is_ascii_word(text[i - 1]))) {
+        const char c = text[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) || (i > 0 && is_ascii_word_byte(text[i - 1]))) {
             ++i;
             continue;
         }
         auto end = i + 1;
-        while (end < text.size() && is_tech_char(text[end])) ++end;
+        while (end < text.size() && is_tech_byte(text[end])) ++end;
         if (end - i < 2) {
             ++i;
             continue;
         }
-        terms.emplace_back(text.substr(i, end - i));
+        terms.push_back(text.substr(i, end - i));
         i = end;
     }
     return terms;
 }
 
-std::u32string normalize(std::u32string_view token) {
+/// normalize() for tokens that need no change: no whitespace, nothing to
+/// lower-case, no trimmable character at either end.
+bool already_normal(std::string_view token) {
+    if (token.empty()) return true;
+    char32_t first = 0;
+    char32_t last = 0;
+    for (usize at = 0; at < token.size();) {
+        const auto c = next_char(token, at);
+        if (is_space(c) || lower(c) != c) return false;
+        if (first == 0) first = c;
+        last = c;
+    }
+    return !k_trim_chars.contains(first) && !k_trim_chars.contains(last);
+}
+
+std::string normalize(std::string_view token) {
+    if (already_normal(token)) return std::string(token);
     // strip(), lower(), strip(_TOKEN_TRIM_CHARS), then \s+ -> " ".
-    while (!token.empty() && is_space(token.front())) token.remove_prefix(1);
-    while (!token.empty() && is_space(token.back())) token.remove_suffix(1);
+    std::u32string_view view;
+    const auto points = code_points(token);
+    view = points;
+    while (!view.empty() && is_space(view.front())) view.remove_prefix(1);
+    while (!view.empty() && is_space(view.back())) view.remove_suffix(1);
     std::u32string lowered;
-    for (const auto c : token) lowered += lower(c);
+    for (const auto c : view) lowered += lower(c);
     std::u32string_view trimmed = lowered;
     while (!trimmed.empty() && k_trim_chars.contains(trimmed.front())) trimmed.remove_prefix(1);
     while (!trimmed.empty() && k_trim_chars.contains(trimmed.back())) trimmed.remove_suffix(1);
@@ -197,118 +251,132 @@ std::u32string normalize(std::u32string_view token) {
             out += U' ';
         }
     }
-    return out;
+    return to_utf8(out);
 }
 
-bool meaningful(std::u32string_view token) {
-    if (token.empty() || k_stop_words.contains(to_utf8(token))) return false;
-    // [\d._+-]+ and [\W_]+, matched in full
-    if (std::ranges::all_of(token, [](char32_t c) { return is_digit(c) || c == U'.' || c == U'_' || c == U'+' || c == U'-'; }))
-        return false;
-    if (std::ranges::all_of(token, [](char32_t c) { return !is_word(c) || c == U'_'; })) return false;
-    if (has_cjk(token)) return count_cjk(token) >= 2;
-    return token.size() >= 2;
+bool meaningful(std::string_view token) {
+    if (token.empty() || k_stop_words.contains(token)) return false;
+    const auto shape = shape_of(token);
+    if (shape.numeric || shape.punctuation) return false;
+    if (shape.cjk > 0) return shape.cjk >= 2;
+    return shape.length >= 2;
 }
 
 } // namespace
 
-std::string normalize_term(std::string_view token) { return to_utf8(normalize(code_points(token))); }
+std::string normalize_term(std::string_view token) { return normalize(token); }
 
 std::string normalize_match_text(std::string_view text) {
-    std::u32string out;
-    for (const auto &c : utf8_chars(text)) {
-        if (!is_space(c.cp)) {
-            out += lower(c.cp);
-        } else if (!out.empty() && out.back() != U' ') {
-            out += U' ';
+    std::string out;
+    out.reserve(text.size());
+    for (usize at = 0; at < text.size();) {
+        const auto c = next_char(text, at);
+        if (!is_space(c)) {
+            append_utf8(out, lower(c));
+        } else if (!out.empty() && out.back() != ' ') {
+            out += ' ';
         }
     }
-    if (!out.empty() && out.back() == U' ') out.pop_back();
-    return to_utf8(out);
+    if (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
 }
 
-bool meaningful_term(std::string_view token) { return meaningful(code_points(token)); }
+bool meaningful_term(std::string_view token) { return meaningful(token); }
 
 std::vector<std::string> meaningful_terms(std::string_view text) {
-    const auto cleaned = to_utf8(remove_noise(code_points(text)));
+    const auto cleaned = remove_noise(text);
     std::vector<std::string> terms;
     for (const auto raw : cut(cleaned)) {
-        const auto token = normalize(code_points(raw));
-        if (meaningful(token)) terms.push_back(to_utf8(token));
+        auto token = normalize(raw);
+        if (meaningful(token)) terms.push_back(std::move(token));
     }
-    std::set<std::string> existing(terms.begin(), terms.end());
-    for (const auto &raw : tech_terms(code_points(cleaned))) {
-        const auto token = normalize(raw);
-        auto utf8 = to_utf8(token);
-        if (!existing.contains(utf8) && meaningful(token)) {
-            existing.insert(utf8);
-            terms.push_back(std::move(utf8));
-        }
+    // Tech terms jieba split apart, unless already there (a message has few terms).
+    for (const auto raw : tech_terms(cleaned)) {
+        auto token = normalize(raw);
+        if (std::ranges::find(terms, token) == terms.end() && meaningful(token)) terms.push_back(std::move(token));
     }
     return terms;
 }
 
 std::vector<std::string> term_phrases(const std::vector<std::string> &tokens) {
     std::vector<std::string> phrases;
+    std::vector<Shape> shapes;
+    shapes.reserve(tokens.size());
+    for (const auto &token : tokens) shapes.push_back(shape_of(token));
     for (usize size = 2; size <= 3; ++size) {
         if (tokens.size() < size) break;
         for (usize index = 0; index + size <= tokens.size(); ++index) {
             const std::span<const std::string> window(tokens.data() + index, size);
-            std::vector<std::u32string> points;
-            for (const auto &token : window) points.push_back(code_points(token));
-            // _join_phrase
-            const bool all_han = std::ranges::all_of(points, [](const auto &t) { return has_cjk(t) && !has_latin(t); });
+            const std::span<const Shape> window_shapes(shapes.data() + index, size);
+            // _is_meaningful_phrase: not one token repeated
+            if (std::ranges::all_of(window, [&](const std::string &token) { return token == window[0]; })) continue;
+            // _join_phrase: Han tokens join directly, others with spaces
+            const bool all_han = std::ranges::all_of(window_shapes, [](const Shape &s) { return s.cjk > 0 && !s.latin; });
             std::string phrase;
             for (const auto &token : window) {
                 if (!all_han && !phrase.empty()) phrase += ' ';
                 phrase += token;
             }
-            // _is_meaningful_phrase
-            if (k_stop_words.contains(phrase) || std::set<std::string>(window.begin(), window.end()).size() == 1) continue;
-            const auto joined = code_points(phrase);
-            if (has_cjk(joined) ? count_cjk(joined) >= 4 : std::ranges::any_of(points, [](const auto &t) { return has_latin(t); }))
-                phrases.push_back(std::move(phrase));
+            if (k_stop_words.contains(phrase)) continue;
+            usize cjk = 0;
+            for (const auto &s : window_shapes) cjk += s.cjk;
+            if (cjk > 0 ? cjk >= 4 : std::ranges::any_of(window_shapes, &Shape::latin)) phrases.push_back(std::move(phrase));
         }
     }
     return phrases;
 }
 
 std::vector<store::TermTally> count_terms(const std::vector<std::string> &texts, usize limit, i64 min_count) {
-    struct Counts {
-        std::unordered_map<std::string, i64> occurrences;
-        std::unordered_map<std::string, i64> messages;
+    struct Count {
+        i64 occurrences = 0;
+        i64 messages = 0;
+        usize last_message = 0; ///< 1-based; a message counts once per term
     };
-    Counts words;
-    Counts phrases;
-    const auto add = [](Counts &counts, const std::vector<std::string> &terms) {
-        for (const auto &term : terms) ++counts.occurrences[term];
-        for (const auto &term : std::set<std::string>(terms.begin(), terms.end())) ++counts.messages[term];
+    std::unordered_map<std::string, Count> words;
+    std::unordered_map<std::string, Count> phrases;
+    const auto add = [](std::unordered_map<std::string, Count> &counts, std::vector<std::string> terms, usize message) {
+        for (auto &term : terms) {
+            auto &count = counts[std::move(term)];
+            ++count.occurrences;
+            if (count.last_message != message) {
+                ++count.messages;
+                count.last_message = message;
+            }
+        }
     };
+    usize message = 0;
     for (const auto &text : texts) {
         if (std::ranges::all_of(code_points(text), is_space)) continue;
-        const auto tokens = meaningful_terms(text);
+        ++message;
+        auto tokens = meaningful_terms(text);
         if (tokens.empty()) continue;
-        add(words, tokens);
-        add(phrases, term_phrases(tokens));
+        add(phrases, term_phrases(tokens), message);
+        add(words, std::move(tokens), message);
     }
-    std::vector<store::TermTally> items;
+    struct Item {
+        store::TermTally tally;
+        usize length;
+    };
+    std::vector<Item> items;
     for (const auto *counts : {&words, &phrases}) {
-        for (const auto &[term, count] : counts->occurrences) {
-            if (count >= std::max<i64>(min_count, 1))
-                items.push_back({.term = term, .count = count, .message_count = counts->messages.at(term)});
+        for (const auto &[term, count] : *counts) {
+            if (count.occurrences >= std::max<i64>(min_count, 1))
+                items.push_back({.tally = {.term = term, .count = count.occurrences, .message_count = count.messages},
+                                 .length = shape_of(term).length});
         }
     }
     // _frequency_item_sort_key: (-count, -message_count, -len(term), term)
-    std::ranges::sort(items, [](const store::TermTally &a, const store::TermTally &b) {
-        if (a.count != b.count) return a.count > b.count;
-        if (a.message_count != b.message_count) return a.message_count > b.message_count;
-        const auto la = utf8_chars(a.term).size();
-        const auto lb = utf8_chars(b.term).size();
-        if (la != lb) return la > lb;
-        return a.term < b.term;
+    std::ranges::sort(items, [](const Item &a, const Item &b) {
+        if (a.tally.count != b.tally.count) return a.tally.count > b.tally.count;
+        if (a.tally.message_count != b.tally.message_count) return a.tally.message_count > b.tally.message_count;
+        if (a.length != b.length) return a.length > b.length;
+        return a.tally.term < b.tally.term;
     });
     if (items.size() > std::max<usize>(limit, 1)) items.resize(std::max<usize>(limit, 1));
-    return items;
+    std::vector<store::TermTally> tallies;
+    tallies.reserve(items.size());
+    for (auto &item : items) tallies.push_back(std::move(item.tally));
+    return tallies;
 }
 
 } // namespace lilia::learn
