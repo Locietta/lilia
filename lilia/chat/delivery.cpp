@@ -210,7 +210,10 @@ std::vector<Segment> raw_pieces(std::string_view text) {
                 const auto prev = chars[i - 1].cp;
                 const auto next = chars[i + 1].cp;
                 const auto dash = [](char32_t x) { return x == U'-' || x == U'—'; };
-                if (dash(prev) || dash(next) || (is_latin_or_digit(prev) && is_latin_or_digit(next))) split = false;
+                // MaiBot keeps only Latin-Latin spaces; writers that space
+                // English words inside Chinese ("move 完") would see the word
+                // torn off its sentence, so either side is enough here.
+                if (dash(prev) || dash(next) || is_latin_or_digit(prev) || is_latin_or_digit(next)) split = false;
             }
         }
         if (!split) {

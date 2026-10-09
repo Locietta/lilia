@@ -214,15 +214,8 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         request.ids.push_back(message.message_id);
         user += std::format("#{} {}\n", request.ids.size(), render_line(message, input.utc_offset_minutes));
     }
-    if (input.just_replied) {
-        const auto it = std::ranges::find(request.ids, *input.just_replied);
-        user += it == request.ids.end() ? "\n她刚回复完一条消息。" :
-                                          std::format("\n她刚回复了 #{}。", static_cast<usize>(it - request.ids.begin()) + 1);
-        user += "新消息里其余的她还没回应过：看看有没有人在跟她说话、或者还有她想接的，没有就不说话，别为了说而说。";
-    } else {
-        user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
-                                  std::format("\n没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
-    }
+    user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
+                              std::format("\n没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
     if (!input.people.empty()) {
         // MaiBot's person profiles: background for the planner only.
         user += "\n\n群友资料（她已经知道这些，别让她再问一遍；内部参考，别逐字复述；和眼前的聊天冲突时以聊天为准）：\n" + input.people;
@@ -255,10 +248,17 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         reply.properties.emplace("sticker", property("string", "可选：想配的表情包的感觉，比如\"无语\"；大多数时候不填"));
         reply.properties["style"] = property("string", "short | normal | long | sticker（只发一张表情包）");
     }
+    request.tools.push_back({
+        .name = "wait",
+        .description = "先等一会儿再看：等完会告诉你这期间的新消息，再决定下一步",
+        .input_schema = {.properties = {{"seconds", property("integer", "等多少秒，一般 5 到 20")},
+                                        {"reason", property("string", "为什么等，简短")}},
+                         .required = {"seconds"}},
+    });
     if (input.memory_search) {
         request.tools.push_back({
             .name = "search_history",
-            .description = "搜索这个群以前的聊天记录，结果会告诉你，然后你再决定 reply 还是 stay_silent",
+            .description = "搜索这个群以前的聊天记录，结果会告诉你，然后你再决定下一步",
             .input_schema = {.properties = {{"query",
                                              property("string", "要找的内容，写成一句完整的问题或描述，例如\"谁说过对芒果过敏\"")}},
                              .required = {"query"}},
@@ -266,7 +266,7 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
     }
     request.tools.push_back({
         .name = "stay_silent",
-        .description = "这次她不说话",
+        .description = "她不说话（或者不再说了），这一轮到此为止",
         .input_schema = {.properties = {{"reason", property("string", "简短的理由")}}, .required = {"reason"}},
     });
     return request;
@@ -300,6 +300,17 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         if (!tool) continue;
         const auto &input = tool->call.input;
         if (tool->call.name == "stay_silent") return {.reason = string_field(input, "reason")};
+        if (tool->call.name == "wait") {
+            // MaiBot waits 30 seconds when the argument is missing or invalid.
+            i64 seconds = 30;
+            if (const auto *value = field(input, "seconds"); value && value->is_number()) {
+                seconds = static_cast<i64>(value->get_number());
+            } else if (value && value->is_string()) {
+                const auto &text = value->get_string();
+                if (i64 parsed = 0; std::from_chars(text.data(), text.data() + text.size(), parsed).ec == std::errc{}) seconds = parsed;
+            }
+            return {.wait = std::clamp<i64>(seconds, 1, 60), .reason = string_field(input, "reason")};
+        }
         if (tool->call.name != "reply") return {.reason = "unknown tool " + tool->call.name};
 
         const auto target = parse_target(string_field(input, "target"));
@@ -320,6 +331,15 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         };
     }
     return {.reason = "no tool call"};
+}
+
+std::string number_messages(const std::vector<store::StoredMessage> &messages, std::vector<i64> &ids, i32 utc_offset_minutes) {
+    std::string out;
+    for (const auto &message : messages) {
+        ids.push_back(message.message_id);
+        out += std::format("#{} {}\n", ids.size(), render_line(message, utc_offset_minutes));
+    }
+    return out;
 }
 
 std::string quoted_phrase(std::string_view style) {

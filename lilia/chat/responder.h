@@ -31,8 +31,10 @@ namespace lilia::chat {
 /// process; sessions come and go as NapCat reconnects.
 ///
 /// A turn: the flow gate decides that the planner should look; after the
-/// burst settles, the planner (one tool call) decides whether lilia speaks
-/// and how; the writer produces the text, which goes out as 1-3 messages.
+/// burst settles, the planner works in rounds, as MaiBot's does: each round
+/// it replies, waits, looks something up or ends the turn. After a reply or
+/// a wait it sees what she said and the messages that came in meanwhile. A
+/// reply's text comes from the writer and goes out as 1-3 messages.
 struct Responder {
     using Spawn = std::move_only_function<void(lighter::Task<>)>;
     using Clock = std::move_only_function<i64()>;
@@ -40,6 +42,8 @@ struct Responder {
     using Outbox = std::move_only_function<lighter::Task<std::optional<i64>>(const store::ChatKey &, onebot::Message)>;
     /// Observes every turn decision (replay output, tests).
     using PlanObserver = std::move_only_function<void(const store::ChatKey &, const Plan &, const std::vector<std::string> &)>;
+    /// Lets `seconds` pass during a planner wait.
+    using Pause = std::move_only_function<lighter::Task<>(const store::ChatKey &, i64 seconds)>;
 
     Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher, provider::Provider writer,
               std::filesystem::path persona_path, Spawn spawn);
@@ -56,8 +60,8 @@ struct Responder {
     /// and media archiving.
     std::optional<store::ChatKey> ingest(const onebot::MessageEvent &message);
 
-    /// One planner decision and, if she speaks, one reply. Consumes the
-    /// chat's unseen messages.
+    /// One turn of planner rounds and the replies they ask for. Consumes the
+    /// chat's unseen messages, including those arriving during the turn.
     lighter::Task<> run_turn(store::ChatKey chat);
 
     Result<void> reload_persona();
@@ -69,6 +73,9 @@ struct Responder {
     /// Replaces the live session for sending (replay).
     Outbox outbox;
     PlanObserver observer;
+    /// How a planner wait passes; unset, it sleeps (when realtime). Replay
+    /// advances its clock and feeds the messages of that time.
+    Pause pause;
     /// Debounce and typing delays; replay turns them off.
     bool realtime = true;
 
@@ -77,17 +84,10 @@ struct Responder {
         std::string name;
         bool busy = false;
         i64 budget_notice_day = -1;
-        /// Someone called her while she answered another message; the next
-        /// turn must answer this one.
-        std::optional<i64> owed;
         /// Her latest planner decisions, oldest first, shown to the planner.
         std::deque<std::string> decisions;
         /// What she said to recent targets (message id, her text), newest last.
         std::deque<std::pair<i64, std::string>> replied;
-        /// Messages already offered again after a reply; never twice.
-        std::unordered_set<i64> requeued;
-        /// The next turn is the look right after replying to this message.
-        std::optional<i64> just_replied;
         /// When she last sent a sticker here (unix seconds).
         i64 last_sticker = 0;
     };

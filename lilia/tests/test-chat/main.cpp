@@ -120,7 +120,9 @@ void test_planner() {
     require(user.find("以下是新消息") < user.find("#3 "), "the new messages are marked");
     require(user.find("以下是新消息") > user.find("#2 "), "old lines come before the marker");
     require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");
-    require(request.tools.size() == 2 && request.tools[0].name == "reply" && request.tools[1].name == "stay_silent", "two tools");
+    require(request.tools.size() == 3 && request.tools[0].name == "reply" && request.tools[1].name == "wait" &&
+                request.tools[2].name == "stay_silent",
+            "reply, wait, stay_silent");
 
     using provider::OutputItem;
     const auto reply = chat::parse_plan(
@@ -134,14 +136,23 @@ void test_planner() {
     require(!chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#9","style":"short","intent":"x"})"))}, request.ids).reply,
             "an out-of-range target is silence");
     require(!chat::parse_plan({}, request.ids).reply, "no tool call is silence");
+    const auto waiting = chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":12,"reason":"他还在打字"})"))}, request.ids);
+    require(!waiting.reply && waiting.wait == 12 && waiting.reason == "他还在打字", "wait carries seconds and reason");
+    require(chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":"600"})"))}, request.ids).wait == 60 &&
+                chat::parse_plan({OutputItem(tool_call("wait", R"({})"))}, request.ids).wait == 30,
+            "waits are capped at a minute; 30 seconds when unsaid");
+
+    auto ids = request.ids;
+    const auto arrived = chat::number_messages({stored(105, t + 10, "d", "我也在看"), stored(106, t + 12, "e", "哪部")}, ids, 480);
+    require(arrived == "#4 [21:05] d(20105): 我也在看\n#5 [21:05] e(20106): 哪部\n" && ids.size() == 5 && ids[4] == 106,
+            "arrivals are numbered on");
+    require(chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#5","style":"short","intent":"x"})"))}, ids).target == 106,
+            "and can be replied to");
 
     auto followup_input = chat::PlannerInput{
         .prompt = "P", .info = group_info(), .recent = {stored(401, t, "c", "a"), stored(402, t, "d", "b")}, .fresh = {401, 402}};
     followup_input.decisions = {"[21:04] 没说话：别人在私聊", "[21:05] 回复了c的「a」：接一句"};
-    followup_input.just_replied = 401;
     const auto followup = text_of(chat::build_planner_request(followup_input).history[1]);
-    require(followup.find("她刚回复了 #1") != std::string::npos && followup.find("没有人直接叫") == std::string::npos,
-            "the look after a reply says what she answered");
     require(followup.find("- [21:05] 回复了c的「a」：接一句") != std::string::npos && followup.find("别重复") != std::string::npos,
             "recent decisions are listed");
 
@@ -265,10 +276,15 @@ void test_bubbles() {
                 std::vector<std::string>({"骂的又不是你", "圈内撕版权和抢饭碗呗", "个人小项目拿它当草稿参考又没啥"}),
             "commas split");
     require(texts(chat::split_pieces("独立游戏小成本用 AI 出图挺好的，真不用太在意那些骂声")) ==
-                std::vector<std::string>({"独立游戏小成本用", "AI", "出图挺好的", "真不用太在意那些骂声"}),
-            "spaces split unless between Latin letters or digits");
+                std::vector<std::string>({"独立游戏小成本用 AI 出图挺好的", "真不用太在意那些骂声"}),
+            "a space next to a Latin word does not split (MaiBot splits here)");
+    require(texts(chat::split_pieces("工具就是工具 拿来提高效率没问题")) ==
+                std::vector<std::string>({"工具就是工具", "拿来提高效率没问题"}),
+            "a space between Chinese clauses splits");
     require(chat::split_pieces("他说：\"别急，等会儿\"然后就走了").size() == 1, "not inside quotes");
-    require(texts(chat::split_pieces("时间是 10:30, 别迟到")) == std::vector<std::string>({"时间是", "10:30", "别迟到"}), "colons");
+    require(texts(chat::split_pieces("时间是10:30, 别迟到")) == std::vector<std::string>({"时间是10:30", "别迟到"}), "colons");
+    require(texts(chat::split_pieces("记得带：充电器，伞")) == std::vector<std::string>({"记得带：充电器", "伞"}),
+            "not right after a colon");
     require(chat::split_pieces("use godot for a small demo").size() == 1, "English stays whole");
     require(texts(chat::split_pieces("这个 - 那个 好吧")) == std::vector<std::string>({"这个 - 那个", "好吧"}), "not beside a dash");
     require(chat::split_pieces("“一，二”三，四").size() == 1, "a curly quote never closes (as in MaiBot)");

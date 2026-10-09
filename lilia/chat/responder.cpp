@@ -50,9 +50,8 @@ constexpr std::array<std::string_view, 4> k_alt_styles{
 constexpr i64 k_max_debounce_seconds = 15;
 /// Learned phrases shown to the writer as a sample of how the groups talk.
 constexpr usize k_voice_samples = 8;
-/// Recent targets whose reply she remembers, and offered-again messages.
+/// Recent targets whose reply she remembers.
 constexpr usize k_replied_memory = 20;
-constexpr usize k_requeued_memory = 500;
 constexpr usize k_decision_memory = 6;
 /// Expression selection: too few candidates skip the call; the selector sees
 /// this many recent lines.
@@ -77,6 +76,11 @@ constexpr usize k_casual_messages = 2;
 /// the rest are packed into at most this many messages.
 constexpr usize k_max_pieces = 8;
 constexpr usize k_max_messages = 3;
+/// MaiBot's planner loop: rounds per turn and waits in a row (its limits);
+/// replies per turn is lilia's own brake.
+constexpr usize k_max_rounds = 8;
+constexpr usize k_max_waits = 3;
+constexpr usize k_max_replies = 3;
 
 store::ChatKey chat_key(const onebot::MessageEvent &event) {
     if (event.is_group()) return {.type = "group", .id = *event.group_id};
@@ -616,12 +620,166 @@ void Responder::on_event(onebot::Event event) {
     spawn(turn_worker(this, *chat));
 }
 
+namespace {
+
+/// What one reply came to.
+struct Delivered {
+    bool sent = false;
+    std::string said; ///< her messages, joined
+};
+
+/// One reply as the planner asked for it: a sticker alone, or the writer's
+/// text (after an optional web search and the expression selection) sent the
+/// way MaiBot sends replies, plus a sticker when asked. Records what she said.
+Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vector<store::StoredMessage> log_lines,
+                        store::StoredMessage target, ChatInfo info, i64 started, std::string remembered) {
+    auto &state = r->chats[chat];
+    const auto &settings = r->config.chat;
+    if (plan.sticker_only) {
+        const auto feeling = plan.sticker.empty() ? plan.intent : plan.sticker + "：" + plan.intent;
+        if (co_await send_sticker(r, chat, feeling, log_lines)) {
+            if (r->observer) r->observer(chat, plan, {"[表情]"});
+            note_spoke(state.flow, r->now(), target.sender_id);
+            co_return Delivered{.sent = true, .said = "[表情包]"};
+        }
+        plan.style = ReplyStyle::SHORT; // nothing fitting: say it in words
+    }
+
+    std::string style_override;
+    if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(r->rng)) {
+        style_override = k_alt_styles[std::uniform_int_distribution<usize>(0, k_alt_styles.size() - 1)(r->rng)];
+    }
+    std::string reference;
+    if (plan.search && r->config.model.web_search) {
+        // A dedicated call: writers asked to search "if needed" often don't.
+        const auto search_history = build_search_history(info, target, plan, started, settings.utc_offset_minutes);
+        const std::vector<provider::ToolDefinition> search_tools{{.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"}};
+        if (const auto found =
+                co_await call_model(r, r->searcher, r->config.model.planner_model, "search", chat, search_history, search_tools)) {
+            reference = clean_reply(final_text(*found), info, {}, 2'000);
+        }
+        log::info("search for {} returned {} bytes", describe(chat), reference.size());
+        log::debug("search reference: {}", reference);
+    }
+    const auto habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
+    const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
+    const auto history = build_writer_history({
+        .persona = r->persona,
+        .rules = r->writer_rules,
+        .info = info,
+        .recent = log_lines,
+        .target = target,
+        .plan = plan,
+        .style_override = style_override,
+        .now = started,
+        .utc_offset_minutes = settings.utc_offset_minutes,
+        .log_bytes = settings.context_bytes,
+        .reference = reference,
+        .habits = habits,
+        .remembered = remembered,
+        .known = known_about(r, target),
+        .previous_reply = previous == state.replied.end() ? std::string() : previous->second,
+        .voice = r->config.learning.enabled ? sample_voice(r->store, k_voice_samples) : std::vector<std::string>{},
+    });
+    auto written = co_await call_model(r, r->writer, r->config.model.model, "writer", chat, history, {});
+    for (auto &fallback : r->writer_fallbacks) {
+        if (written && !final_text(*written).empty()) break;
+        log::warn("writer fallback for {}: {}", describe(chat), fallback.model);
+        written = co_await call_model(r, fallback.provider, fallback.model, "writer", chat, history, {});
+    }
+    if (!written) co_return Delivered{};
+    log::debug("writer raw: {}", final_text(*written));
+    const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
+                        plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
+                                                                                     settings.long_reply_chars;
+    const auto reply = fit_length(
+        clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes), budget);
+
+    // Casual replies go out the way MaiBot sends them: split at punctuation,
+    // neighbours merged at random, a homophone typo now and then (sometimes
+    // corrected right after), at most three messages. A long reply is on
+    // purpose (an explanation, a copypasta): one message, untouched. Casual
+    // replies keep their first two lines; models like a point-elaboration-
+    // conclusion triple, which reads as AI.
+    const bool deliberate = plan.style == ReplyStyle::LONG && style_override.empty();
+    std::vector<Segment> segments;
+    if (deliberate) {
+        for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
+    } else {
+        const auto casual = first_lines(reply, k_casual_messages);
+        segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);
+        if (segments.size() > k_max_pieces) {
+            segments.clear();
+            for (auto &whole : whole_message(casual)) segments.push_back({.text = std::move(whole)});
+        }
+        segments = pack_segments(std::move(segments), k_max_messages);
+    }
+    std::vector<std::string> bubbles;
+    for (const auto &segment : segments) bubbles.push_back(segment.text);
+    if (bubbles.empty()) {
+        log::warn("writer returned an empty reply for {}", describe(chat));
+        co_return Delivered{};
+    }
+    if (r->observer) r->observer(chat, plan, bubbles);
+
+    std::optional<i64> sent_id;
+    usize sent = 0;
+    for (usize i = 0; i < segments.size(); ++i) {
+        // Only later messages wait for "typing"; the first goes out at once.
+        if (r->realtime && i > 0) co_await lighter::sleep(typing_delay(segments[i].text, settings.typing_speed));
+        onebot::Message message;
+        if (i == 0 && plan.quote && chat.type == "group") {
+            message.push_back(onebot::reply_segment(plan.target));
+        } else if (segments[i].quote_previous && sent_id) {
+            message.push_back(onebot::reply_segment(*sent_id));
+        }
+        message.push_back(onebot::text_segment(segments[i].text));
+        sent_id = co_await send_and_record(r, chat, std::move(message));
+        if (!sent_id) break;
+        ++sent;
+    }
+    if (sent == 0) co_return Delivered{};
+    if (!plan.sticker.empty()) {
+        if (r->realtime) co_await lighter::sleep(std::chrono::milliseconds(800));
+        std::ignore = co_await send_sticker(r, chat, plan.sticker + "：" + plan.intent, log_lines);
+    }
+    note_spoke(state.flow, r->now(), target.sender_id);
+    if (r->memory && r->config.memory.facts && !target.from_self) r->spawn(learn_facts(r, chat, target, log_lines));
+
+    std::string said;
+    for (usize i = 0; i < sent; ++i) said += (said.empty() ? "" : " ") + bubbles[i];
+    state.replied.emplace_back(plan.target, said);
+    if (state.replied.size() > k_replied_memory) state.replied.pop_front();
+    co_return Delivered{.sent = true, .said = std::move(said)};
+}
+
+/// The id of the first tool call in a planner response.
+std::string first_call_id(const std::vector<provider::OutputItem> &items) {
+    for (const auto &item : items) {
+        if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) return call->call.id;
+    }
+    return {};
+}
+
+/// Results for every tool call of a planner response: `receipt` for the one
+/// acted on, a note for any extra call (one tool per round).
+std::vector<ToolOutcome> outcomes(const std::vector<provider::OutputItem> &items, std::string_view acted, std::string receipt) {
+    std::vector<ToolOutcome> out;
+    for (const auto &item : items) {
+        const auto *call = std::get_if<provider::ToolCallItem>(&item);
+        if (!call) continue;
+        out.push_back(
+            {.call_id = call->call.id, .receipt = call->call.id == acted ? receipt : std::string("没有执行：每次只能用一个工具。")});
+    }
+    return out;
+}
+
+} // namespace
+
 Task<> Responder::run_turn(store::ChatKey chat) {
     auto &state = chats[chat];
     auto fresh = std::exchange(state.flow.unseen, {});
-    const auto addressed = std::exchange(state.flow.addressed, std::nullopt);
-    const auto owed = std::exchange(state.owed, std::nullopt);
-    const auto just_replied = std::exchange(state.just_replied, std::nullopt);
+    auto addressed = std::exchange(state.flow.addressed, std::nullopt);
     if (fresh.empty()) co_return;
 
     const auto &settings = config.chat;
@@ -641,11 +799,13 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
     // Let image descriptions of the new messages land before deciding, so she
     // reacts to what a picture shows rather than to "[图片]".
-    if (archiver && realtime) {
+    const auto settle_images = [this, &chat, &settings](const std::vector<store::StoredMessage> &messages) -> Task<> {
+        if (!archiver || !realtime) co_return;
         std::vector<i64> ids;
-        for (const auto &message : fresh) ids.push_back(message.message_id);
+        for (const auto &message : messages) ids.push_back(message.message_id);
         co_await archiver->wait_for(chat, std::move(ids), std::chrono::seconds(settings.image_wait_seconds));
-    }
+    };
+    co_await settle_images(fresh);
 
     auto recent = store.recent_messages(chat, settings.context_messages);
     if (recent.has_error()) log::error("cannot read chat log: {}", recent.error().message());
@@ -654,7 +814,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     // MaiBot weighs "how much of the recent chat was me" heavily: once she has
     // said a lot lately, only being called (or answered right after her own
     // message) brings her back, and the planner is not even asked.
-    if (!addressed && !owed) {
+    if (!addressed) {
         const usize window = std::min(log_lines.size(), k_self_window);
         const auto recent_self =
             std::ranges::count_if(log_lines.end() - static_cast<std::ptrdiff_t>(window), log_lines.end(), &store::StoredMessage::from_self);
@@ -685,7 +845,6 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .decisions = {state.decisions.begin(), state.decisions.end()},
         .memory_search = memory != nullptr,
         .stickers = stickers_ready(this),
-        .just_replied = just_replied,
     };
     for (const auto &message : fresh) planner_input.fresh.push_back(message.message_id);
     if (memory && config.memory.facts) {
@@ -699,203 +858,142 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     }
     if (memory) planner_input.recall = co_await memory->recall(chat, log_lines);
     planner_input.jargon = jargon_notes(this, chat, log_lines);
-    const auto request = build_planner_request(planner_input);
+    auto request = build_planner_request(planner_input);
+    auto &history = request.history;
+    auto &ids = request.ids;
 
-    // The planner may look things up (search_history) before deciding; each
-    // result goes back to it as a tool result, then the tool is withdrawn.
-    auto planner_history = request.history;
-    auto planner_tools = request.tools;
+    // MaiBot's planner loop: each round one tool call; after a reply or a
+    // wait the planner sees what happened and the messages that came in.
+    i64 newest = fresh.back().message_id;
+    bool answered = false; // replied to whoever called her
+    usize searches = 0;
+    usize waits = 0;
+    usize replies = 0;
     std::string remembered;
-    std::optional<std::vector<provider::OutputItem>> planned;
-    for (usize searches = 0;; ++searches) {
+    // Messages that came in since the last look, numbered for the planner;
+    // someone calling her meanwhile must be answered too.
+    const auto arrivals = [&]() -> Task<std::string> {
+        auto arrived = std::exchange(state.flow.unseen, {});
+        if (auto called = std::exchange(state.flow.addressed, std::nullopt)) {
+            addressed = called;
+            answered = false;
+        }
+        if (arrived.empty()) co_return std::string();
+        co_await settle_images(arrived);
+        newest = arrived.back().message_id;
+        if (auto latest = store.recent_messages(chat, settings.context_messages); latest.has_value()) log_lines = *std::move(latest);
+        // Their descriptions may have landed since they were queued.
+        for (auto &message : arrived) {
+            if (const auto it = std::ranges::find(log_lines, message.message_id, &store::StoredMessage::message_id); it != log_lines.end())
+                message = *it;
+        }
+        co_return number_messages(arrived, ids, settings.utc_offset_minutes);
+    };
+    const auto reply_to = [&](Plan plan) -> Task<Delivered> {
+        auto target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
+        if (target != log_lines.end() && target->from_self) {
+            // She answers others, not herself; fall back to the newest message.
+            plan.target = addressed.value_or(newest);
+            target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
+        }
+        if (target == log_lines.end()) {
+            log::warn("planner target {} is not in the chat log", plan.target);
+            co_return Delivered{};
+        }
+        log::info("{} replies to {} ({}, quote {}, search {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
+                  plan.search, plan.intent.empty() ? plan.brief : plan.intent);
+        remember_decision(state, std::format("[{}] 回复了{}的「{}」：{}", clock_of(now(), settings.utc_offset_minutes),
+                                             target->sender_name.empty() ? std::to_string(target->sender_id) : target->sender_name,
+                                             bounded_utf8(target->text, 60), plan.intent.empty() ? plan.brief : plan.intent));
+        auto delivered = co_await deliver(this, chat, plan, log_lines, *target, info, started, remembered);
+        if (delivered.sent && addressed && plan.target == *addressed) answered = true;
+        co_return delivered;
+    };
+
+    std::string ended = "planner call failed";
+    for (usize round = 0; round < k_max_rounds; ++round) {
+        auto offered = request.tools;
         if (!memory || searches >= config.memory.max_searches)
-            std::erase_if(planner_tools, [](const auto &tool) { return tool.name == "search_history"; });
-        planned = co_await call_model(this, planner, config.model.planner_model, "planner", chat, planner_history, planner_tools);
-        if (!planned || !memory) break;
+            std::erase_if(offered, [](const auto &tool) { return tool.name == "search_history"; });
+        const auto planned = co_await call_model(this, planner, config.model.planner_model, "planner", chat, history, offered);
+        if (!planned) break;
+        for (const auto &item : *planned) provider::append_output_item(history, item);
+        const auto call_id = first_call_id(*planned);
+
+        // A look into the history: its result goes back to the planner.
         const auto search = std::ranges::find_if(*planned, [](const provider::OutputItem &item) {
             const auto *call = std::get_if<provider::ToolCallItem>(&item);
             return call && call->call.name == "search_history";
         });
-        if (search == planned->end()) break;
-        const auto &call = std::get<provider::ToolCallItem>(*search).call;
-        const auto query = string_input(call.input, "query");
-        const auto hits = co_await memory->search(chat, query);
-        const auto found = memory::render_hits(hits);
-        if (!hits.empty()) remembered += found;
-        for (const auto &item : *planned) provider::append_output_item(planner_history, item);
-        provider::append_tool_outcomes(planner_history, {ToolOutcome{.call_id = call.id, .receipt = found}});
+        if (memory && search != planned->end()) {
+            const auto &call = std::get<provider::ToolCallItem>(*search).call;
+            const auto hits = co_await memory->search(chat, string_input(call.input, "query"));
+            const auto found = memory::render_hits(hits);
+            if (!hits.empty()) remembered += found;
+            provider::append_tool_outcomes(history, outcomes(*planned, call.id, found));
+            ++searches;
+            continue;
+        }
+
+        auto plan = parse_plan(*planned, ids);
+        plan.follow_up = replies > 0;
+        if (plan.wait > 0) {
+            // MaiBot allows three waits in a row, then the turn rests.
+            if (++waits > k_max_waits) {
+                ended = "waited enough";
+                break;
+            }
+            log::info("{} waits {}s: {}", describe(chat), plan.wait, plan.reason);
+            if (observer) observer(chat, plan, {});
+            const i64 before = now();
+            if (pause) {
+                co_await pause(chat, plan.wait);
+            } else if (realtime) {
+                co_await lighter::sleep(std::chrono::seconds(plan.wait));
+            }
+            const auto came = co_await arrivals();
+            const auto waited = now() - before;
+            provider::append_tool_outcomes(history, outcomes(*planned, call_id,
+                                                             came.empty() ? std::format("等了 {} 秒，这期间没有新消息。", waited) :
+                                                                            std::format("等了 {} 秒，这期间的新消息：\n{}", waited, came)));
+            continue;
+        }
+        waits = 0;
+        if (!plan.reply) {
+            ended = plan.reason;
+            break;
+        }
+
+        const auto delivered = co_await reply_to(plan);
+        if (!delivered.sent) {
+            ended = "the reply failed";
+            break;
+        }
+        ++replies;
+        if (replies >= k_max_replies) {
+            ended = "replied enough";
+            break;
+        }
+        const auto came = co_await arrivals();
+        const auto index = static_cast<usize>(std::ranges::find(ids, plan.target) - ids.begin()) + 1;
+        provider::append_tool_outcomes(history, outcomes(*planned, call_id,
+                                                         std::format("{}回复了 #{}：「{}」\n{}", settings.name, index, delivered.said,
+                                                                     came.empty() ? "这期间没有新消息。" : "这期间的新消息：\n" + came)));
     }
-    auto plan = planned ? parse_plan(*planned, request.ids) : Plan{.reason = "planner call failed"};
-    if (!plan.reply && addressed) {
-        // Ignoring someone who called her reads as broken, not as a choice.
-        log::info("planner stayed silent although addressed ({}); replying anyway", plan.reason);
-        plan = {.reply = true, .target = *addressed};
+
+    // Ignoring someone who called her reads as broken, not as a choice.
+    if (addressed && !answered && ended != "the reply failed") {
+        log::info("{} turn ended ({}) without answering {}; replying anyway", describe(chat), ended, *addressed);
+        if ((co_await reply_to({.reply = true, .target = *addressed, .follow_up = replies > 0})).sent) ++replies;
     }
-    if (owed && owed == addressed && plan.target != *owed) {
-        log::info("planner picked {} again; answering the owed {}", plan.target, *owed);
-        plan.target = *owed;
-    }
-    if (!plan.reply) {
-        log::info("{} stays silent: {}", describe(chat), plan.reason);
+    if (replies == 0) {
+        log::info("{} stays silent: {}", describe(chat), ended);
         note_silent(state.flow, now());
-        remember_decision(state, std::format("[{}] 没说话：{}", clock_of(started, settings.utc_offset_minutes), plan.reason));
-        if (observer) observer(chat, plan, {});
-        co_return;
-    }
-
-    auto target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
-    if (target != log_lines.end() && target->from_self) {
-        // She answers others, not herself; fall back to the newest new message.
-        plan.target = addressed.value_or(fresh.back().message_id);
-        target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
-    }
-    if (target == log_lines.end()) {
-        log::warn("planner target {} is not in the chat log", plan.target);
-        co_return;
-    }
-    log::info("{} replies to {} ({}, quote {}, search {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
-              plan.search, plan.intent.empty() ? plan.brief : plan.intent);
-    remember_decision(state, std::format("[{}] 回复了{}的「{}」：{}", clock_of(started, settings.utc_offset_minutes),
-                                         target->sender_name.empty() ? std::to_string(target->sender_id) : target->sender_name,
-                                         bounded_utf8(target->text, 60), plan.intent.empty() ? plan.brief : plan.intent));
-
-    if (plan.sticker_only) {
-        const auto feeling = plan.sticker.empty() ? plan.intent : plan.sticker + "：" + plan.intent;
-        const bool sent = co_await send_sticker(this, chat, feeling, log_lines);
-        if (sent) {
-            if (observer) observer(chat, plan, {"[表情]"});
-            note_spoke(state.flow, now(), target->sender_id);
-            co_return;
-        }
-        plan.style = ReplyStyle::SHORT; // nothing fitting: say it in words
-    }
-
-    std::string style_override;
-    if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(rng)) {
-        style_override = k_alt_styles[std::uniform_int_distribution<usize>(0, k_alt_styles.size() - 1)(rng)];
-    }
-    std::string reference;
-    if (plan.search && config.model.web_search) {
-        // A dedicated call: writers asked to search "if needed" often don't.
-        const auto search_history = build_search_history(info, *target, plan, started, settings.utc_offset_minutes);
-        const std::vector<provider::ToolDefinition> search_tools{{.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"}};
-        if (const auto found =
-                co_await call_model(this, searcher, config.model.planner_model, "search", chat, search_history, search_tools)) {
-            reference = clean_reply(final_text(*found), info, {}, 2'000);
-        }
-        log::info("search for {} returned {} bytes", describe(chat), reference.size());
-        log::debug("search reference: {}", reference);
-    }
-    const auto habits = co_await select_habits(this, chat, log_lines, *target, plan.intent.empty() ? plan.brief : plan.intent);
-    const auto history = build_writer_history({
-        .persona = persona,
-        .rules = writer_rules,
-        .info = info,
-        .recent = log_lines,
-        .target = *target,
-        .plan = plan,
-        .style_override = style_override,
-        .now = started,
-        .utc_offset_minutes = settings.utc_offset_minutes,
-        .log_bytes = settings.context_bytes,
-        .reference = reference,
-        .habits = habits,
-        .remembered = remembered,
-        .known = known_about(this, *target),
-        .previous_reply =
-            [&] {
-                const auto it = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
-                return it == state.replied.end() ? std::string() : it->second;
-            }(),
-        .voice = config.learning.enabled ? sample_voice(store, k_voice_samples) : std::vector<std::string>{},
-    });
-    auto written = co_await call_model(this, writer, config.model.model, "writer", chat, history, {});
-    for (auto &fallback : writer_fallbacks) {
-        if (written && !final_text(*written).empty()) break;
-        log::warn("writer fallback for {}: {}", describe(chat), fallback.model);
-        written = co_await call_model(this, fallback.provider, fallback.model, "writer", chat, history, {});
-    }
-    if (!written) co_return;
-    log::debug("writer raw: {}", final_text(*written));
-    const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
-                        plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
-                                                                                     settings.long_reply_chars;
-    const auto reply = fit_length(
-        clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes), budget);
-    // A long reply is on purpose (an explanation, a copypasta): one message.
-    // Casual replies: at most two messages. Models like a point-elaboration-
-    // conclusion triple, which reads as AI; the extra lines are add-ons.
-    // Casual replies go out the way MaiBot sends them: split at punctuation,
-    // neighbours merged at random, a homophone typo now and then (sometimes
-    // corrected right after), at most three messages.
-    const bool deliberate = plan.style == ReplyStyle::LONG && style_override.empty();
-    std::vector<Segment> segments;
-    if (deliberate) {
-        for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
+        remember_decision(state, std::format("[{}] 没说话：{}", clock_of(started, settings.utc_offset_minutes), ended));
+        if (observer) observer(chat, {.reason = ended}, {});
     } else {
-        const auto casual = first_lines(reply, k_casual_messages);
-        segments = add_typos(split_segments(casual, rng), settings.typos, rng);
-        if (segments.size() > k_max_pieces) {
-            segments.clear();
-            for (auto &whole : whole_message(casual)) segments.push_back({.text = std::move(whole)});
-        }
-        segments = pack_segments(std::move(segments), k_max_messages);
-    }
-    std::vector<std::string> bubbles;
-    for (const auto &segment : segments) bubbles.push_back(segment.text);
-    if (bubbles.empty()) {
-        log::warn("writer returned an empty reply for {}", describe(chat));
-        co_return;
-    }
-    if (observer) observer(chat, plan, bubbles);
-
-    std::optional<i64> previous;
-    for (usize i = 0; i < segments.size(); ++i) {
-        // Only later messages wait for "typing"; the first goes out at once.
-        if (realtime && i > 0) co_await lighter::sleep(typing_delay(segments[i].text, settings.typing_speed));
-        onebot::Message message;
-        if (i == 0 && plan.quote && chat.type == "group") {
-            message.push_back(onebot::reply_segment(plan.target));
-        } else if (segments[i].quote_previous && previous) {
-            message.push_back(onebot::reply_segment(*previous));
-        }
-        message.push_back(onebot::text_segment(segments[i].text));
-        previous = co_await send_and_record(this, chat, std::move(message));
-        if (!previous) break;
-    }
-    if (!plan.sticker.empty()) {
-        if (realtime) co_await lighter::sleep(std::chrono::milliseconds(800));
-        std::ignore = co_await send_sticker(this, chat, plan.sticker + "：" + plan.intent, log_lines);
-    }
-    note_spoke(state.flow, now(), target->sender_id);
-
-    if (memory && config.memory.facts && !target->from_self) spawn(learn_facts(this, chat, *target, log_lines));
-
-    std::string said;
-    for (const auto &bubble : bubbles) said += (said.empty() ? "" : " ") + bubble;
-    state.replied.emplace_back(plan.target, std::move(said));
-    if (state.replied.size() > k_replied_memory) state.replied.pop_front();
-
-    // One target per turn, then another look (like MaiBot's planner, which
-    // re-plans after replying): the other new messages after the target are
-    // offered once more, with a note that she just replied. Whoever called
-    // her must be answered on that turn. The worker loop runs it next.
-    const auto after = std::ranges::find(fresh, plan.target, &store::StoredMessage::message_id);
-    std::vector<store::StoredMessage> again;
-    for (auto it = fresh.begin(); it != fresh.end(); ++it) {
-        // Later messages, plus whoever called her even if they came earlier.
-        const bool later = after == fresh.end() || it > after;
-        const bool caller = addressed && it->message_id == *addressed && it->message_id != plan.target;
-        if ((later || caller) && !it->from_self && state.requeued.insert(it->message_id).second) again.push_back(*it);
-    }
-    if (state.requeued.size() > k_requeued_memory) state.requeued.clear();
-    if (!again.empty()) {
-        state.flow.unseen.insert(state.flow.unseen.begin(), again.begin(), again.end());
-        state.just_replied = plan.target;
-        if (addressed && plan.target != *addressed && std::ranges::contains(again, *addressed, &store::StoredMessage::message_id)) {
-            if (!state.flow.addressed) state.flow.addressed = *addressed;
-            state.owed = *addressed;
-        }
+        log::info("{} ends the turn after {} repl{}: {}", describe(chat), replies, replies == 1 ? "y" : "ies", ended);
+        if (observer) observer(chat, {.follow_up = true, .reason = ended}, {});
     }
 }
 

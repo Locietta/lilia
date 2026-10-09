@@ -179,18 +179,27 @@ def message_end(stop_reason, output_tokens):
 
 
 def planner_answer(body):
-    """Replies to the line that says 你好呀, by its #number."""
-    log = body["messages"][-1]["content"][0]["text"]
-    target = next(
-        line.split(" ", 1)[0] for line in log.splitlines() if "你好呀" in line
-    )
-    arguments = {
-        "target": target,
-        "quote": False,
-        "style": "short",
-        "search": False,
-        "intent": "打个招呼",
-    }
+    """Replies to the line that says 你好呀, by its #number; after that (the
+    round that sees the reply's receipt) ends the turn."""
+    first = body["messages"][-1]["content"][0]
+    if first.get("type") == "tool_result":
+        name, arguments = "stay_silent", {"reason": "说完了"}
+    else:
+        target = next(
+            line.split(" ", 1)[0]
+            for line in first["text"].splitlines()
+            if "你好呀" in line
+        )
+        name, arguments = (
+            "reply",
+            {
+                "target": target,
+                "quote": False,
+                "style": "short",
+                "search": False,
+                "intent": "打个招呼",
+            },
+        )
     return sse(
         [
             message_start(5),
@@ -202,7 +211,7 @@ def planner_answer(body):
                     "content_block": {
                         "type": "tool_use",
                         "id": "toolu_1",
-                        "name": "reply",
+                        "name": name,
                         "input": {},
                     },
                 },
@@ -601,13 +610,24 @@ def test_reply_and_reconnect(tmp_path):
     ), reviewed
     learned_from = learners[0]["messages"][-1]["content"][0]["text"]
     assert learned_from == "1. 群友1: 别理我\n2. 群友1: 笑死 这也行\n", learned_from
-    assert len(turns) == 3, "one planner call, the broken writer, then its fallback"
-    planner, broken, writer = turns
+    assert len(turns) == 4, (
+        "a planner round, the broken writer, its fallback, and the round after the reply"
+    )
+    planner, broken, writer, follow_up = turns
     assert broken["model"] == BROKEN_WRITER and writer["model"] == "fake-model"
     assert broken["messages"] == writer["messages"], (
         "the fallback gets the same request"
     )
-    assert [tool["name"] for tool in planner["tools"]] == ["reply", "stay_silent"]
+    assert [tool["name"] for tool in planner["tools"]] == [
+        "reply",
+        "wait",
+        "stay_silent",
+    ]
+    receipt = follow_up["messages"][-1]["content"][0]
+    assert receipt["type"] == "tool_result" and "回复了" in json.dumps(
+        receipt, ensure_ascii=False
+    ), "the next round sees what she said"
+    assert "fake reply" in json.dumps(receipt, ensure_ascii=False)
     assert (
         "莉莉娅" in planner["system"]
         and "测试群" in planner["messages"][-1]["content"][0]["text"]
@@ -667,7 +687,8 @@ def test_reply_and_reconnect(tmp_path):
         (GROUP, "fake-model", 5, 3, 0),
         (GROUP, BROKEN_WRITER, 0, 0, 1),
         (GROUP, "fake-model", 10, 12, 0),
-    ], ("vision, planner, failed writer, fallback writer", calls)
+        (GROUP, "fake-model", 5, 3, 0),
+    ], ("vision, planner, failed writer, fallback writer, planner again", calls)
 
     media = db.execute(
         "SELECT chat_id, message_id, segment_index, kind, status, sha1, path, bytes, error, description "

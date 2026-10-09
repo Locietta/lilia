@@ -57,3 +57,22 @@ tokens) of Chinese docs, prompts and code.
 `src/services/message_word_frequency_service.py` (`f9ec367`); on the same
 lines its terms and its per-batch tallies (4,546 batches of 30) match the
 Python code exactly.
+
+## pypinyin 0.55.0 (MIT, `lilia/data/pinyin/`)
+
+`lilia/chat/typos.cpp` ports MaiBot's `src/chat/utils/typo_generator.py`
+(`f9ec367`), which asks pypinyin for readings. `scripts/pinyin_data.py`
+writes them from the PyPI sdist: `pinyin_chars.txt` (each character's first
+TONE3 reading, U+4E00..U+9FFE) and `pinyin_words.txt` (jieba dictionary words
+whose reading in context differs from their characters'). `LICENSE` is
+pypinyin's. Character frequencies are derived from jieba's dictionary, which
+equals MaiBot's `depends-data/char_frequency.json`. Verified on 2026-10-10
+against MaiBot's code: homophone candidates for all 20,991 characters and
+4,000 random dictionary words match.
+
+`lilia/chat/delivery.cpp` ports MaiBot's reply splitter
+(`_split_into_sentence_segments`), packing
+(`_merge_processed_segments_to_max_count`) and `calculate_typing_time` from
+`src/chat/utils/utils.py`. One deliberate difference: a space next to a Latin
+letter or digit never splits (MaiBot: only between two), since writers space
+English words inside Chinese.

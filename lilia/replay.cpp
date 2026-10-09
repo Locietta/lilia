@@ -259,8 +259,10 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         co_return ++next_id;
     };
     responder.observer = [](const store::ChatKey &, const chat::Plan &plan, const std::vector<std::string> &) {
-        if (!plan.reply) {
-            print(std::format("        · 不说话：{}", plan.reason));
+        if (plan.wait > 0) {
+            print(std::format("        · 等 {} 秒：{}", plan.wait, plan.reason));
+        } else if (!plan.reply) {
+            print(std::format("        · {}：{}", plan.follow_up ? "到此为止" : "不说话", plan.reason));
         } else {
             print(std::format("        · 回复 {}（{}{}{}）：{}", plan.target, style_name(plan.style), plan.quote ? "，引用" : "",
                               plan.search ? "，搜索" : "", plan.intent.empty() ? plan.brief : plan.intent));
@@ -270,9 +272,12 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     std::vector<std::string> names = config.chat.aliases;
     names.push_back(config.chat.name);
     i64 message_id = 0;
-    for (const auto &line : lines) {
-        sim = line.t;
-        print(std::format("[{}] {}: {}", clock(sim), line.name, line.text));
+    usize next_line = 0;
+    // One line of the log arrives: printed, then ingested. Returns the chat
+    // when the planner should look.
+    const auto feed = [&](const auto &line) {
+        sim = std::max(sim, line.t);
+        print(std::format("[{}] {}: {}", clock(line.t), line.name, line.text));
         const onebot::MessageEvent event{
             .time = base + sim,
             .self_id = k_replay_self,
@@ -284,11 +289,21 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             .sender = {.user_id = line.uid, .nickname = line.name},
             .message = to_segments(line.text, names),
         };
-        if (const auto chat = responder.ingest(event)) {
+        return responder.ingest(event);
+    };
+    // A planner wait: the clock moves on, and the lines of that time arrive.
+    responder.pause = [&](const store::ChatKey &, i64 seconds) -> Task<> {
+        sim += seconds;
+        while (next_line < lines.size() && lines[next_line].t <= sim) std::ignore = feed(lines[next_line++]);
+        co_return;
+    };
+    while (next_line < lines.size()) {
+        if (const auto chat = feed(lines[next_line++])) {
+            // As turn_worker: look again while messages left from the turn call for it.
             co_await responder.run_turn(*chat);
-            // The look right after a reply (and whoever she still owes an
-            // answer) runs right away, as in turn_worker.
-            for (int extra = 0; extra < 3 && responder.chats[*chat].just_replied; ++extra) co_await responder.run_turn(*chat);
+            auto &state = responder.chats[*chat];
+            for (int extra = 0; extra < 3 && chat::should_plan(state.flow, responder.flow_settings(), responder.now()); ++extra)
+                co_await responder.run_turn(*chat);
         }
     }
     co_await tasks.join();

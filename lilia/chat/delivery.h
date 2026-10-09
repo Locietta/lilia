@@ -24,8 +24,8 @@ struct Segment {
 
 /// MaiBot's rule splitter (_split_into_sentence_segments): breaks at "，"
 /// "," "。" ";", spaces and newlines, dropping the mark; never inside quotes,
-/// next to a colon, beside a dash, or at a space between Latin letters or
-/// digits; a newline always breaks. Neighbouring pieces then merge at random
+/// next to a colon, beside a dash, or at a space next to a Latin letter or
+/// digit (MaiBot: only between two); a newline always breaks. Neighbouring pieces then merge at random
 /// (pairwise, never across a newline) with probability 0.8 for text under 12
 /// characters, 0.4 under 32 and 0.3 otherwise. Text under 3 characters stays
 /// whole, except 1% of the time it goes out one character at a time.

@@ -31,16 +31,31 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
   - The worker waits for the burst to settle (`debounce_seconds`, 2 s when
     addressed, 15 s at most).
   - The planner (`prompts/planner.md`, `planner_model`, thinking off) sees the
-    numbered log with the new messages marked and must call `reply(target,
-quote, style, search, intent)` or `stay_silent(reason)`. If she was
-    addressed, silence is overridden.
+    numbered log with the new messages marked. Like MaiBot's, it works in
+    rounds (2026-10-10), one tool call each: `reply(target, quote, style,
+search, intent)`, `wait(seconds)`, `search_history(query)` or
+    `stay_silent(reason)`, which ends the turn.
+    - After a reply or a wait, the tool result tells it what she said and
+      numbers the messages that came in meanwhile, so it can answer them,
+      wait again or stop.
+    - Limits: 8 rounds and 3 replies per turn, 3 waits in a row (MaiBot's),
+      waits of 1–60 s that new messages do not cut short (as in MaiBot's
+      groups).
+    - If someone called her and the turn ends without answering them, she
+      replies anyway. Replay passes waits in simulated time, feeding the
+      lines of that span.
   - The writer (`prompts/persona.md` + `prompts/writer.md`) sees the log as
     turns (her lines are assistant turns) plus the planner's style and
     intent; `alt_style_probability` swaps in a one-off style. Web search is
     offered only when the planner asks for it.
-  - `delivery` splits the reply into at most 3 messages (one per line, long
-    lines after sentence ends, no final "。") and sleeps a typing delay
-    before each. Only the first message quotes, and only when the planner asks.
+  - `delivery` sends replies the way MaiBot does (2026-10-10).
+    - Casual replies are split at "，,。;", spaces and newlines, then
+      neighbours merge at random. `typos` swaps in a homophone now and then
+      (jieba plus pypinyin), sometimes followed by the correction quoting it.
+      Everything is packed into at most 3 messages.
+    - Only later messages wait for typing: 0.3 s per Han character.
+    - A deliberate long reply goes out whole and untouched.
+    - The first message quotes only when the planner asks.
   - `lilia replay <chat.jsonl>` runs the same ingest and turn code on a
     recorded or synthetic log without NapCat and prints every decision;
     `scripts/replay-remote.sh` runs it on cachy with the live keys.- **`archive/`**: copies the media of allowed chats (pictures, stickers,

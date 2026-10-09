@@ -38,7 +38,11 @@ struct Plan {
     std::string sticker;
     /// Style "sticker": only a sticker, no words.
     bool sticker_only = false;
-    std::string reason; ///< why she stays silent
+    /// The wait tool: seconds to wait before looking again (0: not waiting).
+    i64 wait = 0;
+    /// Decided after she already spoke this turn.
+    bool follow_up = false;
+    std::string reason; ///< why she stays silent or waits
 };
 
 struct PlannerInput {
@@ -67,9 +71,6 @@ struct PlannerInput {
     std::string recall;
     /// Meanings of slang others use in the log ("以下黑话来自…").
     std::string jargon;
-    /// Set on the extra turn right after a reply: the message she answered.
-    /// The other new messages are offered once more.
-    std::optional<i64> just_replied;
 };
 
 /// The planner.md rule about search_history; empty when memory is off.
@@ -91,8 +92,12 @@ struct PlannerRequest {
 PlannerRequest build_planner_request(const PlannerInput &input);
 
 /// Reads the planner's tool call. No call, an unknown tool or an invalid
-/// target means silence.
+/// target means silence; wait is clamped to 1..60 seconds (30 when missing).
 Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vector<i64> &ids);
+
+/// Messages that arrived during a turn, numbered on from the planner's
+/// earlier lines ("#n [HH:MM] 名字(id): 内容"); appends their ids to `ids`.
+std::string number_messages(const std::vector<store::StoredMessage> &messages, std::vector<i64> &ids, i32 utc_offset_minutes);
 
 struct WriterInput {
     std::string persona;
