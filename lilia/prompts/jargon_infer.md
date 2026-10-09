@@ -10,6 +10,7 @@
 - 如果这是一个黑话、俚语或网络用语，请推断它的含义。
 - 如果含义明确（常规词汇），也请说明。
 - 如果上下文信息不足，无法推断含义，请把 no_info 设为 true，meaning 可以留空。
-  {previous_instruction}
+
+{previous_instruction}
 
 调用 record_meaning 提交。meaning 写详细的含义说明（使用场景、来源、具体解释等）。
