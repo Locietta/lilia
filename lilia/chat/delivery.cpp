@@ -312,6 +312,89 @@ std::vector<Segment> pack_segments(std::vector<Segment> segments, usize max_coun
     return packed;
 }
 
+namespace {
+
+bool is_emoji(char32_t c) { return (c >= 0x1F000 && c <= 0x1FAFF) || c == 0x2764 || c == 0x263A || c == 0x2639; }
+
+} // namespace
+
+std::string strip_emoji(std::string_view text, const std::vector<char32_t> &kept, std::vector<char32_t> &removed) {
+    const auto chars = learn::utf8_chars(text);
+    std::string out;
+    bool dropping = false; // right after a removed emoji: its selectors and joiners go too
+    for (const auto &c : chars) {
+        if (is_emoji(c.cp) && !std::ranges::contains(kept, c.cp)) {
+            removed.push_back(c.cp);
+            dropping = true;
+            continue;
+        }
+        if (dropping && (c.cp == 0xFE0F || c.cp == 0x200D)) continue;
+        dropping = false;
+        out += text.substr(c.begin, c.end - c.begin);
+    }
+    if (removed.empty()) return std::string(text);
+    // Tidy the gaps an emoji leaves ("好耶 😂 真的" -> "好耶 真的").
+    std::string tidy;
+    for (const char ch : out) {
+        if (ch == ' ' && (tidy.empty() || tidy.back() == ' ' || tidy.back() == '\n')) continue;
+        if (ch == '\n' && !tidy.empty() && tidy.back() == ' ') tidy.pop_back();
+        tidy += ch;
+    }
+    while (!tidy.empty() && (tidy.back() == ' ' || tidy.back() == '\n')) tidy.pop_back();
+    return tidy;
+}
+
+std::vector<char32_t> emoji_in(const std::vector<std::string> &texts) {
+    std::vector<char32_t> found;
+    for (const auto &text : texts) {
+        for (const auto &c : learn::utf8_chars(text)) {
+            if (is_emoji(c.cp) && !std::ranges::contains(found, c.cp)) found.push_back(c.cp);
+        }
+    }
+    return found;
+}
+
+std::string_view emoji_feeling(char32_t emoji) {
+    switch (emoji) {
+        case U'😂':
+        case U'🤣':
+        case U'😆':
+        case U'😹': return "笑死";
+        case U'😭':
+        case U'😢':
+        case U'🥲': return "哭";
+        case U'😅':
+        case U'😓':
+        case U'😬': return "尴尬";
+        case U'🙈':
+        case U'😳':
+        case U'☺':
+        case U'😊': return "害羞";
+        case U'👀': return "吃瓜";
+        case U'🤔': return "疑惑";
+        case U'😡':
+        case U'😠':
+        case U'💢': return "生气";
+        case U'👍':
+        case U'👌': return "赞同";
+        case U'❤':
+        case U'🥰':
+        case U'😍': return "喜欢";
+        case U'🥺': return "可怜";
+        case U'😏': return "得意";
+        case U'🙄':
+        case U'😑':
+        case U'😐': return "无语";
+        case U'😮':
+        case U'😱':
+        case U'😨':
+        case U'😲': return "震惊";
+        case U'😴':
+        case U'🥱': return "困";
+        default: return {};
+    }
+}
+
 std::chrono::milliseconds typing_delay(std::string_view bubble, double speed) {
     if (speed <= 0) return std::chrono::milliseconds(0);
     const auto chars = learn::utf8_chars(bubble);

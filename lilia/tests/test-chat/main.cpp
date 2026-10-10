@@ -327,6 +327,16 @@ void test_bubbles() {
     require(chat::strip_asides("没写完（笑") == "没写完（笑", "an unclosed bracket stays");
     require(chat::strip_asides("其实——也还行") == "其实，也还行", "a dash becomes a comma");
 
+    std::vector<char32_t> removed;
+    require(chat::strip_emoji("真的要截图给你看吗😂", {}, removed) == "真的要截图给你看吗" && removed == std::vector<char32_t>({U'😂'}),
+            "emoji are removed and reported");
+    removed.clear();
+    require(chat::strip_emoji("好耶 😂 真的 ❤️", {}, removed) == "好耶 真的" && removed.size() == 2, "gaps and selectors tidied");
+    removed.clear();
+    require(chat::strip_emoji("这也太🐔了", chat::emoji_in({"用\"太🐔了\""}), removed) == "这也太🐔了" && removed.empty(),
+            "emoji people use (learned) stay");
+    require(chat::emoji_feeling(U'😂') == "笑死" && chat::emoji_feeling(U'🙈') == "害羞" && chat::emoji_feeling(U'🍎').empty(),
+            "feelings for stickers");
     require(chat::typing_delay("在", 1.0) == std::chrono::milliseconds(1200), "a lone character: 1.2s");
     require(chat::typing_delay("好耶ok", 1.0) == std::chrono::milliseconds(900), "0.3s per Han character, 0.15s per other");
     require(chat::typing_delay("好耶ok", 2.0) == std::chrono::milliseconds(450), "faster typing");

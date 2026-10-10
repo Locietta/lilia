@@ -57,6 +57,20 @@ std::string fit_length(std::string_view text, usize max_code_points);
 /// Characters (UTF-8 code points) in `text`.
 usize count_code_points(std::string_view text);
 
+/// Pictographic emoji in `text` (with their variation selectors and
+/// joiners), except those in `kept`; each removed one is appended to
+/// `removed`. People in QQ groups rarely type emoji unless one is a meme of
+/// its own, while models sprinkle them.
+std::string strip_emoji(std::string_view text, const std::vector<char32_t> &kept, std::vector<char32_t> &removed);
+
+/// Emoji appearing in `texts` (e.g. learned expressions): the ones people
+/// actually use.
+std::vector<char32_t> emoji_in(const std::vector<std::string> &texts);
+
+/// The feeling an emoji stood for, to send as a sticker instead ("笑死" for
+/// 😂); empty when there is no obvious one.
+std::string_view emoji_feeling(char32_t emoji);
+
 /// MaiBot's calculate_typing_time, the pause before the second and later
 /// messages of a reply: 0.3s per Han character and 0.15s per other
 /// character (1.2s for a lone Han character), divided by `speed`; 0 for

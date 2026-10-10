@@ -238,7 +238,7 @@ struct StickerConfig {
     u64 max_bytes = 2ull * 1024 * 1024;
     /// Candidates shown to the pick call, and the pause between her stickers.
     usize candidates = 25;
-    i64 cooldown_seconds = 300;
+    i64 cooldown_seconds = 60;
 };
 
 struct Config {

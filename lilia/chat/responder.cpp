@@ -691,8 +691,25 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
                         plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
                                                                                      settings.long_reply_chars;
-    const auto reply = fit_length(
-        clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes), budget);
+    // Emoji go unless people use them (they show up in learned expressions);
+    // the feeling one stood for becomes a sticker, the way people answer.
+    std::vector<std::string> learned;
+    if (auto rows = r->store.expressions(0); rows.has_value()) {
+        for (auto &row : *rows) learned.push_back(std::move(row.style));
+    }
+    std::vector<char32_t> removed;
+    const auto reply = strip_emoji(
+        fit_length(clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes),
+                   budget),
+        emoji_in(learned), removed);
+    if (!removed.empty() && plan.sticker.empty() && stickers_ready(r)) {
+        for (const auto emoji : removed) {
+            if (const auto feeling = emoji_feeling(emoji); !feeling.empty()) {
+                plan.sticker = std::string(feeling);
+                break;
+            }
+        }
+    }
 
     // Casual replies go out the way MaiBot sends them: split at punctuation,
     // neighbours merged at random, a homophone typo now and then (sometimes
@@ -715,6 +732,12 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     std::vector<std::string> bubbles;
     for (const auto &segment : segments) bubbles.push_back(segment.text);
     if (bubbles.empty()) {
+        // Nothing but emoji: the sticker says it.
+        if (!plan.sticker.empty() && co_await send_sticker(r, chat, plan.sticker + "：" + plan.intent, log_lines)) {
+            if (r->observer) r->observer(chat, plan, {"[表情]"});
+            note_spoke(state.flow, r->now(), target.sender_id);
+            co_return Delivered{.sent = true, .said = "[表情包]"};
+        }
         log::warn("writer returned an empty reply for {}", describe(chat));
         co_return Delivered{};
     }

@@ -112,7 +112,8 @@ std::optional<usize> parse_target(std::string_view text) {
 
 std::string_view style_instruction(ReplyStyle style) {
     switch (style) {
-        case ReplyStyle::SHORT: return "这次就一句短话，一两个词也行。";
+        // MaiBot's 简短表达: "允许句子残缺，奇怪表达，倒装，省略……"
+        case ReplyStyle::SHORT: return "这次就一句短话，一两个词也行。允许句子残缺、倒装、省略，怎么省力怎么说。";
         case ReplyStyle::NORMAL: return "这次一两句话。";
         case ReplyStyle::LONG: return "这次是有意发一整条长消息，可以分几行把事情讲清楚，还是聊天的口气，三百字以内。";
     }
@@ -274,9 +275,9 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
 
 std::string_view sticker_rule(bool enabled) {
     if (!enabled) return "";
-    return "- 想配个表情包时，在 reply 里填 "
-           "sticker（想表达的感觉，比如\"无语\"\"笑死\"\"好耶\"），她会在说完话后配一张；只想回一张表情包、不说话时，"
-           "style 选 sticker。别太频繁，大多数回复不需要表情包，刚发过就先别发。\n";
+    return "- 群里大家常用表情包回应。她想表达的主要是情绪或反应（笑死、无语、震惊、赞同、委屈）时，style 选 sticker，"
+           "只回一张表情包往往比打字自然；说完话还想补个情绪时，在 reply 里填 sticker（想表达的感觉，比如\"无语\"\"笑死\"\"好耶\"），"
+           "她会在说完话后配一张。认真回答问题、说正事时不用表情包；刚发过一张就隔一会儿。\n";
 }
 
 std::string_view memory_rule(bool enabled) {
