@@ -6,6 +6,7 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/chat/flow.h>
+#include <lilia/chat/schedule.h>
 #include <lilia/chat/trigger.h>
 #include <lilia/chat/typos.h>
 #include <lilia/learn/segment.h>
@@ -357,6 +358,32 @@ void test_bubbles() {
     require(chat::typing_delay("在", 0.0) == std::chrono::milliseconds(0), "speed 0 sends immediately");
 }
 
+void test_schedule() {
+    using namespace std::chrono;
+    // 2026-10-10 00:00 in UTC+8.
+    const i64 midnight = duration_cast<seconds>((sys_days{2026y / 10 / 9} + 16h).time_since_epoch()).count();
+    lilia::ScheduleConfig schedule{.enabled = true};
+    const auto at = [&](i64 minutes) { return chat::presence_at(schedule, midnight + minutes * 60, 480); };
+    require(at(3 * 60).presence == chat::Presence::ASLEEP && at(3 * 60).until == midnight + 7 * 3600, "asleep at 03:00 until 07:00");
+    require(at(90).presence == chat::Presence::ASLEEP && at(7 * 60).presence != chat::Presence::ASLEEP &&
+                at(23 * 60).presence == chat::Presence::AWAKE,
+            "awake from 07:00; nobody is busy at 23:00");
+    const auto stretches = chat::busy_stretches(schedule, midnight + 12 * 3600, 480);
+    require(stretches.size() == 2 && stretches == chat::busy_stretches(schedule, midnight + 20 * 3600, 480), "the same stretches all day");
+    for (const auto &[start, end] : stretches) {
+        require(start >= midnight + 9 * 3600 && end <= midnight + 23 * 3600 && end - start >= 20 * 60 && end - start <= 60 * 60,
+                "busy between 09:00 and 22:00, 20-60 minutes");
+        const auto busy = chat::presence_at(schedule, (start + end) / 2, 480);
+        require(busy.presence == chat::Presence::BUSY && busy.until == end, "busy inside a stretch");
+    }
+    schedule.sleep_start = "23:30";
+    require(at(23 * 60 + 45).presence == chat::Presence::ASLEEP && at(23 * 60 + 45).until == midnight + 86'400 + 7 * 3600,
+            "a night across midnight ends tomorrow morning");
+    schedule.enabled = false;
+    require(at(3 * 60).presence == chat::Presence::AWAKE, "off: always awake");
+    require(chat::parse_clock("07:05") == 425 && !chat::parse_clock("7") && !chat::parse_clock("25:00"), "clock parsing");
+}
+
 /// Expected candidates come from MaiBot's ChineseTypoGenerator.
 void test_typos() {
     require(chat::reading_of(U'做') == "zuo4" && chat::readings_of("银行") == std::vector<std::string>({"yin2", "hang2"}),
@@ -431,6 +458,7 @@ int main() {
         test_flow();
         test_bubbles();
         test_typos();
+        test_schedule();
         test_clean_reply();
         return 0;
     } catch (const std::exception &e) {

@@ -25,6 +25,7 @@
 #include <xmake/version/lilia.hpp>
 
 #include <lilia/chat/delivery.h>
+#include <lilia/chat/schedule.h>
 #include <lilia/chat/trigger.h>
 #include <lilia/chat/typos.h>
 #include <lilia/log.h>
@@ -252,6 +253,64 @@ Task<> debounce(Responder *r, const store::ChatKey &chat) {
     }
 }
 
+/// Waits until `until` (unix seconds), looking every half minute; returns
+/// early once someone calls her, if `called_ends_it`.
+Task<> wait_until(Responder *r, const store::ChatKey &chat, i64 until, bool called_ends_it) {
+    for (;;) {
+        const i64 left = until - r->now();
+        if (left <= 0 || (called_ends_it && r->chats[chat].flow.addressed)) co_return;
+        co_await lighter::sleep(std::chrono::seconds(std::min<i64>(left, 30)));
+    }
+}
+
+i64 random_seconds(Responder *r, u32 low, u32 high) {
+    return std::uniform_int_distribution<i64>(std::min(low, high), std::max(low, high))(r->rng);
+}
+
+/// Her day, before a turn: asleep she waits until morning (whoever called
+/// her is answered then); busy she waits until she is back, or answers a
+/// call a few minutes late; awake she takes a moment to read. Sets the note
+/// the next turn's planner and writer see.
+Task<> live_presence(Responder *r, const store::ChatKey &chat) {
+    const auto &schedule = r->config.chat.schedule;
+    const auto offset = r->config.chat.utc_offset_minutes;
+    for (;;) {
+        auto &state = r->chats[chat];
+        const auto presence = presence_at(schedule, r->now(), offset);
+        if (presence.presence == Presence::ASLEEP) {
+            log::info("{} is asleep until {}", describe(chat), clock_of(presence.until, offset));
+            co_await wait_until(r, chat, presence.until, false);
+            state.presence_note = std::format(
+                "她刚睡醒：下面的新消息大多是她睡着时（{}–{}）发的。有人叫她的话现在回，可以说刚醒、刚看到；已经没意义的就不用回。",
+                schedule.sleep_start, schedule.sleep_end);
+            continue;
+        }
+        if (presence.presence == Presence::BUSY) {
+            if (!state.flow.addressed) {
+                log::info("{}: busy until {}", describe(chat), clock_of(presence.until, offset));
+                co_await wait_until(r, chat, presence.until, true);
+                if (!state.flow.addressed) {
+                    state.presence_note = "她刚才在忙，现在才回来看群。";
+                    continue;
+                }
+            }
+            // Called while busy: she sees it a few minutes later.
+            const i64 late =
+                std::min(presence.until - r->now(), random_seconds(r, schedule.busy_reply_min_seconds, schedule.busy_reply_max_seconds));
+            log::info("{}: busy, answers in {}s", describe(chat), late);
+            co_await lighter::sleep(std::chrono::seconds(std::max<i64>(late, 0)));
+            state.presence_note = "她刚才在忙，现在才看到有人叫她。";
+        }
+        break;
+    }
+    if (!schedule.enabled) co_return;
+    // A moment to read before reacting.
+    const bool called = r->chats[chat].flow.addressed.has_value();
+    co_await lighter::sleep(std::chrono::seconds(called ?
+                                                     random_seconds(r, schedule.read_called_min_seconds, schedule.read_called_max_seconds) :
+                                                     random_seconds(r, schedule.read_min_seconds, schedule.read_max_seconds)));
+}
+
 Task<> turn_worker(Responder *r, store::ChatKey chat) {
     // Leave the reader loop's call stack before doing any work.
     co_await lighter::yield();
@@ -261,7 +320,10 @@ Task<> turn_worker(Responder *r, store::ChatKey chat) {
             state.busy = false;
             co_return;
         }
-        if (r->realtime) co_await debounce(r, chat);
+        if (r->realtime) {
+            co_await live_presence(r, chat);
+            co_await debounce(r, chat);
+        }
         co_await r->run_turn(chat);
     }
 }
@@ -664,7 +726,8 @@ struct Delivered {
 /// text (after an optional web search and the expression selection) sent the
 /// way MaiBot sends replies, plus a sticker when asked. Records what she said.
 Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vector<store::StoredMessage> log_lines,
-                        store::StoredMessage target, ChatInfo info, i64 started, std::string remembered, std::string self_notes) {
+                        store::StoredMessage target, ChatInfo info, i64 started, std::string remembered, std::string self_notes,
+                        std::string presence) {
     auto &state = r->chats[chat];
     const auto &settings = r->config.chat;
     if (plan.sticker_only) {
@@ -711,6 +774,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .remembered = remembered,
         .known = known_about(r, target),
         .self_notes = self_notes,
+        .presence = presence,
         .previous_reply = previous == state.replied.end() ? std::string() : previous->second,
         .voice = r->config.learning.enabled ? sample_voice(r->store, k_voice_samples) : std::vector<std::string>{},
     });
@@ -916,6 +980,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     }
     if (memory) planner_input.recall = co_await memory->recall(chat, log_lines);
     planner_input.jargon = jargon_notes(this, chat, log_lines);
+    planner_input.presence = std::exchange(state.presence_note, {});
     if (memory && config.memory.facts) {
         // What she said about herself that bears on the last few lines.
         std::string context;
@@ -971,7 +1036,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         remember_decision(state, std::format("[{}] 回复了{}的「{}」：{}", clock_of(now(), settings.utc_offset_minutes),
                                              target->sender_name.empty() ? std::to_string(target->sender_id) : target->sender_name,
                                              bounded_utf8(target->text, 60), plan.intent.empty() ? plan.brief : plan.intent));
-        auto delivered = co_await deliver(this, chat, plan, log_lines, *target, info, started, remembered, planner_input.self_notes);
+        auto delivered = co_await deliver(this, chat, plan, log_lines, *target, info, started, remembered, planner_input.self_notes,
+                                          planner_input.presence);
         if (delivered.sent && addressed && plan.target == *addressed) answered = true;
         co_return delivered;
     };

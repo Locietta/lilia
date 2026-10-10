@@ -94,6 +94,28 @@ struct TypoConfig {
     bool correction_quote = true;
 };
 
+/// Her day (live only; replay and tests ignore it): asleep at night, a few
+/// busy stretches, and a moment to read before reacting.
+struct ScheduleConfig {
+    bool enabled = false;
+    /// Local "HH:MM". Asleep she does nothing; whoever called her is answered
+    /// once she is up.
+    std::string sleep_start = "01:30";
+    std::string sleep_end = "07:00";
+    /// Busy stretches per day, at random times between 09:00 and 22:00 (the
+    /// same all day). Busy, she does not chime in; a call is answered late.
+    u32 busy_blocks = 2;
+    u32 busy_min_minutes = 20;
+    u32 busy_max_minutes = 60;
+    u32 busy_reply_min_seconds = 60;
+    u32 busy_reply_max_seconds = 300;
+    /// Before reacting: called, and otherwise.
+    u32 read_called_min_seconds = 1;
+    u32 read_called_max_seconds = 8;
+    u32 read_min_seconds = 3;
+    u32 read_max_seconds = 20;
+};
+
 struct ChatConfig {
     /// Only these groups are logged and answered.
     std::vector<i64> groups;
@@ -124,6 +146,7 @@ struct ChatConfig {
     /// Typing-delay speed for multi-message replies; 0 sends immediately.
     double typing_speed = 1.0;
     TypoConfig typos;
+    ScheduleConfig schedule;
     /// How long a turn waits for new images to be described.
     u32 image_wait_seconds = 8;
     /// Input plus output tokens per local calendar day across all chats.

@@ -217,6 +217,7 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
     }
     user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
                               std::format("\n没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
+    if (!input.presence.empty()) user += "\n" + input.presence;
     if (!input.people.empty()) {
         // MaiBot's person profiles: background for the planner only.
         user += "\n\n群友资料（她已经知道这些，别让她再问一遍；内部参考，别逐字复述；和眼前的聊天冲突时以聊天为准）：\n" + input.people;
@@ -420,6 +421,7 @@ provider::History build_writer_history(const WriterInput &input) {
         note += std::format("\n【你知道的关于{}的事，用得上就自然地用，别逐条复述，也别再问一遍：{}】", display_name(input.target),
                             input.known);
     }
+    if (!input.presence.empty()) note += std::format("\n【{}】", input.presence);
     if (!input.self_notes.empty()) {
         note += std::format("\n【你以前说过的关于你自己的事，说话要和这些一致、别自相矛盾（同一件事以日期新的为准），不用特意提起】\n{}",
                             input.self_notes);

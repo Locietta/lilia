@@ -69,6 +69,8 @@ struct PlannerInput {
     std::string people;
     /// What she has said about herself before ("- [MM-DD] 她……").
     std::string self_notes;
+    /// Why she is only now looking (just woke up, was busy); empty usually.
+    std::string presence;
     /// A summary of older chat the recent messages bring to mind.
     std::string recall;
     /// Meanings of slang others use in the log ("以下黑话来自…").
@@ -124,6 +126,8 @@ struct WriterInput {
     /// What she has said about herself before ("- [MM-DD] 她……"), to stay
     /// consistent with.
     std::string self_notes;
+    /// Why she is only now answering (just woke up, was busy); empty usually.
+    std::string presence;
     /// What she already said to this same target, when she answers it again.
     std::string previous_reply;
     /// A random handful of phrases people in the groups actually say, to

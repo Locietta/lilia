@@ -91,6 +91,9 @@ struct Responder {
         std::deque<std::string> decisions;
         /// What she said to recent targets (message id, her text), newest last.
         std::deque<std::pair<i64, std::string>> replied;
+        /// Why she is only now looking (just woke up, was busy), for the
+        /// next turn; consumed by it.
+        std::string presence_note;
         /// When she last sent a sticker here (unix seconds).
         i64 last_sticker = 0;
     };
