@@ -84,11 +84,16 @@ struct ImageBlock {
 using ContentBlock = std::variant<TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, RedactedThinkingBlock, ServerToolUseBlock,
                                   WebSearchToolResultBlock, WebFetchToolResultBlock, ImageBlock>;
 
+struct CacheControl {
+    std::string type = "ephemeral";
+};
+
 struct Tool {
     std::optional<std::string> type;
     std::string name;
     std::optional<std::string> description;
     std::optional<provider::InputSchema> input_schema;
+    std::optional<CacheControl> cache_control;
 };
 
 struct Message {
@@ -119,6 +124,8 @@ struct MessageRequest {
     std::optional<OutputConfig> output_config;
     std::optional<ToolChoice> tool_choice;
     std::optional<double> temperature;
+    /// Automatic prompt caching: the breakpoint goes on the last cacheable block.
+    std::optional<CacheControl> cache_control;
 };
 
 struct Model {
@@ -916,9 +923,12 @@ Result<std::string> encode_complete_request(const provider::History &history, co
                 case provider::ToolKind::WEB_FETCH: encoded_tools.push_back({.type = "web_fetch_20250910", .name = "web_fetch"}); break;
             }
         }
+        // Every call offers the same tools: cache them on their own too.
+        if (options.prompt_cache) encoded_tools.back().cache_control = wire::CacheControl{};
         request.tools = std::move(encoded_tools);
         if (options.require_tool) request.tool_choice = wire::MessageRequest::ToolChoice{.type = "any"};
     }
+    if (options.prompt_cache) request.cache_control = wire::CacheControl{};
     request.temperature = options.temperature;
     if (options.reasoning_effort) {
         request.thinking = wire::MessageRequest::Thinking{};

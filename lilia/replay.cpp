@@ -89,6 +89,7 @@ provider::Provider make_client(const ModelConfig &model, const std::string &base
         .thinking_off = thinking_off.empty() ? "disabled" : thinking_off,
         .require_tool = require_tool,
         .max_tokens = max_tokens,
+        .prompt_cache = name.starts_with("claude"),
     });
 }
 
@@ -124,6 +125,7 @@ provider::Provider make_writer(const ModelConfig &model) {
         .thinking_off = model.writer_thinking_off.empty() ? "disabled" : model.writer_thinking_off,
         .temperature = model.writer_temperature,
         .max_tokens = model.max_tokens,
+        .prompt_cache = model.model.starts_with("claude"),
     });
 }
 
@@ -142,6 +144,7 @@ std::vector<chat::Responder::NamedProvider> make_writer_fallbacks(const ModelCon
                 .thinking_off = fallback.thinking_off.empty() ? "disabled" : fallback.thinking_off,
                 .temperature = model.writer_temperature,
                 .max_tokens = model.max_tokens,
+                .prompt_cache = fallback.model.starts_with("claude"),
             }),
         });
     }

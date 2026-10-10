@@ -42,6 +42,11 @@ struct ClientOptions {
     u32 max_tokens = 8192;
     usize max_retries = 2;
     std::chrono::milliseconds initial_retry_delay{500};
+    /// Ask for Anthropic prompt caching: on the whole request (automatic
+    /// caching, so each tool round reuses the one before) and on the last
+    /// tool. Claude only caches when asked; DeepSeek and MiniMax cache by
+    /// themselves and need not see the field.
+    bool prompt_cache = false;
 };
 
 /// Anthropic Messages API client, conforming to provider::ProviderFacade.
