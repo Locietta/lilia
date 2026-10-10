@@ -115,6 +115,8 @@ struct Responder {
         provider::Provider provider;
     };
     std::vector<NamedProvider> writer_fallbacks;
+    /// Tried in order when a `planner` call fails.
+    std::vector<NamedProvider> planner_fallbacks;
     std::filesystem::path persona_path;
     std::string persona;
     /// The writer's rules (writer.md); replays may swap in a variant.

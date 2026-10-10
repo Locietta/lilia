@@ -117,6 +117,7 @@ Task<int> run_app(const Config &config) {
     chat::Responder responder(config, *store, make_planner(config.model), make_searcher(config.model), make_writer(config.model),
                               data_dir / "persona.md", [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     responder.writer_fallbacks = make_writer_fallbacks(config.model);
+    responder.planner_fallbacks = make_planner_fallbacks(config.model);
     archive::Archiver archiver(config.archive, data_dir, *store);
     if (!config.model.vision_model.empty()) {
         archiver.vision = make_vision(config.model);

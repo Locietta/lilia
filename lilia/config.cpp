@@ -100,6 +100,7 @@ Result<Config> load_config(const std::filesystem::path &path, bool resolve_secre
         config->model.writer_api_key.clear();
         config->model.planner_api_key.clear();
         for (auto &fallback : config->model.writer_fallbacks) fallback.api_key.clear();
+        for (auto &fallback : config->model.planner_fallbacks) fallback.api_key.clear();
         expand_paths(*config);
         return config;
     }
@@ -107,7 +108,8 @@ Result<Config> load_config(const std::filesystem::path &path, bool resolve_secre
     const auto literal = [](const std::string &secret) { return !secret.empty() && !is_reference(secret); };
     if (literal(config->onebot.access_token) || literal(config->model.api_key) || literal(config->model.writer_api_key) ||
         literal(config->model.planner_api_key) ||
-        std::ranges::any_of(config->model.writer_fallbacks, [&](const WriterFallback &f) { return literal(f.api_key); })) {
+        std::ranges::any_of(config->model.writer_fallbacks, [&](const ModelFallback &f) { return literal(f.api_key); }) ||
+        std::ranges::any_of(config->model.planner_fallbacks, [&](const ModelFallback &f) { return literal(f.api_key); })) {
         auto checked = check_private(path);
         if (checked.has_error()) return lighter::outcome_error(std::move(checked).error());
     }
@@ -130,6 +132,11 @@ Result<Config> load_config(const std::filesystem::path &path, bool resolve_secre
 
     for (auto &fallback : config->model.writer_fallbacks) {
         auto fallback_key = resolve_secret(fallback.api_key, "model.writer_fallbacks.api_key");
+        if (fallback_key.has_error()) return lighter::outcome_error(std::move(fallback_key).error());
+        fallback.api_key = *std::move(fallback_key);
+    }
+    for (auto &fallback : config->model.planner_fallbacks) {
+        auto fallback_key = resolve_secret(fallback.api_key, "model.planner_fallbacks.api_key");
         if (fallback_key.has_error()) return lighter::outcome_error(std::move(fallback_key).error());
         fallback.api_key = *std::move(fallback_key);
     }

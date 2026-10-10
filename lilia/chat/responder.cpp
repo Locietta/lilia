@@ -235,6 +235,19 @@ Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, 
     co_return std::move(items);
 }
 
+/// A planner-model call, then each planner fallback in turn while they fail.
+Task<std::optional<std::vector<provider::OutputItem>>> call_planner(Responder *r, std::string_view purpose, const store::ChatKey &chat,
+                                                                    const provider::History &history,
+                                                                    const std::vector<provider::ToolDefinition> &tools) {
+    auto items = co_await call_model(r, r->planner, r->config.model.planner_model, purpose, chat, history, tools);
+    for (auto &fallback : r->planner_fallbacks) {
+        if (items) break;
+        log::warn("planner fallback for {}: {}", describe(chat), fallback.model);
+        items = co_await call_model(r, fallback.provider, fallback.model, purpose, chat, history, tools);
+    }
+    co_return items;
+}
+
 /// Text after the last non-text item; earlier text is narration such as
 /// "let me search for that".
 std::string final_text(const std::vector<provider::OutputItem> &items) {
@@ -502,7 +515,7 @@ Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, 
     for (const auto &row : candidates) input.candidates.push_back(std::format("当{}时，可以{}", row.situation, row.style));
     const auto prompt = fill_template(embedded(xmake::select_md), {{"name", r->config.chat.name}});
     const auto request = learn::build_selection_request(prompt, input);
-    const auto items = co_await call_model(r, r->planner, r->config.model.planner_model, "select", chat, request.history, request.tools);
+    const auto items = co_await call_planner(r, "select", chat, request.history, request.tools);
     if (!items) co_return std::vector<std::string>{};
     std::vector<std::string> picked;
     std::vector<i64> ids;
@@ -559,7 +572,7 @@ Task<bool> send_sticker(Responder *r, store::ChatKey chat, std::string feeling, 
     }
     const auto prompt = fill_template(embedded(xmake::sticker_pick_md), {{"name", r->config.chat.name}});
     const auto request = sticker::build_pick_request(prompt, recent, feeling, candidates);
-    const auto items = co_await call_model(r, r->planner, r->config.model.planner_model, "sticker", chat, request.history, request.tools);
+    const auto items = co_await call_planner(r, "sticker", chat, request.history, request.tools);
     if (!items) co_return false;
     const auto picks = learn::parse_picks(*items, "pick_sticker", "ids", candidates.size(), 1);
     if (picks.empty()) {
@@ -616,7 +629,7 @@ Task<> learn_facts(Responder *r, store::ChatKey chat, store::StoredMessage targe
                                                     log.end());
     const auto prompt = fill_template(embedded(xmake::facts_md), {{"name", r->config.chat.name}});
     const auto request = memory::build_fact_request(prompt, speaker(r, target), own, context, r->config.chat.name);
-    const auto items = co_await call_model(r, r->planner, r->config.model.planner_model, "facts", chat, request.history, request.tools);
+    const auto items = co_await call_planner(r, "facts", chat, request.history, request.tools);
     if (!items) co_return;
     const auto facts = memory::parse_facts(*items, own);
     for (const auto &fact : facts) {
@@ -642,8 +655,7 @@ Task<> learn_self_facts(Responder *r, store::ChatKey chat, std::vector<store::St
                                                     log.end());
     const auto prompt = fill_template(embedded(xmake::self_facts_md), {{"name", r->config.chat.name}});
     const auto request = memory::build_fact_request(prompt, r->config.chat.name, own, context, r->config.chat.name);
-    const auto items =
-        co_await call_model(r, r->planner, r->config.model.planner_model, "self facts", chat, request.history, request.tools);
+    const auto items = co_await call_planner(r, "self facts", chat, request.history, request.tools);
     if (!items) co_return;
     for (const auto &fact : memory::parse_facts(*items, own)) {
         const auto &source = own[fact.source];
@@ -1129,7 +1141,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         // Right after a sticker, no second one.
         if (now() - state.last_sticker < config.stickers.cooldown_seconds)
             std::erase_if(offered, [](const auto &tool) { return tool.name == "send_sticker"; });
-        const auto planned = co_await call_model(this, planner, config.model.planner_model, "planner", chat, history, offered);
+        const auto planned = co_await call_planner(this, "planner", chat, history, offered);
         if (!planned) break;
         for (const auto &item : *planned) provider::append_output_item(history, item);
         const auto call_id = first_call_id(*planned);

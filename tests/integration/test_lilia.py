@@ -73,6 +73,7 @@ def text_block(index, text):
 
 
 BROKEN_WRITER = "broken-writer"
+BROKEN_PLANNER = "broken-planner"
 WRITER_TIMEOUT = 2
 
 
@@ -102,14 +103,14 @@ def start_model_server():
                 state["errors"].append(str(error))
                 self.send_error(500, str(error))
                 return
-            if body.get("model") == BROKEN_WRITER:
-                # The primary writer is down; lilia must fall back.
+            if body.get("model") in (BROKEN_WRITER, BROKEN_PLANNER):
+                # The primary writer or planner is down; lilia must fall back.
                 error = json.dumps(
                     {
                         "type": "error",
                         "error": {
                             "type": "invalid_request_error",
-                            "message": "writer is down",
+                            "message": f"{body.get('model')} is down",
                         },
                     }
                 )
@@ -544,6 +545,9 @@ def test_reply_and_reconnect(tmp_path):
                     "base_url": f"http://127.0.0.1:{model.server_port}",
                     "model": BROKEN_WRITER,
                     "writer_fallbacks": [{"model": "fake-model"}],
+                    "planner_model": BROKEN_PLANNER,
+                    "planner_fallbacks": [{"model": "fake-model"}],
+                    "helper_model": "fake-model",
                     "writer_timeout_seconds": WRITER_TIMEOUT,
                     "api_key": "$LILIA_TEST_KEY",
                 },
@@ -588,7 +592,7 @@ def test_reply_and_reconnect(tmp_path):
     reviews = [b for b in model_state["bodies"] if "review_expressions" in offered(b)]
     jargons = [b for b in model_state["bodies"] if "record_jargon" in offered(b)]
     visions = [b for b in model_state["bodies"] if has_image(b)]
-    turns = [
+    calls_in_order = [
         b
         for b in model_state["bodies"]
         if b not in learners
@@ -596,6 +600,21 @@ def test_reply_and_reconnect(tmp_path):
         and b not in jargons
         and b not in visions
     ]
+    # Every planner call fails once and goes to the planner fallback.
+    broken_planners = [
+        i for i, b in enumerate(calls_in_order) if b["model"] == BROKEN_PLANNER
+    ]
+    assert len(broken_planners) == 2, "both planner rounds hit the broken planner"
+    for i in broken_planners:
+        retried = calls_in_order[i + 1]
+        assert retried["model"] == "fake-model", "the planner fallback is tried next"
+        assert retried["messages"] == calls_in_order[i]["messages"], (
+            "the planner fallback gets the same request"
+        )
+        assert retried.get("tool_choice") == {"type": "any"}, (
+            "the fallback keeps the planner's tool forcing"
+        )
+    turns = [b for b in calls_in_order if b["model"] != BROKEN_PLANNER]
     assert len(visions) == 1, "the picture is described once; voice is not an image"
     image = visions[0]["messages"][0]["content"][0]
     assert image["source"]["media_type"] == "image/png"
@@ -685,11 +704,17 @@ def test_reply_and_reconnect(tmp_path):
     assert calls == [
         # The model column is what the response reports; the fake says fake-model.
         (GROUP, "fake-model", 6, 9, 0),
+        (GROUP, BROKEN_PLANNER, 0, 0, 1),
         (GROUP, "fake-model", 5, 3, 0),
         (GROUP, BROKEN_WRITER, 0, 0, 1),
         (GROUP, "fake-model", 10, 12, 0),
+        (GROUP, BROKEN_PLANNER, 0, 0, 1),
         (GROUP, "fake-model", 5, 3, 0),
-    ], ("vision, planner, failed writer, fallback writer, planner again", calls)
+    ], (
+        "vision, failed planner, planner fallback, failed writer, fallback writer, "
+        "failed planner, planner fallback",
+        calls,
+    )
 
     media = db.execute(
         "SELECT chat_id, message_id, segment_index, kind, status, sha1, path, bytes, error, description "

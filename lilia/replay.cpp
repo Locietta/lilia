@@ -102,6 +102,19 @@ provider::Provider make_planner(const ModelConfig &model) {
                        own ? model.planner_thinking_off : std::string());
 }
 
+std::vector<chat::Responder::NamedProvider> make_planner_fallbacks(const ModelConfig &model) {
+    std::vector<chat::Responder::NamedProvider> fallbacks;
+    for (const auto &fallback : model.planner_fallbacks) {
+        fallbacks.push_back({
+            .model = fallback.model,
+            .provider = make_client(model, fallback.base_url.empty() ? model.base_url : fallback.base_url,
+                                    fallback.api_key.empty() ? model.api_key : fallback.api_key, fallback.model, model.planner_max_tokens,
+                                    model.planner_force_tool, !fallback.api_key.empty() && fallback.bearer, fallback.thinking_off),
+        });
+    }
+    return fallbacks;
+}
+
 provider::Provider make_vision(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.vision_model, 400);
 }
@@ -229,6 +242,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         responder.writer_rules.assign(std::istreambuf_iterator<char>(input), {});
     }
     responder.writer_fallbacks = make_writer_fallbacks(config.model);
+    responder.planner_fallbacks = make_planner_fallbacks(config.model);
     sticker::Collector collector(config.stickers, config.data_dir, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (stickers) {
         auto source = store::Store::open_readonly(*stickers);

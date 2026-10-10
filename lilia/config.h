@@ -21,7 +21,8 @@ struct OneBotConfig {
 };
 
 /// Another writer to try when the previous one fails or returns nothing.
-struct WriterFallback {
+/// A backup model for the writer or the planner, tried when the main one fails.
+struct ModelFallback {
     std::string model;
     std::string base_url; ///< empty means ModelConfig::base_url
     std::string api_key;  ///< secret; empty means ModelConfig::api_key
@@ -64,6 +65,9 @@ struct ModelConfig {
     /// claude-sonnet-5-5) reject that; without it the prompt still asks for
     /// a tool, and an answer without one counts as staying silent.
     bool planner_force_tool = true;
+    /// Tried in order when a planner call fails (outage, rate limit, a used-up
+    /// subscription window). They get the planner's tool forcing and limits.
+    std::vector<ModelFallback> planner_fallbacks;
     /// Deadlines (seconds) for one model call, retries included. Past them a
     /// call counts as failed, so a hung request cannot leave her silent.
     u32 timeout_seconds = 30;
@@ -71,7 +75,7 @@ struct ModelConfig {
     u32 search_timeout_seconds = 90;
     /// Tried in order when the writer call fails (outage, rate limit) or
     /// comes back empty.
-    std::vector<WriterFallback> writer_fallbacks;
+    std::vector<ModelFallback> writer_fallbacks;
     /// Writer sampling temperature; unset uses the provider default.
     std::optional<double> writer_temperature;
     /// Describes images and stickers (on `base_url`); empty disables it.
