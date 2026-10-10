@@ -1,6 +1,8 @@
 #pragma once
 
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <lilia/store/store.h>
@@ -42,5 +44,18 @@ bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now);
 void note_silent(Flow &flow, i64 now);
 
 void note_spoke(Flow &flow, i64 now, i64 partner = 0);
+
+/// Text QQ users would repeat (复读): short, plain text (no media, mention or
+/// command).
+bool repeatable(std::string_view text);
+
+/// A repeat chain at the end of `log` (oldest first): the newest message's
+/// text and how many people in a row sent it. Nothing when it is hers, is not
+/// repeatable, or she already joined this chain.
+struct RepeatChain {
+    std::string text;
+    usize people = 0;
+};
+std::optional<RepeatChain> repeat_chain(const std::vector<store::StoredMessage> &log);
 
 } // namespace lilia::chat

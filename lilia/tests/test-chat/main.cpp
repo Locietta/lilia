@@ -121,9 +121,26 @@ void test_planner() {
     require(user.find("以下是新消息") < user.find("#3 "), "the new messages are marked");
     require(user.find("以下是新消息") > user.find("#2 "), "old lines come before the marker");
     require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");
-    require(request.tools.size() == 3 && request.tools[0].name == "reply" && request.tools[1].name == "wait" &&
-                request.tools[2].name == "stay_silent",
-            "reply, wait, stay_silent");
+    require(request.tools.size() == 4 && request.tools[0].name == "reply" && request.tools[1].name == "repeat" &&
+                request.tools[2].name == "wait" && request.tools[3].name == "stay_silent",
+            "reply, repeat, wait, stay_silent");
+    const auto repeated = chat::parse_plan({provider::OutputItem(tool_call("repeat", R"({"target":"#3"})"))}, request.ids);
+    require(repeated.repeat && !repeated.reply && repeated.target == 104, "repeat a message");
+
+    // 复读 chains: the same short text from different people in a row.
+    std::vector<store::StoredMessage> chain{stored(1, t, "a", "前面的"), stored(2, t, "b", "6"), stored(3, t, "c", "6")};
+    require(chat::repeat_chain(chain) && chat::repeat_chain(chain)->people == 2 && chat::repeat_chain(chain)->text == "6",
+            "two people repeating");
+    chain.push_back(stored(4, t, "c", "6"));
+    chain.back().sender_id = chain[2].sender_id; // c again
+    require(chat::repeat_chain(chain)->people == 2, "people, not messages");
+    chain.push_back(stored(5, t, "闭锁", "6", true));
+    require(!chat::repeat_chain(chain), "her own line ends it");
+    chain.push_back(stored(6, t, "d", "6"));
+    require(!chat::repeat_chain(chain), "she already joined this chain");
+    require(chat::repeatable("6") && chat::repeatable("我超 原") && !chat::repeatable("[图片]") && !chat::repeatable("@莉莉娅 在吗") &&
+                !chat::repeatable(std::string(30, 'a')) && !chat::repeatable("/status"),
+            "what can be repeated");
 
     using provider::OutputItem;
     const auto reply = chat::parse_plan(

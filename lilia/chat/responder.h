@@ -94,6 +94,8 @@ struct Responder {
         /// Why she is only now looking (just woke up, was busy), for the
         /// next turn; consumed by it.
         std::string presence_note;
+        /// The text of the last 复读 chain she joined (once a chain).
+        std::string repeated;
         /// When she last laughed (草, www) here (unix seconds).
         i64 last_laugh = 0;
         /// When she last poked each person back (unix seconds).

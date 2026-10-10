@@ -76,6 +76,8 @@ constexpr usize k_self_facts = 6;
 constexpr usize k_self_context = 4;
 /// Poked, she pokes back this often, at most once per person in this many seconds.
 constexpr double k_poke_back_chance = 0.7;
+/// Messages looked at for a 复读 chain.
+constexpr usize k_repeat_lookback = 8;
 /// After she laughed (草, www), a leading laugh is dropped for this long.
 constexpr i64 k_laugh_gap_seconds = 600;
 constexpr i64 k_poke_back_seconds = 60;
@@ -273,6 +275,17 @@ Task<bool> call_action(Responder *r, std::string action, std::string params) {
         co_return false;
     }
     co_return true;
+}
+
+/// Joins a 复读 chain: the same text again after a moment.
+Task<> join_repeat(Responder *r, store::ChatKey chat, std::string text) {
+    if (r->realtime) co_await lighter::sleep(std::chrono::seconds(random_seconds(r, 1, 4)));
+    if (!co_await send_and_record(r, chat, {onebot::text_segment(text)})) co_return;
+    auto &state = r->chats[chat];
+    note_spoke(state.flow, r->now(), 0);
+    remember_decision(state, std::format("[{}] 跟着复读了「{}」", clock_of(r->now(), r->config.chat.utc_offset_minutes), text));
+    if (r->observer) r->observer(chat, {.reply = true, .intent = "复读"}, {text});
+    log::info("{} joins the 复读: {}", describe(chat), text);
 }
 
 /// Poked in an allowed group: usually she pokes back after a moment, the
@@ -724,6 +737,19 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
     const auto chat = stored.chat;
     state.flow.unseen.push_back(std::move(stored));
     state.flow.last_arrival = now();
+    // QQ's 复读: people sending the same short line in a row; she may join.
+    if (message.is_group()) {
+        if (auto recent = store.recent_messages(chat, k_repeat_lookback); recent.has_value()) {
+            if (const auto chain = repeat_chain(*recent); chain && chain->people >= 2 && chain->text != state.repeated) {
+                const double chance = chain->people >= 4 ? 0.6 : chain->people == 3 ? 0.5 : 0.35;
+                const auto presence = presence_at(config.chat.schedule, now(), config.chat.utc_offset_minutes).presence;
+                if (presence == Presence::AWAKE && std::bernoulli_distribution(chance)(rng)) {
+                    state.repeated = chain->text;
+                    spawn(join_repeat(this, chat, chain->text));
+                }
+            }
+        }
+    }
     if (!should_plan(state.flow, flow_settings(), now())) return std::nullopt;
     return chat;
 }
@@ -1125,6 +1151,33 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
         auto plan = parse_plan(*planned, ids);
         plan.follow_up = replies > 0;
+        if (plan.repeat) {
+            // 复读: the message again, as it is.
+            const auto target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
+            const auto index = static_cast<usize>(std::ranges::find(ids, plan.target) - ids.begin()) + 1;
+            std::string receipt;
+            if (target == log_lines.end() || target->from_self || !repeatable(target->text)) {
+                receipt = std::format("#{} 不适合复读（只复读别人的短消息），没有发。", index);
+            } else if (co_await send_and_record(this, chat, {onebot::text_segment(target->text)})) {
+                ++replies;
+                state.repeated = target->text;
+                note_spoke(state.flow, now(), target->sender_id);
+                remember_decision(state, std::format("[{}] 复读了「{}」", clock_of(now(), settings.utc_offset_minutes), target->text));
+                if (observer) observer(chat, plan, {target->text});
+                log::info("{} repeats {}: {}", describe(chat), plan.target, target->text);
+                receipt = std::format("{}复读了 #{}：「{}」", settings.name, index, target->text);
+            } else {
+                receipt = "没发出去。";
+            }
+            if (replies >= k_max_replies) {
+                ended = "replied enough";
+                break;
+            }
+            const auto came = co_await arrivals();
+            provider::append_tool_outcomes(
+                history, outcomes(*planned, call_id, receipt + "\n" + (came.empty() ? "这期间没有新消息。" : "这期间的新消息：\n" + came)));
+            continue;
+        }
         if (plan.wait > 0) {
             // MaiBot allows three waits in a row, then the turn rests.
             if (++waits > k_max_waits) {

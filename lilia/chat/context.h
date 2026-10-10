@@ -42,6 +42,8 @@ struct Plan {
     i64 wait = 0;
     /// Decided after she already spoke this turn.
     bool follow_up = false;
+    /// The repeat tool: send `target`'s text again as it is (复读).
+    bool repeat = false;
     std::string reason; ///< why she stays silent or waits
 };
 

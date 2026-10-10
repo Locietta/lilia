@@ -262,6 +262,11 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         });
     }
     request.tools.push_back({
+        .name = "repeat",
+        .description = "复读：把一条群友的短消息原样再发一遍（QQ 群里的玩梗习惯）",
+        .input_schema = {.properties = {{"target", property("string", "要复读的消息编号，例如 \"#12\"")}}, .required = {"target"}},
+    });
+    request.tools.push_back({
         .name = "wait",
         .description = "先等一会儿再看：等完会告诉你这期间的新消息，再决定下一步",
         .input_schema = {.properties = {{"seconds", property("integer", "等多少秒，一般 5 到 20")},
@@ -314,6 +319,12 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         if (!tool) continue;
         const auto &input = tool->call.input;
         if (tool->call.name == "stay_silent") return {.reason = string_field(input, "reason")};
+        if (tool->call.name == "repeat") {
+            const auto target = parse_target(string_field(input, "target"));
+            if (!target || *target == 0 || *target > ids.size())
+                return {.reason = "invalid repeat target " + string_field(input, "target")};
+            return {.target = ids[*target - 1], .repeat = true};
+        }
         if (tool->call.name == "send_sticker") {
             // Aimed at the given message, else the newest one shown.
             const auto target = parse_target(string_field(input, "target"));

@@ -2,8 +2,35 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
+
+#include <lilia/chat/delivery.h>
 
 namespace lilia::chat {
+
+namespace {
+
+constexpr usize k_repeat_max_code_points = 20;
+
+} // namespace
+
+bool repeatable(std::string_view text) {
+    if (text.empty() || text.starts_with('/') || count_code_points(text) > k_repeat_max_code_points) return false;
+    // Media ("[图片]"), mentions and quoted replies are not repeated as text.
+    return text.find('[') == std::string_view::npos && text.find('@') == std::string_view::npos &&
+           text.find('\n') == std::string_view::npos;
+}
+
+std::optional<RepeatChain> repeat_chain(const std::vector<store::StoredMessage> &log) {
+    if (log.empty() || log.back().from_self || !repeatable(log.back().text)) return std::nullopt;
+    const auto &text = log.back().text;
+    std::set<i64> people;
+    for (auto it = log.rbegin(); it != log.rend() && it->text == text; ++it) {
+        if (it->from_self) return std::nullopt; // she is already in this chain
+        people.insert(it->sender_id);
+    }
+    return RepeatChain{.text = text, .people = people.size()};
+}
 
 bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now) {
     if (flow.unseen.empty()) return false;

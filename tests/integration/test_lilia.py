@@ -620,6 +620,7 @@ def test_reply_and_reconnect(tmp_path):
     )
     assert [tool["name"] for tool in planner["tools"]] == [
         "reply",
+        "repeat",
         "wait",
         "stay_silent",
     ]
