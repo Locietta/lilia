@@ -407,15 +407,16 @@ struct HistoryPage {
 };
 
 /// Up to `count` of a group's newest messages, oldest first, fetched a page
-/// at a time; NapCat pages back from the message whose id is `message_seq`.
+/// at a time. With `message_seq` (a message id) NapCat pages forward from that
+/// message unless `reverseOrder` is set, which pages back up to it.
 Task<std::vector<onebot::MessageEvent>> fetch_history(std::shared_ptr<onebot::Session> session, i64 group, usize count) {
-    constexpr usize k_page = 200;
+    constexpr usize k_page = 500;
     std::vector<onebot::MessageEvent> collected;
     std::set<i64> seen;
     std::optional<i64> anchor;
     while (collected.size() < count) {
         auto params = std::format(R"({{"group_id":{},"count":{})", group, std::min(k_page, count - collected.size() + 1));
-        if (anchor) params += std::format(R"(,"message_seq":{})", *anchor);
+        if (anchor) params += std::format(R"(,"message_seq":{},"reverseOrder":true)", *anchor);
         params += "}";
         auto data = co_await session->call("get_group_msg_history", std::move(params));
         if (data.has_error()) {
