@@ -1,9 +1,13 @@
 #include "replay.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <format>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -13,7 +17,9 @@
 
 #include <lilia/chat/responder.h>
 #include <lilia/learn/learner.h>
+#include <lilia/memory/memory.h>
 #include <lilia/onebot/message.h>
+#include <lilia/onebot/session.h>
 #include <lilia/provider/anthropic.h>
 #include <lilia/store/store.h>
 
@@ -387,6 +393,176 @@ Task<int> run_learn(Config config, std::filesystem::path log) {
     }
     co_await tasks.join();
     co_return 0;
+}
+
+namespace {
+
+struct GroupEntry {
+    i64 group_id = 0;
+    std::string group_name;
+};
+
+struct HistoryPage {
+    std::vector<onebot::MessageEvent> messages;
+};
+
+/// Up to `count` of a group's newest messages, oldest first, fetched a page
+/// at a time; NapCat pages back from the message whose id is `message_seq`.
+Task<std::vector<onebot::MessageEvent>> fetch_history(std::shared_ptr<onebot::Session> session, i64 group, usize count) {
+    constexpr usize k_page = 200;
+    std::vector<onebot::MessageEvent> collected;
+    std::set<i64> seen;
+    std::optional<i64> anchor;
+    while (collected.size() < count) {
+        auto params = std::format(R"({{"group_id":{},"count":{})", group, std::min(k_page, count - collected.size() + 1));
+        if (anchor) params += std::format(R"(,"message_seq":{})", *anchor);
+        params += "}";
+        auto data = co_await session->call("get_group_msg_history", std::move(params));
+        if (data.has_error()) {
+            print(std::format("  群 {}：读取历史失败：{}", group, data.error().message()));
+            break;
+        }
+        HistoryPage page;
+        if (auto ec = glz::read<onebot::k_read_opts>(page, *data)) {
+            print(std::format("  群 {}：历史无法解析：{}", group, glz::format_error(ec, *data)));
+            break;
+        }
+        std::vector<onebot::MessageEvent> older;
+        for (auto &message : page.messages) {
+            if (seen.insert(message.message_id).second) older.push_back(std::move(message));
+        }
+        if (older.empty()) break;
+        std::ranges::sort(older, {}, &onebot::MessageEvent::time);
+        anchor = older.front().message_id;
+        collected.insert(collected.begin(), std::make_move_iterator(older.begin()), std::make_move_iterator(older.end()));
+    }
+    std::ranges::stable_sort(collected, {}, &onebot::MessageEvent::time);
+    if (collected.size() > count) collected.erase(collected.begin(), collected.end() - static_cast<std::ptrdiff_t>(count));
+    co_return collected;
+}
+
+std::string clock_text(i64 time, i32 utc_offset_minutes) {
+    const auto local = std::chrono::sys_seconds(std::chrono::seconds(time + i64{utc_offset_minutes} * 60));
+    return std::format("{:%m-%d %H:%M}", local);
+}
+
+Task<int> learn_history(Config config, std::vector<i64> groups, usize count, std::shared_ptr<onebot::Session> session) {
+    const auto close = [&session] { session->close(); };
+    auto login = co_await session->get_login_info();
+    if (login.has_error()) {
+        std::fprintf(stderr, "get_login_info failed: %s\n", login.error().message().c_str());
+        close();
+        co_return 1;
+    }
+    std::map<i64, std::string> group_names;
+    auto listed = co_await session->call("get_group_list", "{}");
+    if (listed.has_value()) {
+        std::vector<GroupEntry> entries;
+        if (!glz::read<onebot::k_read_opts>(entries, *listed)) {
+            for (const auto &entry : entries) group_names[entry.group_id] = entry.group_name;
+        }
+    }
+    if (groups.empty()) {
+        for (const auto &[id, name] : group_names) groups.push_back(id);
+    }
+
+    const auto path = std::filesystem::path(config.data_dir) / "lilia.db";
+    auto store = store::Store::open(path);
+    if (store.has_error()) {
+        std::fprintf(stderr, "%s\n", store.error().message().c_str());
+        close();
+        co_return 1;
+    }
+    lighter::TaskGroup tasks(lighter::EventLoop::current());
+    learn::Learner learner(config.learning, config.chat.name, config.chat.aliases, *store, make_learner(config.model),
+                           [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    learner.frequency_chats = config.chat.groups;
+    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
+    if (config.memory.enabled) learner.embedder = &memory;
+    const usize batch = std::max<usize>(config.learning.batch_messages, 2);
+    const i32 offset = config.chat.utc_offset_minutes;
+
+    for (const auto group : groups) {
+        const auto name = group_names.contains(group) ? group_names[group] : std::string("?");
+        if (std::ranges::contains(config.learning.exclude_groups, group)) {
+            print(std::format("== 群 {}（{}）：不学习，跳过", group, name));
+            continue;
+        }
+        const auto messages = co_await fetch_history(session, group, count);
+        auto span = store->learned_span(group);
+        const auto known = span.has_value() ? *span : std::optional<store::LearnedSpan>{};
+        std::vector<learn::Line> lines;
+        usize covered = 0;
+        for (const auto &message : messages) {
+            if (known && message.time >= known->first_time && message.time <= known->last_time) {
+                ++covered;
+                continue;
+            }
+            auto text = learn::learnable_text(message.message);
+            if (text.empty()) continue;
+            lines.push_back(
+                {.sender = message.user_id, .text = std::move(text), .self = message.user_id == login->user_id, .time = message.time});
+        }
+        print(std::format("== 群 {}（{}）：取到 {} 条{}，已学过 {} 条，新学 {} 行", group, name, messages.size(),
+                          messages.empty() ? std::string() :
+                                             std::format("（{} 至 {}）", clock_text(messages.front().time, offset),
+                                                         clock_text(messages.back().time, offset)),
+                          covered, lines.size()));
+        // Older and newer than the learned span are learned as separate runs, never one batch across it.
+        usize start = 0;
+        while (start < lines.size()) {
+            usize end = std::min(lines.size(), start + batch);
+            if (known) {
+                for (usize i = start + 1; i < end; ++i) {
+                    if ((lines[i - 1].time < known->first_time) != (lines[i].time < known->first_time)) {
+                        end = i;
+                        break;
+                    }
+                }
+            }
+            std::vector<learn::Line> chunk(lines.begin() + static_cast<std::ptrdiff_t>(start),
+                                           lines.begin() + static_cast<std::ptrdiff_t>(end));
+            start = end;
+            if (std::ranges::count_if(chunk, [](const learn::Line &line) { return !line.self; }) < 2) continue;
+            // A co_await inside the range-for header crashes GCC 16.2.
+            const auto learned = co_await learner.learn(group, std::move(chunk));
+            for (const auto &pattern : learned) print(std::format("  当{}时，可以{}", pattern.situation, pattern.style));
+        }
+    }
+    // Slang inference runs in the background; let it finish before leaving.
+    co_await tasks.join();
+    close();
+    co_return 0;
+}
+
+Task<> drain(std::shared_ptr<onebot::Session> session) {
+    // Events of the live groups arrive here too; this run ignores them.
+    std::ignore = co_await session->run([](onebot::Event) {});
+}
+
+} // namespace
+
+Task<int> run_learn_history(Config config, std::vector<i64> groups, usize count) {
+    if (!config.learning.enabled) {
+        std::fprintf(stderr, "learning is disabled in the config\n");
+        co_return 1;
+    }
+    auto opened = co_await onebot::Session::open({
+        .connect = {.host = config.onebot.host, .port = config.onebot.port, .path = config.onebot.path},
+        .access_token = config.onebot.access_token,
+        .action_timeout = std::chrono::seconds(60),
+    });
+    if (opened.has_error()) {
+        std::fprintf(stderr, "cannot connect to OneBot at %s:%d: %s\n", config.onebot.host.c_str(), static_cast<int>(config.onebot.port),
+                     opened.error().message().c_str());
+        co_return 1;
+    }
+    auto session = *std::move(opened);
+    lighter::TaskGroup connection(lighter::EventLoop::current());
+    connection.spawn(drain(session));
+    const int status = co_await learn_history(std::move(config), std::move(groups), count, session);
+    co_await connection.join();
+    co_return status;
 }
 
 Task<int> review_expressions(Config config, bool apply, std::vector<std::string> keep) {

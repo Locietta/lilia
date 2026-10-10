@@ -40,6 +40,7 @@ void print_usage(FILE *output) {
                "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
                "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>] [--continue-at <line>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
+               "       lilia learn-history [--group <id>]... [--count <n>] [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
                "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
                "       lilia expressions --rejected | --rescue <review id> | --check <id> | --uncheck <id>\n"
@@ -171,6 +172,9 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> stickers_db;
     std::optional<usize> continue_at;
     std::optional<std::filesystem::path> learn_log;
+    bool learn_history = false;
+    std::vector<i64> history_groups;
+    usize history_count = 300;
     bool list_expressions = false;
     bool jargon = false;
     Manage manage;
@@ -269,6 +273,9 @@ int main(int argc, char **argv) {
     } else if (argc > 2 && std::string_view(argv[1]) == "learn") {
         learn_log = argv[2];
         first = 3;
+    } else if (argc > 1 && std::string_view(argv[1]) == "learn-history") {
+        learn_history = true;
+        first = 2;
     } else if (argc > 1 && std::string_view(argv[1]) == "expressions") {
         list_expressions = true;
         first = 2;
@@ -301,6 +308,10 @@ int main(int argc, char **argv) {
             stickers_db = argv[++i];
         } else if (arg == "--continue-at" && replay_log && i + 1 < argc) {
             continue_at = static_cast<usize>(std::max(0, std::atoi(argv[++i])));
+        } else if (arg == "--group" && learn_history && i + 1 < argc) {
+            history_groups.push_back(std::atoll(argv[++i]));
+        } else if (arg == "--count" && learn_history && i + 1 < argc) {
+            history_count = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else if (arg == "--review" && list_expressions) {
             review = true;
         } else if (arg == "--apply" && list_expressions) {
@@ -353,9 +364,10 @@ int main(int argc, char **argv) {
     }
     auto app = lighter::with_token(replay_log ?
                                        run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at) :
-                                   learn_log ? run_learn(*config, *learn_log) :
-                                   review    ? review_expressions(*config, apply, keep) :
-                                               run_app(*config),
+                                   learn_log     ? run_learn(*config, *learn_log) :
+                                   learn_history ? run_learn_history(*config, history_groups, history_count) :
+                                   review        ? review_expressions(*config, apply, keep) :
+                                                   run_app(*config),
                                    interrupts->token());
     loop.schedule(app);
     loop.run();

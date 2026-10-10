@@ -337,6 +337,16 @@ void test_frequency() {
     require(store->frequent_terms(b)->front().occurrence_count == 9, "chats are separate");
 }
 
+void test_learned_span() {
+    auto store = store::Store::open_memory();
+    require(store.has_value() && store->learned_span(7)->has_value() == false, "no span yet");
+    require(store->extend_learned_span(7, 100, 200).has_value(), "first span");
+    require(store->extend_learned_span(7, 150, 300).has_value() && store->extend_learned_span(7, 50, 60).has_value(), "widen");
+    const auto span = store->learned_span(7);
+    require(span.has_value() && *span && (*span)->first_time == 50 && (*span)->last_time == 300, "span only widens");
+    require(!*store->learned_span(8), "groups are separate");
+}
+
 } // namespace
 
 int main() {
@@ -351,6 +361,7 @@ int main() {
         test_selection_request();
         test_segment();
         test_frequency();
+        test_learned_span();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

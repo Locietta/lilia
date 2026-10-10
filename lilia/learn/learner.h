@@ -39,6 +39,7 @@ struct Line {
     i64 sender = 0;
     std::string text;
     bool self = false; ///< lilia's own line, context only
+    i64 time = 0;      ///< unix seconds; 0 when unknown
 };
 
 struct Learned {
@@ -178,7 +179,7 @@ struct Learner {
 
     /// One batch: frequent terms (chats in `frequency_chats` only),
     /// expressions (extract, review, store) and slang. Returns the stored
-    /// patterns.
+    /// patterns. The lines' times widen the group's learned span.
     lighter::Task<std::vector<Learned>> learn(i64 group, std::vector<Line> lines);
 
     /// Others' lines of one batch into `chat`'s high-frequency terms.

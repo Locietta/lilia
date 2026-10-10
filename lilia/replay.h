@@ -44,6 +44,13 @@ lighter::Task<int> run_replay(Config config, std::filesystem::path log, std::opt
 /// batches of `learning.batch_messages` and prints what it would learn.
 lighter::Task<int> run_learn(Config config, std::filesystem::path log);
 
+/// Learns from the groups' recent history, fetched once from NapCat over a
+/// second (read-only) connection into the live database: up to `count`
+/// newest messages per group (`groups` empty: every group the account is
+/// in), skipping excluded groups and the stretch already learned (live or by
+/// an earlier run). Prints what was learned.
+lighter::Task<int> run_learn_history(Config config, std::vector<i64> groups, usize count);
+
 /// Prints the learned expressions of a lilia.db (read-only).
 int print_expressions(const std::filesystem::path &database, usize limit);
 

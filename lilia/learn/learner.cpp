@@ -604,7 +604,7 @@ void Learner::observe(const onebot::MessageEvent &message, i64 self_id) {
     auto text = learnable_text(message.message);
     if (text.empty()) return;
     auto &buffer = buffers[group];
-    buffer.push_back({.sender = message.user_id, .text = std::move(text)});
+    buffer.push_back({.sender = message.user_id, .text = std::move(text), .time = message.time});
     // A busy group waiting on the interval or a free slot: keep the newest lines.
     const usize cap = std::max<usize>(config.batch_messages, 2) * 3;
     if (buffer.size() > cap) buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(buffer.size() - cap));
@@ -684,6 +684,16 @@ void Learner::count_frequent_terms(const store::ChatKey &chat, const std::vector
 Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
     const i64 started = now();
     const store::ChatKey chat{.type = "group", .id = group};
+    i64 first = 0, last = 0;
+    for (const auto &line : lines) {
+        if (line.self || line.time <= 0) continue;
+        first = first == 0 ? line.time : std::min(first, line.time);
+        last = std::max(last, line.time);
+    }
+    if (last > 0) {
+        if (auto extended = store.extend_learned_span(group, first, last); extended.has_error())
+            log::error("learning: {}", extended.error().message());
+    }
     if (std::ranges::contains(frequency_chats, group)) count_frequent_terms(chat, lines);
     std::vector<Learned> stored;
     const auto items = co_await run_call(this, group, build_learner_request(prompt, lines, name), "learning");

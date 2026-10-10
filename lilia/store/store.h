@@ -204,6 +204,13 @@ struct FrequentTerm {
     i64 updated_at = 0;
 };
 
+/// Message times (unix seconds) of a group that learning has covered, live
+/// or from fetched history. Gaps inside it (her downtime) are not tracked.
+struct LearnedSpan {
+    i64 first_time = 0;
+    i64 last_time = 0;
+};
+
 struct Store {
     static Result<Store> open(const std::filesystem::path &path);
     /// Existing database without schema changes; for inspection tools.
@@ -333,6 +340,11 @@ struct Store {
     Result<std::vector<PersonFact>> facts(i64 person_id, usize limit);
 
     Result<void> delete_fact(i64 id);
+
+    /// The stretch of `group_id` already learned from; nullopt when none.
+    Result<std::optional<LearnedSpan>> learned_span(i64 group_id);
+    /// Widens the span to cover [first_time, last_time].
+    Result<void> extend_learned_span(i64 group_id, i64 first_time, i64 last_time);
 
     /// Deletes the patterns with these ids.
     Result<void> delete_expressions(const std::vector<i64> &ids);

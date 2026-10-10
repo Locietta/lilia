@@ -13,7 +13,7 @@ namespace {
 // 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
 // 6: person_facts. 7: chat_summaries. 8: stickers. 9: expressions per chat
 // (rebuilt), expression_reviews, jargon.
-constexpr int k_schema_version = 10;
+constexpr int k_schema_version = 11;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -127,6 +127,12 @@ CREATE TABLE IF NOT EXISTS jargon_evidence (
     time INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS jargon_evidence_by_term ON jargon_evidence (jargon_id, time);
+
+CREATE TABLE IF NOT EXISTS learned_spans (
+    group_id INTEGER PRIMARY KEY,
+    first_time INTEGER NOT NULL,
+    last_time INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS frequent_terms (
     id INTEGER PRIMARY KEY,
@@ -597,6 +603,27 @@ Result<void> Store::add_fact(const PersonFact &fact) {
     statement->bind(7, fact.time);
     statement->bind(8, fact.model);
     statement->bind_blob(9, fact.vector);
+    return statement->run();
+}
+
+Result<std::optional<LearnedSpan>> Store::learned_span(i64 group_id) {
+    auto statement = database.prepare("SELECT first_time, last_time FROM learned_spans WHERE group_id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, group_id);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    if (!*row) return std::optional<LearnedSpan>{};
+    return std::optional<LearnedSpan>(LearnedSpan{.first_time = statement->column_int(0), .last_time = statement->column_int(1)});
+}
+
+Result<void> Store::extend_learned_span(i64 group_id, i64 first_time, i64 last_time) {
+    auto statement = database.prepare("INSERT INTO learned_spans (group_id, first_time, last_time) VALUES (?1, ?2, ?3) "
+                                      "ON CONFLICT (group_id) DO UPDATE SET first_time = min(first_time, excluded.first_time), "
+                                      "last_time = max(last_time, excluded.last_time)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, group_id);
+    statement->bind(2, first_time);
+    statement->bind(3, last_time);
     return statement->run();
 }
 
