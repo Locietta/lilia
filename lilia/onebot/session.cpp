@@ -94,6 +94,7 @@ lighter::codec::json::Result<Event> decode_event(std::string_view text, std::str
     };
     if (post_type == "message") return read(MessageEvent{});
     if (post_type == "meta_event") return read(MetaEvent{});
+    if (post_type == "notice") return read(NoticeEvent{});
     return Event(OtherEvent{.post_type = std::string(post_type)});
 }
 

@@ -40,6 +40,9 @@ struct Plan {
     bool sticker_only = false;
     /// The wait tool: seconds to wait before looking again (0: not waiting).
     i64 wait = 0;
+    /// The react tool: the emoji reaction (a name from reaction_face) put on
+    /// `target` instead of saying something.
+    std::string react;
     /// Decided after she already spoke this turn.
     bool follow_up = false;
     std::string reason; ///< why she stays silent or waits
@@ -98,6 +101,10 @@ PlannerRequest build_planner_request(const PlannerInput &input);
 /// Reads the planner's tool call. No call, an unknown tool or an invalid
 /// target means silence; wait is clamped to 1..60 seconds (30 when missing).
 Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vector<i64> &ids);
+
+/// The QQ face id of a reaction the planner may use ("赞" -> "76"); empty for
+/// an unknown name.
+std::string_view reaction_face(std::string_view name);
 
 /// Messages that arrived during a turn, numbered on from the planner's
 /// earlier lines ("#n [HH:MM] 名字(id): 内容"); appends their ids to `ids`.

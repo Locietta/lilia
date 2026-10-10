@@ -62,12 +62,24 @@ struct MetaEvent {
     std::optional<i64> interval;
 };
 
-/// Notices, requests and anything else lilia does not handle yet.
+/// A notice, e.g. a poke: notice_type "notify", sub_type "poke", `user_id`
+/// poked `target_id`.
+struct NoticeEvent {
+    i64 time = 0;
+    i64 self_id = 0;
+    std::string notice_type;
+    std::string sub_type;
+    std::optional<i64> group_id;
+    i64 user_id = 0;
+    std::optional<i64> target_id;
+};
+
+/// Requests and anything else lilia does not handle yet.
 struct OtherEvent {
     std::string post_type;
 };
 
-using Event = std::variant<MessageEvent, MetaEvent, OtherEvent>;
+using Event = std::variant<MessageEvent, MetaEvent, NoticeEvent, OtherEvent>;
 
 struct LoginInfo {
     i64 user_id = 0;

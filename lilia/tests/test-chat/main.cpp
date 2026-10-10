@@ -121,9 +121,13 @@ void test_planner() {
     require(user.find("以下是新消息") < user.find("#3 "), "the new messages are marked");
     require(user.find("以下是新消息") > user.find("#2 "), "old lines come before the marker");
     require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");
-    require(request.tools.size() == 3 && request.tools[0].name == "reply" && request.tools[1].name == "wait" &&
-                request.tools[2].name == "stay_silent",
-            "reply, wait, stay_silent");
+    require(request.tools.size() == 4 && request.tools[0].name == "reply" && request.tools[1].name == "react" &&
+                request.tools[2].name == "wait" && request.tools[3].name == "stay_silent",
+            "reply, react, wait, stay_silent");
+    const auto reacted = chat::parse_plan({provider::OutputItem(tool_call("react", R"({"target":"#3","emoji":"赞"})"))}, request.ids);
+    require(!reacted.reply && reacted.react == "赞" && reacted.target == 104 && chat::reaction_face("赞") == "76", "a reaction");
+    require(chat::parse_plan({provider::OutputItem(tool_call("react", R"({"target":"#3","emoji":"🤡"})"))}, request.ids).react.empty(),
+            "only known reactions");
 
     using provider::OutputItem;
     const auto reply = chat::parse_plan(

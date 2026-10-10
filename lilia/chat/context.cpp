@@ -262,6 +262,13 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         });
     }
     request.tools.push_back({
+        .name = "react",
+        .description = "给一条消息点一个表情回应（QQ 的表情回应，不说话），比如认同、收到、觉得好笑但不值得说一句的时候",
+        .input_schema = {.properties = {{"target", property("string", "要回应的消息编号，例如 \"#12\"")},
+                                        {"emoji", property("string", "赞 | 爱心 | OK | 笑哭 | doge | 捂脸 | 鼓掌 | 吃瓜")}},
+                         .required = {"target", "emoji"}},
+    });
+    request.tools.push_back({
         .name = "wait",
         .description = "先等一会儿再看：等完会告诉你这期间的新消息，再决定下一步",
         .input_schema = {.properties = {{"seconds", property("integer", "等多少秒，一般 5 到 20")},
@@ -313,6 +320,13 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         if (!tool) continue;
         const auto &input = tool->call.input;
         if (tool->call.name == "stay_silent") return {.reason = string_field(input, "reason")};
+        if (tool->call.name == "react") {
+            const auto target = parse_target(string_field(input, "target"));
+            const auto emoji = string_field(input, "emoji");
+            if (!target || *target == 0 || *target > ids.size() || reaction_face(emoji).empty())
+                return {.reason = "invalid reaction " + string_field(input, "target") + " " + emoji};
+            return {.target = ids[*target - 1], .react = emoji};
+        }
         if (tool->call.name == "send_sticker") {
             // Aimed at the given message, else the newest one shown.
             const auto target = parse_target(string_field(input, "target"));
@@ -354,6 +368,24 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         };
     }
     return {.reason = "no tool call"};
+}
+
+std::string_view reaction_face(std::string_view name) {
+    // QQ system face ids.
+    static constexpr std::array<std::pair<std::string_view, std::string_view>, 8> k_faces{{
+        {"赞", "76"},
+        {"爱心", "66"},
+        {"OK", "124"},
+        {"笑哭", "182"},
+        {"doge", "179"},
+        {"捂脸", "264"},
+        {"鼓掌", "99"},
+        {"吃瓜", "271"},
+    }};
+    for (const auto &[face, id] : k_faces) {
+        if (face == name) return id;
+    }
+    return {};
 }
 
 std::string number_messages(const std::vector<store::StoredMessage> &messages, std::vector<i64> &ids, i32 utc_offset_minutes) {

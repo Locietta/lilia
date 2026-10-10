@@ -74,6 +74,9 @@ constexpr usize k_fact_context = 8;
 /// (plus the newest few).
 constexpr usize k_self_facts = 6;
 constexpr usize k_self_context = 4;
+/// Poked, she pokes back this often, at most once per person in this many seconds.
+constexpr double k_poke_back_chance = 0.7;
+constexpr i64 k_poke_back_seconds = 60;
 /// She holds back once she wrote this many of the last `k_self_window` messages.
 constexpr usize k_self_window = 10;
 constexpr usize k_self_limit = 3;
@@ -253,6 +256,43 @@ Task<> debounce(Responder *r, const store::ChatKey &chat) {
     }
 }
 
+i64 random_seconds(Responder *r, u32 low, u32 high) {
+    return std::uniform_int_distribution<i64>(std::min(low, high), std::max(low, high))(r->rng);
+}
+
+/// One OneBot action through the live session; false when it is gone or
+/// the call failed.
+Task<bool> call_action(Responder *r, std::string action, std::string params) {
+    auto session = r->session;
+    if (!session || !session->is_open()) co_return false;
+    auto result = co_await session->call(action, std::move(params));
+    if (result.has_error()) {
+        log::warn("{} failed: {}", action, result.error().message());
+        co_return false;
+    }
+    co_return true;
+}
+
+Task<bool> react_to(Responder *r, const store::ChatKey &chat, i64 message_id, std::string face) {
+    if (r->reactor) co_return co_await r->reactor(chat, message_id, std::move(face));
+    co_return co_await call_action(r, "set_msg_emoji_like", std::format(R"({{"message_id":{},"emoji_id":"{}"}})", message_id, face));
+}
+
+/// Poked in an allowed group: usually she pokes back after a moment, the
+/// way people do; at most once a minute per person, never while asleep.
+Task<> poke_back(Responder *r, i64 group, i64 user) {
+    const store::ChatKey chat{.type = "group", .id = group};
+    auto &state = r->chats[chat];
+    const i64 now = r->now();
+    if (now - state.poked_back[user] < k_poke_back_seconds) co_return;
+    if (presence_at(r->config.chat.schedule, now, r->config.chat.utc_offset_minutes).presence == Presence::ASLEEP) co_return;
+    if (!std::bernoulli_distribution(k_poke_back_chance)(r->rng)) co_return;
+    state.poked_back[user] = now;
+    co_await lighter::sleep(std::chrono::seconds(random_seconds(r, 1, 4)));
+    if (co_await call_action(r, "send_poke", std::format(R"({{"group_id":{},"user_id":{}}})", group, user)))
+        log::info("{} pokes {} back", describe(chat), user);
+}
+
 /// Waits until `until` (unix seconds), looking every half minute; returns
 /// early once someone calls her, if `called_ends_it`.
 Task<> wait_until(Responder *r, const store::ChatKey &chat, i64 until, bool called_ends_it) {
@@ -261,10 +301,6 @@ Task<> wait_until(Responder *r, const store::ChatKey &chat, i64 until, bool call
         if (left <= 0 || (called_ends_it && r->chats[chat].flow.addressed)) co_return;
         co_await lighter::sleep(std::chrono::seconds(std::min<i64>(left, 30)));
     }
-}
-
-i64 random_seconds(Responder *r, u32 low, u32 high) {
-    return std::uniform_int_distribution<i64>(std::min(low, high), std::max(low, high))(r->rng);
 }
 
 /// Her day, before a turn: asleep she waits until morning (whoever called
@@ -700,6 +736,14 @@ void Responder::on_event(onebot::Event event) {
         if (meta->meta_event_type == "lifecycle") log::info("onebot lifecycle: {}", meta->sub_type);
         return;
     }
+    if (const auto *notice = std::get_if<onebot::NoticeEvent>(&event)) {
+        // Someone poked her in an allowed group.
+        if (session && notice->notice_type == "notify" && notice->sub_type == "poke" && notice->group_id &&
+            notice->target_id == self.user_id && notice->user_id != self.user_id &&
+            std::ranges::contains(config.chat.groups, *notice->group_id))
+            spawn(poke_back(this, *notice->group_id, notice->user_id));
+        return;
+    }
     // Until get_login_info answers, lilia does not know its own id.
     const auto *message = std::get_if<onebot::MessageEvent>(&event);
     if (!message || !session) return;
@@ -1048,7 +1092,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (!memory || searches >= config.memory.max_searches)
             std::erase_if(offered, [](const auto &tool) { return tool.name == "search_history"; });
         if (must_speak && replies == 0)
-            std::erase_if(offered, [](const auto &tool) { return tool.name == "wait" || tool.name == "stay_silent"; });
+            std::erase_if(offered,
+                          [](const auto &tool) { return tool.name == "wait" || tool.name == "stay_silent" || tool.name == "react"; });
         // Right after a sticker, no second one.
         if (now() - state.last_sticker < config.stickers.cooldown_seconds)
             std::erase_if(offered, [](const auto &tool) { return tool.name == "send_sticker"; });
@@ -1096,6 +1141,29 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             continue;
         }
         waits = 0;
+        if (!plan.react.empty()) {
+            // An emoji reaction on a message instead of words.
+            const auto index = static_cast<usize>(std::ranges::find(ids, plan.target) - ids.begin()) + 1;
+            const bool done = co_await react_to(this, chat, plan.target, std::string(reaction_face(plan.react)));
+            log::info("{} reacts {} to {}{}", describe(chat), plan.react, plan.target, done ? "" : " (failed)");
+            if (observer) observer(chat, plan, {});
+            if (done) {
+                ++replies;
+                note_spoke(state.flow, now(), 0);
+                remember_decision(state,
+                                  std::format("[{}] 给一条消息点了「{}」", clock_of(now(), settings.utc_offset_minutes), plan.react));
+            }
+            if (replies >= k_max_replies) {
+                ended = "replied enough";
+                break;
+            }
+            const auto came = co_await arrivals();
+            provider::append_tool_outcomes(history,
+                                           outcomes(*planned, call_id,
+                                                    std::format("{}给 #{} 点了「{}」\n{}", done ? "" : "没能", index, plan.react,
+                                                                came.empty() ? "这期间没有新消息。" : "这期间的新消息：\n" + came)));
+            continue;
+        }
         if (!plan.reply) {
             ended = plan.reason;
             break;

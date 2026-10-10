@@ -44,6 +44,8 @@ struct Responder {
     using PlanObserver = std::move_only_function<void(const store::ChatKey &, const Plan &, const std::vector<std::string> &)>;
     /// Lets `seconds` pass during a planner wait.
     using Pause = std::move_only_function<lighter::Task<>(const store::ChatKey &, i64 seconds)>;
+    /// Puts an emoji reaction (a QQ face id) on a message; true when done.
+    using Reactor = std::move_only_function<lighter::Task<bool>(const store::ChatKey &, i64 message_id, std::string face_id)>;
 
     Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher, provider::Provider writer,
               std::filesystem::path persona_path, Spawn spawn);
@@ -76,6 +78,8 @@ struct Responder {
     /// How a planner wait passes; unset, it sleeps (when realtime). Replay
     /// advances its clock and feeds the messages of that time.
     Pause pause;
+    /// Replaces the live session for reactions (replay).
+    Reactor reactor;
     /// Debounce and typing delays; replay turns them off.
     bool realtime = true;
     /// Blind comparisons (replay --continue-at): until she has replied, the
@@ -94,6 +98,8 @@ struct Responder {
         /// Why she is only now looking (just woke up, was busy), for the
         /// next turn; consumed by it.
         std::string presence_note;
+        /// When she last poked each person back (unix seconds).
+        std::map<i64, i64> poked_back;
         /// When she last sent a sticker here (unix seconds).
         i64 last_sticker = 0;
     };

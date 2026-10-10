@@ -70,8 +70,16 @@ void test_decode_and_render() {
     const auto *meta = std::get_if<MetaEvent>(&*heartbeat);
     require(meta && meta->meta_event_type == "heartbeat" && meta->interval == 30000, "heartbeat fields");
 
-    auto notice = decode_event(R"({"post_type":"notice","notice_type":"group_increase"})", "notice");
-    require(notice.has_value() && std::holds_alternative<OtherEvent>(*notice), "unknown post types become OtherEvent");
+    auto request = decode_event(R"({"post_type":"request","request_type":"friend"})", "request");
+    require(request.has_value() && std::holds_alternative<OtherEvent>(*request), "unknown post types become OtherEvent");
+    auto poke = decode_event(
+        R"({"post_type":"notice","notice_type":"notify","sub_type":"poke","group_id":7,"user_id":20001,"target_id":10001,"self_id":10001,"time":1})",
+        "notice");
+    require(poke.has_value() && std::holds_alternative<NoticeEvent>(*poke), "notices decode");
+    const auto &notice = std::get<NoticeEvent>(*poke);
+    require(notice.sub_type == "poke" && notice.group_id == 7 && notice.user_id == 20001 && notice.target_id == 10001, "a poke");
+    auto other_notice = decode_event(R"({"post_type":"notice","notice_type":"group_increase","user_id":3})", "notice");
+    require(other_notice.has_value() && std::get<NoticeEvent>(*other_notice).notice_type == "group_increase", "other notices too");
 
     const Message outgoing{reply_segment(-5), at_segment(k_self_id), text_segment("hi")};
     const auto encoded = glz::write_json(outgoing).value_or("");
