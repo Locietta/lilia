@@ -322,8 +322,9 @@ void test_bubbles() {
     std::mt19937 laugh(3);
     for (int i = 0; i < 20; ++i) {
         const auto out = chat::replace_haha("哈哈不是吧 真的哈哈哈", laugh);
-        require(out.find("哈哈") == std::string::npos && (out.starts_with("草不是吧") || out.starts_with("www不是吧")),
-                "哈哈 becomes 草 or www: " + out);
+        require(out.find("哈哈") == std::string::npos &&
+                    (out.starts_with("草不是吧") || out.starts_with("www不是吧") || out.starts_with("不是吧")),
+                "哈哈 becomes 草 or www, or goes: " + out);
     }
     require(chat::replace_haha("哈？真的假的", laugh) == "哈？真的假的", "a lone 哈 stays");
     bool dropped = false;
