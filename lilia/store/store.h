@@ -332,6 +332,8 @@ struct Store {
     /// Facts about `person_id`, newest first; `limit` 0 returns all.
     Result<std::vector<PersonFact>> facts(i64 person_id, usize limit);
 
+    Result<void> delete_fact(i64 id);
+
     /// Deletes the patterns with these ids.
     Result<void> delete_expressions(const std::vector<i64> &ids);
 

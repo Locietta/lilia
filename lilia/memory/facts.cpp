@@ -6,6 +6,7 @@
 
 #include <glaze/json.hpp>
 
+#include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/log.h>
 
@@ -18,6 +19,8 @@ namespace {
 constexpr usize k_max_facts = 5;
 constexpr usize k_min_fact_code_points = 4;
 constexpr usize k_max_fact_code_points = 40;
+/// Her own facts always shown: the newest few, whatever the topic.
+constexpr usize k_newest_self_facts = 3;
 
 std::string without_spaces(std::string_view text) {
     std::string out;
@@ -127,7 +130,7 @@ std::string render_facts(const std::vector<store::PersonFact> &facts) {
     return out;
 }
 
-Task<bool> Memory::remember(store::PersonFact fact) {
+Task<bool> Memory::remember(store::PersonFact fact, bool replace) {
     auto existing = store.facts(fact.person_id, 0);
     if (existing.has_error()) {
         log::error("memory: {}", existing.error().message());
@@ -142,7 +145,9 @@ Task<bool> Memory::remember(store::PersonFact fact) {
     const auto &vector = vectors->front();
     for (const auto &known : *existing) {
         if (known.model == config.embedding_model && cosine(decode_vector(known.vector), vector) >= config.duplicate_fact_score) {
-            co_return false;
+            if (!replace) co_return false;
+            log::info("memory: {} replaces \"{}\"", fact.fact, known.fact);
+            std::ignore = store.delete_fact(known.id);
         }
     }
     fact.model = config.embedding_model;
@@ -153,6 +158,33 @@ Task<bool> Memory::remember(store::PersonFact fact) {
     }
     log::info("memory: learned about {}: {}", fact.person_id, fact.fact);
     co_return true;
+}
+
+Task<std::string> Memory::self_notes(i64 self_id, std::string context, usize limit) {
+    auto facts = store.facts(self_id, 0); // newest first
+    if (facts.has_error() || facts->empty()) co_return std::string();
+    std::vector<usize> picked;
+    for (usize i = 0; i < facts->size() && i < k_newest_self_facts; ++i) picked.push_back(i);
+    if (facts->size() > picked.size()) {
+        if (auto vectors = co_await embed({std::move(context)}); vectors.has_value() && !vectors->empty()) {
+            std::vector<std::pair<double, usize>> scored;
+            for (usize i = 0; i < facts->size(); ++i) {
+                const auto &fact = (*facts)[i];
+                if (fact.model == config.embedding_model) scored.emplace_back(cosine(decode_vector(fact.vector), vectors->front()), i);
+            }
+            std::ranges::sort(scored, std::greater<>{});
+            for (usize k = 0; k < scored.size() && k < limit; ++k) {
+                if (!std::ranges::contains(picked, scored[k].second)) picked.push_back(scored[k].second);
+            }
+        }
+    }
+    std::ranges::sort(picked, std::greater<>{}); // oldest first
+    std::string notes;
+    for (const auto i : picked) {
+        const auto &fact = (*facts)[i];
+        notes += std::format("- [{}] {}\n", chat::format_local_time(fact.time, utc_offset_minutes).substr(5, 5), fact.fact);
+    }
+    co_return notes;
 }
 
 std::string Memory::people_notes(const std::vector<std::pair<i64, std::string>> &people) {

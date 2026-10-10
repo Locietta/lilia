@@ -16,6 +16,7 @@
 #include <lighter/async/runtime/timeout.h>
 
 #include <xmake/bin2obj/facts_md.hpp>
+#include <xmake/bin2obj/self_facts_md.hpp>
 #include <xmake/bin2obj/persona_md.hpp>
 #include <xmake/bin2obj/planner_md.hpp>
 #include <xmake/bin2obj/select_md.hpp>
@@ -68,6 +69,10 @@ constexpr usize k_people_notes = 3;
 constexpr usize k_fact_own_messages = 3;
 constexpr usize k_min_fact_evidence = 6;
 constexpr usize k_fact_context = 8;
+/// Her own facts: the closest this many to the last `k_self_context` lines
+/// (plus the newest few).
+constexpr usize k_self_facts = 6;
+constexpr usize k_self_context = 4;
 /// She holds back once she wrote this many of the last `k_self_window` messages.
 constexpr usize k_self_window = 10;
 constexpr usize k_self_limit = 3;
@@ -519,6 +524,34 @@ Task<> learn_facts(Responder *r, store::ChatKey chat, store::StoredMessage targe
     }
 }
 
+/// The same writeback for herself: what she just said about herself (quoted,
+/// newest wins on the same matter), so she stays consistent later.
+Task<> learn_self_facts(Responder *r, store::ChatKey chat, std::vector<store::StoredMessage> own, std::vector<store::StoredMessage> log) {
+    usize evidence = 0;
+    for (const auto &message : own) evidence += count_code_points(message.text);
+    if (evidence < k_min_fact_evidence) co_return;
+    const std::vector<store::StoredMessage> context(log.end() - static_cast<std::ptrdiff_t>(std::min(log.size(), k_fact_context)),
+                                                    log.end());
+    const auto prompt = fill_template(embedded(xmake::self_facts_md), {{"name", r->config.chat.name}});
+    const auto request = memory::build_fact_request(prompt, r->config.chat.name, own, context, r->config.chat.name);
+    const auto items =
+        co_await call_model(r, r->planner, r->config.model.planner_model, "self facts", chat, request.history, request.tools);
+    if (!items) co_return;
+    for (const auto &fact : memory::parse_facts(*items, own)) {
+        const auto &source = own[fact.source];
+        std::ignore = co_await r->memory->remember(
+            {
+                .person_id = r->self.user_id,
+                .fact = fact.fact,
+                .quote = fact.quote,
+                .chat = chat,
+                .message_id = source.message_id,
+                .time = source.time,
+            },
+            true);
+    }
+}
+
 } // namespace
 
 Responder::Responder(const Config &config, store::Store &store, provider::Provider planner, provider::Provider searcher,
@@ -631,7 +664,7 @@ struct Delivered {
 /// text (after an optional web search and the expression selection) sent the
 /// way MaiBot sends replies, plus a sticker when asked. Records what she said.
 Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vector<store::StoredMessage> log_lines,
-                        store::StoredMessage target, ChatInfo info, i64 started, std::string remembered) {
+                        store::StoredMessage target, ChatInfo info, i64 started, std::string remembered, std::string self_notes) {
     auto &state = r->chats[chat];
     const auto &settings = r->config.chat;
     if (plan.sticker_only) {
@@ -677,6 +710,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .habits = habits,
         .remembered = remembered,
         .known = known_about(r, target),
+        .self_notes = self_notes,
         .previous_reply = previous == state.replied.end() ? std::string() : previous->second,
         .voice = r->config.learning.enabled ? sample_voice(r->store, k_voice_samples) : std::vector<std::string>{},
     });
@@ -745,6 +779,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
 
     std::optional<i64> sent_id;
     usize sent = 0;
+    std::vector<store::StoredMessage> own; ///< what went out, for her own facts
     for (usize i = 0; i < segments.size(); ++i) {
         // Only later messages wait for "typing"; the first goes out at once.
         if (r->realtime && i > 0) co_await lighter::sleep(typing_delay(segments[i].text, settings.typing_speed));
@@ -757,9 +792,11 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         message.push_back(onebot::text_segment(segments[i].text));
         sent_id = co_await send_and_record(r, chat, std::move(message));
         if (!sent_id) break;
+        own.push_back({.chat = chat, .message_id = *sent_id, .time = r->now(), .text = segments[i].text, .from_self = true});
         ++sent;
     }
     if (sent == 0) co_return Delivered{};
+    if (r->memory && r->config.memory.facts) r->spawn(learn_self_facts(r, chat, own, log_lines));
     if (!plan.sticker.empty()) {
         if (r->realtime) co_await lighter::sleep(std::chrono::milliseconds(800));
         std::ignore = co_await send_sticker(r, chat, plan.sticker + "：" + plan.intent, log_lines);
@@ -879,6 +916,14 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     }
     if (memory) planner_input.recall = co_await memory->recall(chat, log_lines);
     planner_input.jargon = jargon_notes(this, chat, log_lines);
+    if (memory && config.memory.facts) {
+        // What she said about herself that bears on the last few lines.
+        std::string context;
+        for (auto it = log_lines.end() - static_cast<std::ptrdiff_t>(std::min<usize>(log_lines.size(), k_self_context));
+             it != log_lines.end(); ++it)
+            context += it->text + "\n";
+        planner_input.self_notes = co_await memory->self_notes(self.user_id, std::move(context), k_self_facts);
+    }
     auto request = build_planner_request(planner_input);
     auto &history = request.history;
     auto &ids = request.ids;
@@ -926,7 +971,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         remember_decision(state, std::format("[{}] 回复了{}的「{}」：{}", clock_of(now(), settings.utc_offset_minutes),
                                              target->sender_name.empty() ? std::to_string(target->sender_id) : target->sender_name,
                                              bounded_utf8(target->text, 60), plan.intent.empty() ? plan.brief : plan.intent));
-        auto delivered = co_await deliver(this, chat, plan, log_lines, *target, info, started, remembered);
+        auto delivered = co_await deliver(this, chat, plan, log_lines, *target, info, started, remembered, planner_input.self_notes);
         if (delivered.sent && addressed && plan.target == *addressed) answered = true;
         co_return delivered;
     };

@@ -221,6 +221,10 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         // MaiBot's person profiles: background for the planner only.
         user += "\n\n群友资料（她已经知道这些，别让她再问一遍；内部参考，别逐字复述；和眼前的聊天冲突时以聊天为准）：\n" + input.people;
     }
+    if (!input.self_notes.empty()) {
+        user += std::format("\n\n{}以前说过的关于她自己的事（她的意图要和这些一致，同一件事以日期新的为准）：\n{}", input.info.name,
+                            input.self_notes);
+    }
     if (!input.jargon.empty()) user += "\n\n" + input.jargon;
     if (!input.recall.empty()) {
         user += "\n\n聊天回想（以前聊过的相关内容，内部参考；自然相关时才用，别生硬复述）：\n" + input.recall;
@@ -415,6 +419,10 @@ provider::History build_writer_history(const WriterInput &input) {
     if (!input.known.empty()) {
         note += std::format("\n【你知道的关于{}的事，用得上就自然地用，别逐条复述，也别再问一遍：{}】", display_name(input.target),
                             input.known);
+    }
+    if (!input.self_notes.empty()) {
+        note += std::format("\n【你以前说过的关于你自己的事，说话要和这些一致、别自相矛盾（同一件事以日期新的为准），不用特意提起】\n{}",
+                            input.self_notes);
     }
     if (!input.remembered.empty()) {
         note += std::format("\n【你想起来的以前的聊天，用得上就自然地用，别照抄，也别说你查过记录】\n{}", input.remembered);

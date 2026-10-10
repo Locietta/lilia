@@ -124,7 +124,14 @@ struct Memory {
 
     /// Stores `fact` unless the person already has one meaning the same
     /// (same text, or cosine >= the duplicate threshold). True if stored.
-    lighter::Task<bool> remember(store::PersonFact fact);
+    /// `replace`: a close match is replaced instead (her own facts change:
+    /// "还没看" becomes "看完了").
+    lighter::Task<bool> remember(store::PersonFact fact, bool replace = false);
+
+    /// What she has said about herself (facts stored under `self_id`) that
+    /// bears on `context`: the `limit` closest plus the newest few, oldest
+    /// first, each "- [MM-DD] 她……"; empty when there is none.
+    lighter::Task<std::string> self_notes(i64 self_id, std::string context, usize limit);
 
     /// Summarizes the next `summary_messages` messages of `chat` if that many
     /// are waiting (called by index()). Needs `summarizer`.

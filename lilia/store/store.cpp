@@ -600,6 +600,13 @@ Result<void> Store::add_fact(const PersonFact &fact) {
     return statement->run();
 }
 
+Result<void> Store::delete_fact(i64 id) {
+    auto statement = database.prepare("DELETE FROM person_facts WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    return statement->run();
+}
+
 Result<std::vector<PersonFact>> Store::facts(i64 person_id, usize limit) {
     auto statement = database.prepare("SELECT id, fact, quote, chat_type, chat_id, message_id, time, model, vector FROM person_facts "
                                       "WHERE person_id = ?1 ORDER BY time DESC, id DESC LIMIT ?2");

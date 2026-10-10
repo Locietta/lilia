@@ -67,6 +67,8 @@ struct PlannerInput {
     bool stickers = false;
     /// "- 名字：事实；事实" lines about the people in the new messages.
     std::string people;
+    /// What she has said about herself before ("- [MM-DD] 她……").
+    std::string self_notes;
     /// A summary of older chat the recent messages bring to mind.
     std::string recall;
     /// Meanings of slang others use in the log ("以下黑话来自…").
@@ -119,6 +121,9 @@ struct WriterInput {
     std::string remembered;
     /// Facts about the person she answers ("住在成都；在学吉他").
     std::string known;
+    /// What she has said about herself before ("- [MM-DD] 她……"), to stay
+    /// consistent with.
+    std::string self_notes;
     /// What she already said to this same target, when she answers it again.
     std::string previous_reply;
     /// A random handful of phrases people in the groups actually say, to
