@@ -28,6 +28,10 @@ Local changes since the copy:
   (DeepSeek thinks by default); `require_tool` sends `tool_choice: {"type": "any"}`.
 - `provider::SchemaProperty::items` (array element schema), the same change as
   on liminal's `codex/skills-questions-task-plan` branch.
+- `anthropic::ClientOptions::prompt_cache` asks Claude for prompt caching:
+  top-level automatic caching, a breakpoint on the last tool, and `system` sent
+  as text blocks (one per instruction item) with a breakpoint after the leading
+  SYSTEM part. Without it `system` stays the single string liminal sends.
 
 From liminal `main` at `d520ce6`, keeping the relative paths so fixes can be
 ported in either direction:

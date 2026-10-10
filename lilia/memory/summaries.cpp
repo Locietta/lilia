@@ -145,6 +145,7 @@ Task<> Memory::summarize(store::ChatKey chat) {
             call.input_tokens = completion->usage.input_tokens;
             call.output_tokens = completion->usage.output_tokens;
             call.cache_read_tokens = completion->usage.cache_read_tokens;
+            call.cache_write_tokens = completion->usage.cache_write_tokens;
             call.request_id = completion->request_id;
         }
         std::ignore = store.add_llm_call(call);

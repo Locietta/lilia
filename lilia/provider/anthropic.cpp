@@ -88,6 +88,14 @@ struct CacheControl {
     std::string type = "ephemeral";
 };
 
+/// The block form of `system`, which unlike the plain string can carry a
+/// cache breakpoint.
+struct SystemBlock {
+    std::string type = "text";
+    std::string text;
+    std::optional<CacheControl> cache_control;
+};
+
 struct Tool {
     std::optional<std::string> type;
     std::string name;
@@ -116,7 +124,7 @@ struct MessageRequest {
 
     std::string model;
     u32 max_tokens = 8192;
-    std::optional<std::string> system;
+    std::optional<std::variant<std::string, std::vector<SystemBlock>>> system;
     std::vector<Message> messages;
     std::optional<std::vector<Tool>> tools; // omitted when nullopt
     bool stream = true;
@@ -234,23 +242,43 @@ Result<std::string> encode_opaque(wire::ContentBlock block) {
 /// verbatim (thinking blocks with their signatures); foreign-tagged parts
 /// belong to another provider and are dropped.
 struct WireHistory {
-    std::optional<std::string> system;
+    /// One block per instruction text; concatenated they are the system prompt.
+    std::vector<wire::SystemBlock> system;
+    /// How many leading blocks come from SYSTEM items, the part that stays the
+    /// same from call to call (DEVELOPER text carries the time and chat state).
+    usize stable_system = 0;
     std::vector<wire::Message> messages;
 };
 
-void append_instruction(std::string &prompt, provider::Role role, std::string_view text) {
+void append_instruction(WireHistory &serialized, provider::Role role, std::string_view text) {
     if (text.empty()) return;
-    if (prompt.empty()) {
-        prompt = "Instruction hierarchy: SYSTEM instructions take precedence over DEVELOPER instructions.\n";
+    std::string block;
+    if (serialized.system.empty()) {
+        block = "Instruction hierarchy: SYSTEM instructions take precedence over DEVELOPER instructions.\n";
     }
-    prompt += role == provider::Role::SYSTEM ? "\n[SYSTEM]\n" : "\n[DEVELOPER]\n";
-    prompt += text;
+    block += role == provider::Role::SYSTEM ? "\n[SYSTEM]\n" : "\n[DEVELOPER]\n";
+    block += text;
+    serialized.system.push_back({.text = std::move(block)});
+    if (role == provider::Role::SYSTEM && serialized.stable_system + 1 == serialized.system.size()) ++serialized.stable_system;
+}
+
+/// The plain string, or with prompt caching the blocks with a breakpoint after
+/// the stable SYSTEM part, so a new reply reuses it even though the DEVELOPER
+/// text and the conversation after it have changed.
+std::optional<std::variant<std::string, std::vector<wire::SystemBlock>>> encode_system(WireHistory &serialized, bool prompt_cache) {
+    if (serialized.system.empty()) return std::nullopt;
+    if (prompt_cache) {
+        if (serialized.stable_system > 0) serialized.system[serialized.stable_system - 1].cache_control = wire::CacheControl{};
+        return std::move(serialized.system);
+    }
+    std::string prompt;
+    for (const auto &block : serialized.system) prompt += block.text;
+    return prompt;
 }
 
 Result<WireHistory> to_wire(const provider::History &history) {
     WireHistory serialized;
     serialized.messages.reserve(history.size());
-    std::string system;
     bool conversation_started = false;
 
     for (const auto &item : history) {
@@ -261,7 +289,7 @@ Result<WireHistory> to_wire(const provider::History &history) {
         if (instruction) {
             for (const auto &part : item.parts) {
                 if (const auto *text = std::get_if<provider::TextPart>(&part)) {
-                    append_instruction(system, item.role, text->text);
+                    append_instruction(serialized, item.role, text->text);
                 } else {
                     return outcome_error(Error::protocol("instruction messages may contain only text"));
                 }
@@ -310,7 +338,6 @@ Result<WireHistory> to_wire(const provider::History &history) {
             }
         }
     }
-    if (!system.empty()) serialized.system = std::move(system);
     return serialized;
 }
 
@@ -904,7 +931,7 @@ Result<std::string> encode_complete_request(const provider::History &history, co
     wire::MessageRequest request{
         .model = options.model,
         .max_tokens = options.max_tokens,
-        .system = std::move(wire_history->system),
+        .system = encode_system(*wire_history, options.prompt_cache),
         .messages = std::move(wire_history->messages),
     };
     if (!tools.empty()) {

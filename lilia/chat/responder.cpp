@@ -225,8 +225,8 @@ Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, 
         call.cache_write_tokens = completion->usage.cache_write_tokens;
         call.stop = completion->stop_detail;
         call.request_id = completion->request_id;
-        log::info("{} call for {}: {} in / {} out / {} cached tokens", purpose, describe(chat), call.input_tokens, call.output_tokens,
-                  call.cache_read_tokens);
+        log::info("{} call for {}: {} in / {} out / {} cache read / {} cache write tokens", purpose, describe(chat), call.input_tokens,
+                  call.output_tokens, call.cache_read_tokens, call.cache_write_tokens);
     }
     if (auto recorded = r->store.add_llm_call(call); recorded.has_error()) {
         log::error("cannot record model call: {}", recorded.error().message());

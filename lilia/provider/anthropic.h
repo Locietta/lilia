@@ -43,9 +43,11 @@ struct ClientOptions {
     usize max_retries = 2;
     std::chrono::milliseconds initial_retry_delay{500};
     /// Ask for Anthropic prompt caching: on the whole request (automatic
-    /// caching, so each tool round reuses the one before) and on the last
-    /// tool. Claude only caches when asked; DeepSeek and MiniMax cache by
-    /// themselves and need not see the field.
+    /// caching, so each tool round reuses the one before), on the last tool
+    /// and after the SYSTEM instructions, which `system` then sends as text
+    /// blocks (the next reply reuses tools and system). Claude only caches
+    /// when asked; DeepSeek and MiniMax cache by themselves and need not see
+    /// the field.
     bool prompt_cache = false;
 };
 

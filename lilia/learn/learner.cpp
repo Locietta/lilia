@@ -645,6 +645,7 @@ Task<std::optional<std::vector<provider::OutputItem>>> run_call(Learner *learner
         call.input_tokens = completion->usage.input_tokens;
         call.output_tokens = completion->usage.output_tokens;
         call.cache_read_tokens = completion->usage.cache_read_tokens;
+        call.cache_write_tokens = completion->usage.cache_write_tokens;
         call.stop = completion->stop_detail;
         call.request_id = completion->request_id;
     }
