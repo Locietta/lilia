@@ -41,6 +41,10 @@ std::vector<Segment> split_pieces(std::string_view text);
 /// (or their newline), as people type, not by the mark they were split at.
 std::vector<Segment> pack_segments(std::vector<Segment> segments, usize max_count);
 
+/// Replaces every "哈哈…" with "草" or "www" (at random): models laugh in
+/// 哈哈, people in these groups do not.
+std::string replace_haha(std::string_view text, std::mt19937 &rng);
+
 /// Removes the spaces models put between Chinese and Latin letters or digits
 /// ("PK 输了" -> "PK输了"); people rarely type them.
 std::string tighten_spacing(std::string_view text);

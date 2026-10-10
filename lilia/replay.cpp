@@ -261,8 +261,6 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     responder.observer = [](const store::ChatKey &, const chat::Plan &plan, const std::vector<std::string> &) {
         if (plan.wait > 0) {
             print(std::format("        · 等 {} 秒：{}", plan.wait, plan.reason));
-        } else if (!plan.react.empty()) {
-            print(std::format("        · 给 {} 点了「{}」", plan.target, plan.react));
         } else if (!plan.reply) {
             print(std::format("        · {}：{}", plan.follow_up ? "到此为止" : "不说话", plan.reason));
         } else {
@@ -293,7 +291,6 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         };
         return responder.ingest(event);
     };
-    responder.reactor = [](const store::ChatKey &, i64, std::string) -> Task<bool> { co_return true; };
     // A planner wait: the clock moves on, and the lines of that time arrive.
     responder.pause = [&](const store::ChatKey &, i64 seconds) -> Task<> {
         sim += seconds;

@@ -121,13 +121,9 @@ void test_planner() {
     require(user.find("以下是新消息") < user.find("#3 "), "the new messages are marked");
     require(user.find("以下是新消息") > user.find("#2 "), "old lines come before the marker");
     require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");
-    require(request.tools.size() == 4 && request.tools[0].name == "reply" && request.tools[1].name == "react" &&
-                request.tools[2].name == "wait" && request.tools[3].name == "stay_silent",
-            "reply, react, wait, stay_silent");
-    const auto reacted = chat::parse_plan({provider::OutputItem(tool_call("react", R"({"target":"#3","emoji":"赞"})"))}, request.ids);
-    require(!reacted.reply && reacted.react == "赞" && reacted.target == 104 && chat::reaction_face("赞") == "76", "a reaction");
-    require(chat::parse_plan({provider::OutputItem(tool_call("react", R"({"target":"#3","emoji":"🤡"})"))}, request.ids).react.empty(),
-            "only known reactions");
+    require(request.tools.size() == 3 && request.tools[0].name == "reply" && request.tools[1].name == "wait" &&
+                request.tools[2].name == "stay_silent",
+            "reply, wait, stay_silent");
 
     using provider::OutputItem;
     const auto reply = chat::parse_plan(
@@ -323,6 +319,13 @@ void test_bubbles() {
     const auto packed = chat::pack_segments(corrected, 3);
     require(texts(packed) == std::vector<std::string>({"一 二", "三 四 五", "六"}) && packed[2].quote_previous,
             "a correction keeps its own message");
+    std::mt19937 laugh(3);
+    for (int i = 0; i < 20; ++i) {
+        const auto out = chat::replace_haha("哈哈不是吧 真的哈哈哈", laugh);
+        require(out.find("哈哈") == std::string::npos && (out.starts_with("草不是吧") || out.starts_with("www不是吧")),
+                "哈哈 becomes 草 or www: " + out);
+    }
+    require(chat::replace_haha("哈？真的假的", laugh) == "哈？真的假的", "a lone 哈 stays");
     require(chat::tighten_spacing("啥情况 PK 输了？用 C++ 写") == "啥情况PK输了？用C++写" &&
                 chat::tighten_spacing("use godot 吧") == "use godot吧" && chat::tighten_spacing("还没玩 最近在追番") == "还没玩 最近在追番",
             "no spaces around English words; spaces between Chinese clauses stay");

@@ -401,6 +401,25 @@ std::string_view emoji_feeling(char32_t emoji) {
     }
 }
 
+std::string replace_haha(std::string_view text, std::mt19937 &rng) {
+    constexpr std::string_view k_ha = "哈";
+    std::string out;
+    for (usize at = 0; at < text.size();) {
+        auto end = at;
+        while (text.substr(end).starts_with(k_ha)) end += k_ha.size();
+        if (end - at >= 2 * k_ha.size()) {
+            out += std::bernoulli_distribution(0.5)(rng) ? "草" : "www";
+            at = end;
+        } else if (end > at) {
+            out += k_ha; // a lone 哈 ("哈？") is surprise, not a laugh
+            at = end;
+        } else {
+            out += text[at++];
+        }
+    }
+    return out;
+}
+
 std::string tighten_spacing(std::string_view text) {
     const auto chars = learn::utf8_chars(text);
     // "+" and "#" end words like C++ and C#.

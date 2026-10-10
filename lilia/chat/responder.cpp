@@ -273,11 +273,6 @@ Task<bool> call_action(Responder *r, std::string action, std::string params) {
     co_return true;
 }
 
-Task<bool> react_to(Responder *r, const store::ChatKey &chat, i64 message_id, std::string face) {
-    if (r->reactor) co_return co_await r->reactor(chat, message_id, std::move(face));
-    co_return co_await call_action(r, "set_msg_emoji_like", std::format(R"({{"message_id":{},"emoji_id":"{}"}})", message_id, face));
-}
-
 /// Poked in an allowed group: usually she pokes back after a moment, the
 /// way people do; at most once a minute per person, never while asleep.
 Task<> poke_back(Responder *r, i64 group, i64 user) {
@@ -863,7 +858,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
     } else {
         // Every line, trimmed, blank ones dropped; no spaces around English words.
-        const auto casual = tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max()));
+        const auto casual = replace_haha(tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max())), r->rng);
         segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);
         if (segments.size() > k_max_pieces) {
             segments.clear();
@@ -1092,8 +1087,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (!memory || searches >= config.memory.max_searches)
             std::erase_if(offered, [](const auto &tool) { return tool.name == "search_history"; });
         if (must_speak && replies == 0)
-            std::erase_if(offered,
-                          [](const auto &tool) { return tool.name == "wait" || tool.name == "stay_silent" || tool.name == "react"; });
+            std::erase_if(offered, [](const auto &tool) { return tool.name == "wait" || tool.name == "stay_silent"; });
         // Right after a sticker, no second one.
         if (now() - state.last_sticker < config.stickers.cooldown_seconds)
             std::erase_if(offered, [](const auto &tool) { return tool.name == "send_sticker"; });
@@ -1141,29 +1135,6 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             continue;
         }
         waits = 0;
-        if (!plan.react.empty()) {
-            // An emoji reaction on a message instead of words.
-            const auto index = static_cast<usize>(std::ranges::find(ids, plan.target) - ids.begin()) + 1;
-            const bool done = co_await react_to(this, chat, plan.target, std::string(reaction_face(plan.react)));
-            log::info("{} reacts {} to {}{}", describe(chat), plan.react, plan.target, done ? "" : " (failed)");
-            if (observer) observer(chat, plan, {});
-            if (done) {
-                ++replies;
-                note_spoke(state.flow, now(), 0);
-                remember_decision(state,
-                                  std::format("[{}] 给一条消息点了「{}」", clock_of(now(), settings.utc_offset_minutes), plan.react));
-            }
-            if (replies >= k_max_replies) {
-                ended = "replied enough";
-                break;
-            }
-            const auto came = co_await arrivals();
-            provider::append_tool_outcomes(history,
-                                           outcomes(*planned, call_id,
-                                                    std::format("{}给 #{} 点了「{}」\n{}", done ? "" : "没能", index, plan.react,
-                                                                came.empty() ? "这期间没有新消息。" : "这期间的新消息：\n" + came)));
-            continue;
-        }
         if (!plan.reply) {
             ended = plan.reason;
             break;
