@@ -334,6 +334,14 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         }
         if (!responder.chats[chat].flow.unseen.empty()) co_await responder.run_turn(chat);
         co_await tasks.join();
+        // Her messages as stored, so a sticker reads "[表情: 描述]" like anyone else's.
+        if (auto recent = store->recent_messages(chat, 40); recent.has_value()) {
+            std::vector<std::string> stored;
+            for (const auto &message : *recent) {
+                if (message.from_self) stored.push_back(message.text);
+            }
+            if (stored.size() == outcome.messages.size()) outcome.messages = std::move(stored);
+        }
         print("RESULT " + glz::write_json(outcome).value_or("{}"));
         co_return 0;
     }
