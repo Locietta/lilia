@@ -982,9 +982,12 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     }
 
     // Ignoring someone who called her reads as broken, not as a choice.
-    if (addressed && !answered && ended != "the reply failed") {
-        log::info("{} turn ended ({}) without answering {}; replying anyway", describe(chat), ended, *addressed);
-        if ((co_await reply_to({.reply = true, .target = *addressed, .follow_up = replies > 0})).sent) ++replies;
+    // (In blind comparisons she must say something; the planner can still
+    // pick stay_silent, which it sees named in its prompt.)
+    if (((addressed && !answered) || (must_speak && replies == 0)) && ended != "the reply failed") {
+        const auto target = addressed && !answered ? *addressed : newest;
+        log::info("{} turn ended ({}) without answering {}; replying anyway", describe(chat), ended, target);
+        if ((co_await reply_to({.reply = true, .target = target, .follow_up = replies > 0})).sent) ++replies;
     }
     if (replies == 0) {
         log::info("{} stays silent: {}", describe(chat), ended);
