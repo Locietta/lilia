@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <fstream>
+#include <limits>
 #include <span>
 #include <sstream>
 #include <utility>
@@ -70,8 +71,6 @@ constexpr usize k_fact_context = 8;
 /// She holds back once she wrote this many of the last `k_self_window` messages.
 constexpr usize k_self_window = 10;
 constexpr usize k_self_limit = 3;
-/// Lines kept from a casual (short / normal) reply.
-constexpr usize k_casual_messages = 2;
 /// MaiBot's response_splitter: more pieces than this go out as one message;
 /// the rest are packed into at most this many messages.
 constexpr usize k_max_pieces = 8;
@@ -698,15 +697,14 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     // Casual replies go out the way MaiBot sends them: split at punctuation,
     // neighbours merged at random, a homophone typo now and then (sometimes
     // corrected right after), at most three messages. A long reply is on
-    // purpose (an explanation, a copypasta): one message, untouched. Casual
-    // replies keep their first two lines; models like a point-elaboration-
-    // conclusion triple, which reads as AI.
+    // purpose (an explanation, a copypasta): one message, untouched.
     const bool deliberate = plan.style == ReplyStyle::LONG && style_override.empty();
     std::vector<Segment> segments;
     if (deliberate) {
         for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
     } else {
-        const auto casual = first_lines(reply, k_casual_messages);
+        // Every line, trimmed, blank ones dropped.
+        const auto casual = first_lines(reply, std::numeric_limits<usize>::max());
         segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);
         if (segments.size() > k_max_pieces) {
             segments.clear();
