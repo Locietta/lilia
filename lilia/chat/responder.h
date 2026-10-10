@@ -94,6 +94,8 @@ struct Responder {
         /// Why she is only now looking (just woke up, was busy), for the
         /// next turn; consumed by it.
         std::string presence_note;
+        /// When she last laughed (草, www) here (unix seconds).
+        i64 last_laugh = 0;
         /// When she last poked each person back (unix seconds).
         std::map<i64, i64> poked_back;
         /// When she last sent a sticker here (unix seconds).

@@ -326,6 +326,12 @@ void test_bubbles() {
                 "哈哈 becomes 草 or www: " + out);
     }
     require(chat::replace_haha("哈？真的假的", laugh) == "哈？真的假的", "a lone 哈 stays");
+    bool dropped = false;
+    for (int i = 0; i < 30; ++i) dropped = dropped || chat::replace_haha("哈哈 不是吧", laugh) == "不是吧";
+    require(dropped, "in front of more words the laugh sometimes just goes");
+    require(chat::drop_leading_laugh("草 又抽运势") == "又抽运势" && chat::drop_leading_laugh("wwww 好") == "好" &&
+                chat::drop_leading_laugh("草") == "草" && chat::laughs("这也行 草") && !chat::laughs("好耶"),
+            "laugh limiter helpers");
     require(chat::tighten_spacing("啥情况 PK 输了？用 C++ 写") == "啥情况PK输了？用C++写" &&
                 chat::tighten_spacing("use godot 吧") == "use godot吧" && chat::tighten_spacing("还没玩 最近在追番") == "还没玩 最近在追番",
             "no spaces around English words; spaces between Chinese clauses stay");

@@ -408,7 +408,13 @@ std::string replace_haha(std::string_view text, std::mt19937 &rng) {
         auto end = at;
         while (text.substr(end).starts_with(k_ha)) end += k_ha.size();
         if (end - at >= 2 * k_ha.size()) {
-            out += std::bernoulli_distribution(0.5)(rng) ? "草" : "www";
+            // In front of more words, half the time the laugh just goes.
+            const bool more = end < text.size() && text[end] != '\n';
+            if (more && std::bernoulli_distribution(0.5)(rng)) {
+                if (end < text.size() && text[end] == ' ') ++end;
+            } else {
+                out += std::bernoulli_distribution(0.5)(rng) ? "草" : "www";
+            }
             at = end;
         } else if (end > at) {
             out += k_ha; // a lone 哈 ("哈？") is surprise, not a laugh
@@ -418,6 +424,19 @@ std::string replace_haha(std::string_view text, std::mt19937 &rng) {
         }
     }
     return out;
+}
+
+bool laughs(std::string_view text) { return text.find("草") != std::string_view::npos || text.find("www") != std::string_view::npos; }
+
+std::string drop_leading_laugh(std::string_view text) {
+    for (const std::string_view laugh : {"草", "www"}) {
+        if (!text.starts_with(laugh)) continue;
+        auto rest = text.substr(laugh.size());
+        while (rest.starts_with('w')) rest.remove_prefix(1);
+        while (rest.starts_with(' ')) rest.remove_prefix(1);
+        if (!rest.empty() && !rest.starts_with('\n')) return std::string(rest);
+    }
+    return std::string(text);
 }
 
 std::string tighten_spacing(std::string_view text) {

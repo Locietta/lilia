@@ -76,6 +76,8 @@ constexpr usize k_self_facts = 6;
 constexpr usize k_self_context = 4;
 /// Poked, she pokes back this often, at most once per person in this many seconds.
 constexpr double k_poke_back_chance = 0.7;
+/// After she laughed (草, www), a leading laugh is dropped for this long.
+constexpr i64 k_laugh_gap_seconds = 600;
 constexpr i64 k_poke_back_seconds = 60;
 /// She holds back once she wrote this many of the last `k_self_window` messages.
 constexpr usize k_self_window = 10;
@@ -858,7 +860,9 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
     } else {
         // Every line, trimmed, blank ones dropped; no spaces around English words.
-        const auto casual = replace_haha(tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max())), r->rng);
+        auto casual = replace_haha(tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max())), r->rng);
+        // A laugh at the start of every message is a tic; one now and then is not.
+        if (r->now() - state.last_laugh < k_laugh_gap_seconds) casual = drop_leading_laugh(casual);
         segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);
         if (segments.size() > k_max_pieces) {
             segments.clear();
@@ -909,6 +913,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
 
     std::string said;
     for (usize i = 0; i < sent; ++i) said += (said.empty() ? "" : " ") + bubbles[i];
+    if (laughs(said)) state.last_laugh = r->now();
     state.replied.emplace_back(plan.target, said);
     if (state.replied.size() > k_replied_memory) state.replied.pop_front();
     co_return Delivered{.sent = true, .said = std::move(said)};
