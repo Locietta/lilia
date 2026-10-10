@@ -38,7 +38,7 @@ using namespace std::chrono_literals;
 void print_usage(FILE *output) {
     std::fputs("usage: lilia [--config <path>] [--check-config]\n"
                "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
-               "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>]\n"
+               "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>] [--continue-at <line>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
                "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
@@ -169,6 +169,7 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> habits_db;
     std::optional<std::filesystem::path> writer_prompt;
     std::optional<std::filesystem::path> stickers_db;
+    std::optional<usize> continue_at;
     std::optional<std::filesystem::path> learn_log;
     bool list_expressions = false;
     bool jargon = false;
@@ -298,6 +299,8 @@ int main(int argc, char **argv) {
             writer_prompt = argv[++i];
         } else if (arg == "--stickers" && replay_log && i + 1 < argc) {
             stickers_db = argv[++i];
+        } else if (arg == "--continue-at" && replay_log && i + 1 < argc) {
+            continue_at = static_cast<usize>(std::max(0, std::atoi(argv[++i])));
         } else if (arg == "--review" && list_expressions) {
             review = true;
         } else if (arg == "--apply" && list_expressions) {
@@ -348,10 +351,11 @@ int main(int argc, char **argv) {
         log::error("cannot watch process signals: {}", interrupts.error().message());
         return 1;
     }
-    auto app = lighter::with_token(replay_log ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db) :
-                                   learn_log  ? run_learn(*config, *learn_log) :
-                                   review     ? review_expressions(*config, apply, keep) :
-                                                run_app(*config),
+    auto app = lighter::with_token(replay_log ?
+                                       run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at) :
+                                   learn_log ? run_learn(*config, *learn_log) :
+                                   review    ? review_expressions(*config, apply, keep) :
+                                               run_app(*config),
                                    interrupts->token());
     loop.schedule(app);
     loop.run();

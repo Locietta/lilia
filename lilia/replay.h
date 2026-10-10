@@ -32,9 +32,12 @@ provider::Provider make_learner(const ModelConfig &model);
 /// copied into the replay's in-memory store. `writer_prompt` replaces the
 /// built-in writer.md, for comparing prompt variants. `stickers`: a lilia.db
 /// whose registered stickers she may send (read-only; files from its data dir).
+/// `continue_at`: only what she would say right before that (0-based) line,
+/// after the log up to it; printed last as "RESULT {json}" (replied,
+/// messages, decisions), for blind comparisons with what people really said.
 lighter::Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
                               std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt = {},
-                              std::optional<std::filesystem::path> stickers = {});
+                              std::optional<std::filesystem::path> stickers = {}, std::optional<usize> continue_at = {});
 
 /// Runs the expression learner over a JSONL log (same format as replay) in
 /// batches of `learning.batch_messages` and prints what it would learn.

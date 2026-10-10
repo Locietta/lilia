@@ -168,7 +168,7 @@ std::optional<std::vector<ReplayLine>> read_log(const std::filesystem::path &log
 
 Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
                      std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt,
-                     std::optional<std::filesystem::path> stickers) {
+                     std::optional<std::filesystem::path> stickers, std::optional<usize> continue_at) {
     auto parsed = read_log(log);
     if (!parsed) co_return 1;
     auto lines = *std::move(parsed);
@@ -297,6 +297,45 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         while (next_line < lines.size() && lines[next_line].t <= sim) std::ignore = feed(lines[next_line++]);
         co_return;
     };
+    if (continue_at) {
+        // What she would say right before line `continue_at`: the log up to
+        // there is fed without turns (its last three lines count as new),
+        // then one turn runs. Waits do not reveal the lines that follow.
+        struct Outcome {
+            bool replied = false;
+            std::vector<std::string> messages;
+            std::vector<std::string> decisions;
+        } outcome;
+        responder.outbox = [&outcome, &next_id](const store::ChatKey &, onebot::Message message) -> Task<std::optional<i64>> {
+            const bool sticker = std::ranges::any_of(message, [](const onebot::Segment &segment) { return segment.type == "image"; });
+            outcome.messages.push_back(sticker ? std::string("[表情包]") : onebot::render_plain(message));
+            outcome.replied = true;
+            co_return ++next_id;
+        };
+        responder.observer = [&outcome](const store::ChatKey &, const chat::Plan &plan, const std::vector<std::string> &) {
+            outcome.decisions.push_back(plan.wait > 0 ? std::format("wait {}: {}", plan.wait, plan.reason) :
+                                        plan.reply    ? std::format("reply {}: {}", plan.target, plan.intent) :
+                                                        std::format("end: {}", plan.reason));
+        };
+        responder.pause = [&sim](const store::ChatKey &, i64 seconds) -> Task<> {
+            sim += seconds;
+            co_return;
+        };
+        const store::ChatKey chat{.type = "group", .id = k_replay_group};
+        const usize stop = std::min(*continue_at, lines.size());
+        for (usize i = 0; i < stop; ++i) {
+            if (i + 3 == stop || (stop < 3 && i == 0)) {
+                auto &state = responder.chats[chat];
+                state.flow.unseen.clear();
+                state.flow.addressed.reset();
+            }
+            std::ignore = feed(lines[i]);
+        }
+        if (!responder.chats[chat].flow.unseen.empty()) co_await responder.run_turn(chat);
+        co_await tasks.join();
+        print("RESULT " + glz::write_json(outcome).value_or("{}"));
+        co_return 0;
+    }
     while (next_line < lines.size()) {
         if (const auto chat = feed(lines[next_line++])) {
             // As turn_worker: look again while messages left from the turn call for it.
