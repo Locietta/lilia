@@ -321,6 +321,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             sim += seconds;
             co_return;
         };
+        responder.must_speak = true;
         const store::ChatKey chat{.type = "group", .id = k_replay_group};
         const usize stop = std::min(*continue_at, lines.size());
         for (usize i = 0; i < stop; ++i) {

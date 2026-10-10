@@ -78,6 +78,9 @@ struct Responder {
     Pause pause;
     /// Debounce and typing delays; replay turns them off.
     bool realtime = true;
+    /// Blind comparisons (replay --continue-at): until she has replied, the
+    /// planner may only reply (or look something up).
+    bool must_speak = false;
 
     struct ChatState {
         Flow flow;

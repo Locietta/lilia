@@ -33,8 +33,9 @@ provider::Provider make_learner(const ModelConfig &model);
 /// built-in writer.md, for comparing prompt variants. `stickers`: a lilia.db
 /// whose registered stickers she may send (read-only; files from its data dir).
 /// `continue_at`: only what she would say right before that (0-based) line,
-/// after the log up to it; printed last as "RESULT {json}" (replied,
-/// messages, decisions), for blind comparisons with what people really said.
+/// after the log up to it; she must say something (the planner still picks
+/// whom and what). Printed last as "RESULT {json}" (replied, messages,
+/// decisions), for blind comparisons with what people really said.
 lighter::Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
                               std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt = {},
                               std::optional<std::filesystem::path> stickers = {}, std::optional<usize> continue_at = {});

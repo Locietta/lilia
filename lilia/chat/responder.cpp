@@ -913,6 +913,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         auto offered = request.tools;
         if (!memory || searches >= config.memory.max_searches)
             std::erase_if(offered, [](const auto &tool) { return tool.name == "search_history"; });
+        if (must_speak && replies == 0)
+            std::erase_if(offered, [](const auto &tool) { return tool.name == "wait" || tool.name == "stay_silent"; });
         const auto planned = co_await call_model(this, planner, config.model.planner_model, "planner", chat, history, offered);
         if (!planned) break;
         for (const auto &item : *planned) provider::append_output_item(history, item);
