@@ -246,8 +246,15 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
     });
     if (input.stickers) {
         auto &reply = request.tools.back().input_schema;
-        reply.properties.emplace("sticker", property("string", "可选：想配的表情包的感觉，比如\"无语\"；大多数时候不填"));
-        reply.properties["style"] = property("string", "short | normal | long | sticker（只发一张表情包）");
+        reply.properties.emplace("sticker", property("string", "可选：说完话后想配的表情包的感觉，比如\"无语\"；大多数时候不填"));
+        // A tool of its own, like MaiBot's send_emoji: buried in reply, it was never picked.
+        request.tools.push_back({
+            .name = "send_sticker",
+            .description = "只发一张表情包、不说话，用来表达情绪或反应",
+            .input_schema = {.properties = {{"feeling", property("string", "想表达的感觉，比如\"笑死\"\"无语\"\"震惊\"\"好耶\"")},
+                                            {"target", property("string", "可选：在回应哪条消息，例如 \"#12\"")}},
+                             .required = {"feeling"}},
+        });
     }
     request.tools.push_back({
         .name = "wait",
@@ -275,9 +282,9 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
 
 std::string_view sticker_rule(bool enabled) {
     if (!enabled) return "";
-    return "- 群里大家常用表情包回应。她想表达的主要是情绪或反应（笑死、无语、震惊、赞同、委屈）时，style 选 sticker，"
-           "只回一张表情包往往比打字自然；说完话还想补个情绪时，在 reply 里填 sticker（想表达的感觉，比如\"无语\"\"笑死\"\"好耶\"），"
-           "她会在说完话后配一张。认真回答问题、说正事时不用表情包；刚发过一张就隔一会儿。\n";
+    return "- 群里大家常用表情包回应。她想表达的主要是情绪或反应（笑死、无语、震惊、赞同、委屈、看戏）时，用 send_sticker "
+           "只发一张表情包，往往比打字自然；说完话还想补个情绪时，在 reply 里填 sticker（想表达的感觉），她会在说完话后配一张。"
+           "认真回答问题、说正事时不用表情包；刚发过一张就隔一会儿。\n";
 }
 
 std::string_view memory_rule(bool enabled) {
@@ -301,6 +308,16 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         if (!tool) continue;
         const auto &input = tool->call.input;
         if (tool->call.name == "stay_silent") return {.reason = string_field(input, "reason")};
+        if (tool->call.name == "send_sticker") {
+            // Aimed at the given message, else the newest one shown.
+            const auto target = parse_target(string_field(input, "target"));
+            const auto id = target && *target > 0 && *target <= ids.size() ? ids[*target - 1] : ids.empty() ? 0 : ids.back();
+            return {.reply = true,
+                    .target = id,
+                    .intent = string_field(input, "feeling"),
+                    .sticker = string_field(input, "feeling"),
+                    .sticker_only = true};
+        }
         if (tool->call.name == "wait") {
             // MaiBot waits 30 seconds when the argument is missing or invalid.
             i64 seconds = 30;

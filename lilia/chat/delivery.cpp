@@ -170,6 +170,11 @@ std::string flatten_lines(std::string_view text) {
 
 namespace {
 
+/// What joins two pieces again: a space for any mark (MaiBot restores the
+/// mark; people in QQ groups mostly type a space instead of "，"), a newline
+/// for a newline.
+std::string soft(std::string_view separator) { return separator == "\n" ? "\n" : separator.empty() ? "" : " "; }
+
 /// The pieces of `text` (MaiBot's first pass, before merging), keeping the
 /// empty ones that only carry a space or newline.
 std::vector<Segment> raw_pieces(std::string_view text) {
@@ -272,7 +277,8 @@ std::vector<Segment> split_segments(std::string_view text, std::mt19937 &rng) {
         auto &here = segments[i];
         if (i + 1 < segments.size() && !here.text.empty() && here.separator != "\n" && chance(rng) < merge) {
             auto &next = segments[i + 1];
-            merged.push_back({.text = next.text.empty() ? here.text : here.text + here.separator + next.text, .separator = next.separator});
+            merged.push_back(
+                {.text = next.text.empty() ? here.text : here.text + soft(here.separator) + next.text, .separator = next.separator});
             i += 2;
         } else {
             merged.push_back(std::move(here));
@@ -305,7 +311,7 @@ std::vector<Segment> pack_segments(std::vector<Segment> segments, usize max_coun
         Segment joined{.separator = segments[end - 1].separator, .quote_previous = segments[sorted[g]].quote_previous};
         for (usize i = sorted[g]; i < end; ++i) {
             joined.text += segments[i].text;
-            if (i + 1 < end) joined.text += segments[i].separator;
+            if (i + 1 < end) joined.text += soft(segments[i].separator);
         }
         packed.push_back(std::move(joined));
     }
@@ -393,6 +399,25 @@ std::string_view emoji_feeling(char32_t emoji) {
         case U'🥱': return "困";
         default: return {};
     }
+}
+
+std::string tighten_spacing(std::string_view text) {
+    const auto chars = learn::utf8_chars(text);
+    // "+" and "#" end words like C++ and C#.
+    const auto latin = [](char32_t c) {
+        return (c >= U'a' && c <= U'z') || (c >= U'A' && c <= U'Z') || (c >= U'0' && c <= U'9') || c == U'+' || c == U'#';
+    };
+    const auto wide = [](char32_t c) { return c >= 0x2E80; }; // CJK and full-width punctuation
+    std::string out;
+    for (usize i = 0; i < chars.size(); ++i) {
+        if (chars[i].cp == U' ' && i > 0 && i + 1 < chars.size()) {
+            const auto prev = chars[i - 1].cp;
+            const auto next = chars[i + 1].cp;
+            if ((wide(prev) && latin(next)) || (latin(prev) && wide(next))) continue;
+        }
+        out += text.substr(chars[i].begin, chars[i].end - chars[i].begin);
+    }
+    return out;
 }
 
 std::chrono::milliseconds typing_delay(std::string_view bubble, double speed) {

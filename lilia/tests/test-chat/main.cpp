@@ -142,6 +142,14 @@ void test_planner() {
                 chat::parse_plan({OutputItem(tool_call("wait", R"({})"))}, request.ids).wait == 30,
             "waits are capped at a minute; 30 seconds when unsaid");
 
+    auto sticker_input = chat::PlannerInput{.prompt = "P", .info = group_info(), .recent = {stored(301, t, "c", "笑死")}, .fresh = {301}};
+    sticker_input.stickers = true;
+    const auto sticker_request = chat::build_planner_request(sticker_input);
+    require(std::ranges::contains(sticker_request.tools, std::string("send_sticker"), &provider::ToolDefinition::name),
+            "a sticker tool when she has stickers");
+    const auto sticker = chat::parse_plan({OutputItem(tool_call("send_sticker", R"({"feeling":"笑死"})"))}, sticker_request.ids);
+    require(sticker.reply && sticker.sticker_only && sticker.sticker == "笑死" && sticker.target == 301, "a sticker alone, at the newest");
+
     auto ids = request.ids;
     const auto arrived = chat::number_messages({stored(105, t + 10, "d", "我也在看"), stored(106, t + 12, "e", "哪部")}, ids, 480);
     require(arrived == "#4 [21:05] d(20105): 我也在看\n#5 [21:05] e(20106): 哪部\n" && ids.size() == 5 && ids[4] == 106,
@@ -290,23 +298,29 @@ void test_bubbles() {
     require(chat::split_pieces("“一，二”三，四").size() == 1, "a curly quote never closes (as in MaiBot)");
     require(chat::split_pieces("  \n ").empty() && chat::split_pieces("好").size() == 1, "blank text; short text stays whole");
 
-    // Merging only joins neighbours back together with their separator.
+    // Merging only joins neighbours back together, with a space for the mark.
+    bool merged_some = false;
     for (unsigned seed = 0; seed < 50; ++seed) {
         std::mt19937 rng(seed);
         const auto merged = chat::split_segments("骂的又不是你，圈内撕版权和抢饭碗呗，个人小项目拿它当草稿参考又没啥", rng);
         std::string joined;
-        for (const auto &segment : merged) joined += segment.text + segment.separator;
-        require(joined == "骂的又不是你，圈内撕版权和抢饭碗呗，个人小项目拿它当草稿参考又没啥" && !merged.empty() && merged.size() <= 3,
-                "merging keeps the text");
+        for (const auto &segment : merged) joined += segment.text + (segment.separator.empty() ? "" : " ");
+        require(joined == "骂的又不是你 圈内撕版权和抢饭碗呗 个人小项目拿它当草稿参考又没啥" && !merged.empty() && merged.size() <= 3,
+                "merging keeps the text: " + joined);
+        merged_some = merged_some || merged.size() < 3;
     }
+    require(merged_some, "pieces do merge sometimes");
 
     const std::vector<Segment> six{{"一", "，"}, {"二", "，"}, {"三", "，"}, {"四", "，"}, {"五", "，"}, {"六", ""}};
-    require(texts(chat::pack_segments(six, 3)) == std::vector<std::string>({"一，二", "三，四", "五，六"}), "packed evenly");
+    require(texts(chat::pack_segments(six, 3)) == std::vector<std::string>({"一 二", "三 四", "五 六"}), "packed evenly, spaces between");
     auto corrected = six;
     corrected[5].quote_previous = true;
     const auto packed = chat::pack_segments(corrected, 3);
-    require(texts(packed) == std::vector<std::string>({"一，二", "三，四，五", "六"}) && packed[2].quote_previous,
+    require(texts(packed) == std::vector<std::string>({"一 二", "三 四 五", "六"}) && packed[2].quote_previous,
             "a correction keeps its own message");
+    require(chat::tighten_spacing("啥情况 PK 输了？用 C++ 写") == "啥情况PK输了？用C++写" &&
+                chat::tighten_spacing("use godot 吧") == "use godot吧" && chat::tighten_spacing("还没玩 最近在追番") == "还没玩 最近在追番",
+            "no spaces around English words; spaces between Chinese clauses stay");
     require(chat::pack_segments(six, 8).size() == 6, "few enough: unchanged");
     require(chat::whole_message(" 第一段很长，很长很长很长很长很长很长很长。\n\n第二段 \n") ==
                 std::vector<std::string>({"第一段很长，很长很长很长很长很长很长很长。\n第二段"}),

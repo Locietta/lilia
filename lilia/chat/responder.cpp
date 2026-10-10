@@ -720,8 +720,8 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     if (deliberate) {
         for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
     } else {
-        // Every line, trimmed, blank ones dropped.
-        const auto casual = first_lines(reply, std::numeric_limits<usize>::max());
+        // Every line, trimmed, blank ones dropped; no spaces around English words.
+        const auto casual = tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max()));
         segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);
         if (segments.size() > k_max_pieces) {
             segments.clear();
@@ -938,6 +938,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             std::erase_if(offered, [](const auto &tool) { return tool.name == "search_history"; });
         if (must_speak && replies == 0)
             std::erase_if(offered, [](const auto &tool) { return tool.name == "wait" || tool.name == "stay_silent"; });
+        // Right after a sticker, no second one.
+        if (now() - state.last_sticker < config.stickers.cooldown_seconds)
+            std::erase_if(offered, [](const auto &tool) { return tool.name == "send_sticker"; });
         const auto planned = co_await call_model(this, planner, config.model.planner_model, "planner", chat, history, offered);
         if (!planned) break;
         for (const auto &item : *planned) provider::append_output_item(history, item);

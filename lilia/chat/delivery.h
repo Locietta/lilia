@@ -36,9 +36,14 @@ std::vector<Segment> split_segments(std::string_view text, std::mt19937 &rng);
 std::vector<Segment> split_pieces(std::string_view text);
 
 /// MaiBot's _merge_processed_segments_to_max_count: packs `segments` into at
-/// most `max_count` messages of about even size, restoring separators; a
-/// typo correction keeps starting a message of its own when possible.
+/// most `max_count` messages of about even size; a typo correction keeps
+/// starting a message of its own when possible. Pieces are joined by a space
+/// (or their newline), as people type, not by the mark they were split at.
 std::vector<Segment> pack_segments(std::vector<Segment> segments, usize max_count);
+
+/// Removes the spaces models put between Chinese and Latin letters or digits
+/// ("PK 输了" -> "PK输了"); people rarely type them.
+std::string tighten_spacing(std::string_view text);
 
 /// The first `count` non-blank lines of `text`. Each line is a complete
 /// message, so this drops add-on messages without cutting anything short.
