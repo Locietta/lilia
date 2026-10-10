@@ -106,11 +106,11 @@ provider::Provider make_vision(const ModelConfig &model) {
 }
 
 provider::Provider make_learner(const ModelConfig &model) {
-    return make_client(model, model.base_url, model.api_key, model.planner_model, 1'000, true);
+    return make_client(model, model.base_url, model.api_key, model.helper(), 1'000, true);
 }
 
 provider::Provider make_searcher(const ModelConfig &model) {
-    return make_client(model, model.base_url, model.api_key, model.planner_model, 1'200);
+    return make_client(model, model.base_url, model.api_key, model.helper(), 1'200);
 }
 
 provider::Provider make_writer(const ModelConfig &model) {
@@ -252,7 +252,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     if (config.memory.enabled) {
         memory.now = [&sim, base] { return base + sim; };
         memory.summarizer = make_learner(config.model);
-        memory.summarizer_model = config.model.planner_model;
+        memory.summarizer_model = config.model.helper();
         responder.memory = &memory;
     }
     i64 next_id = 1'000'000;

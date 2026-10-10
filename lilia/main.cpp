@@ -139,7 +139,7 @@ Task<int> run_app(const Config &config) {
     if (config.memory.enabled) {
         responder.memory = &memory;
         memory.summarizer = make_learner(config.model);
-        memory.summarizer_model = config.model.planner_model;
+        memory.summarizer_model = config.model.helper();
         // Expressions are embedded for retrieval; catch up on older ones.
         learner.embedder = &memory;
         if (config.learning.enabled) tasks.spawn(learner.embed_missing());

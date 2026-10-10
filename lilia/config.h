@@ -38,6 +38,9 @@ struct ModelConfig {
     /// Decides whether and how lilia speaks; small and fast is enough.
     std::string planner_model = "deepseek-flash";
     u32 planner_max_tokens = 400;
+    /// Learning, memory summaries and search, on `base_url`; empty means
+    /// `planner_model`. Set it when the planner has its own endpoint.
+    std::string helper_model;
     /// Let the model think before answering (slower; off by default).
     bool thinking = false;
     /// Optional separate endpoint for the writer (`model`), e.g. MiniMax for
@@ -51,7 +54,8 @@ struct ModelConfig {
     /// models (e.g. claude-sonnet-5-5) reject that and want "between_tools".
     std::string writer_thinking_off;
     /// Optional separate endpoint for the planner (`planner_model`); empty
-    /// means `base_url`. Search, vision and learning stay on `base_url`.
+    /// means `base_url`. Search, vision and learning stay on `base_url`
+    /// (see helper_model).
     std::string planner_base_url;
     std::string planner_api_key; ///< secret
     bool planner_bearer = false;
@@ -75,6 +79,8 @@ struct ModelConfig {
     /// Offer the provider-hosted web_search server tool. A searched answer
     /// costs tens of thousands of input tokens with DeepSeek.
     bool web_search = true;
+
+    const std::string &helper() const { return helper_model.empty() ? planner_model : helper_model; }
 };
 
 /// Homophone typos in casual replies (MaiBot's chinese_typo, same defaults).

@@ -817,7 +817,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         const auto search_history = build_search_history(info, target, plan, started, settings.utc_offset_minutes);
         const std::vector<provider::ToolDefinition> search_tools{{.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"}};
         if (const auto found =
-                co_await call_model(r, r->searcher, r->config.model.planner_model, "search", chat, search_history, search_tools)) {
+                co_await call_model(r, r->searcher, r->config.model.helper(), "search", chat, search_history, search_tools)) {
             reference = clean_reply(final_text(*found), info, {}, 2'000);
         }
         log::info("search for {} returned {} bytes", describe(chat), reference.size());
