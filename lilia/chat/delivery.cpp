@@ -428,6 +428,23 @@ std::string replace_haha(std::string_view text, std::mt19937 &rng) {
 
 bool laughs(std::string_view text) { return text.find("草") != std::string_view::npos || text.find("www") != std::string_view::npos; }
 
+bool only_laughs(std::string_view text) {
+    text = trim(text);
+    if (text.empty()) return false;
+    while (!text.empty()) {
+        bool matched = false;
+        for (const std::string_view part : {"草", "w", "W", "h", "H", "笑死", "哈", "笑", " ", "！", "!", "~", "～"}) {
+            if (text.starts_with(part)) {
+                text.remove_prefix(part.size());
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) return false;
+    }
+    return true;
+}
+
 std::string drop_leading_laugh(std::string_view text) {
     for (const std::string_view laugh : {"草", "www"}) {
         if (!text.starts_with(laugh)) continue;

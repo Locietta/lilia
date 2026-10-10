@@ -863,6 +863,13 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         auto casual = replace_haha(tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max())), r->rng);
         // A laugh at the start of every message is a tic; one now and then is not.
         if (r->now() - state.last_laugh < k_laugh_gap_seconds) casual = drop_leading_laugh(casual);
+        // Nothing but a laugh: people here send a sticker for that.
+        if (only_laughs(casual) && stickers_ready(r) &&
+            co_await send_sticker(r, chat, "笑死：" + (plan.intent.empty() ? std::string("觉得好笑") : plan.intent), log_lines)) {
+            if (r->observer) r->observer(chat, plan, {"[表情]"});
+            note_spoke(state.flow, r->now(), target.sender_id);
+            co_return Delivered{.sent = true, .said = "[表情包]"};
+        }
         segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);
         if (segments.size() > k_max_pieces) {
             segments.clear();

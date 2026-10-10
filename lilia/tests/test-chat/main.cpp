@@ -333,6 +333,9 @@ void test_bubbles() {
     require(chat::drop_leading_laugh("草 又抽运势") == "又抽运势" && chat::drop_leading_laugh("wwww 好") == "好" &&
                 chat::drop_leading_laugh("草") == "草" && chat::laughs("这也行 草") && !chat::laughs("好耶"),
             "laugh limiter helpers");
+    require(chat::only_laughs("草") && chat::only_laughs("www") && chat::only_laughs(" 笑死 ") && chat::only_laughs("草草草") &&
+                !chat::only_laughs("草 又抽运势") && !chat::only_laughs(""),
+            "a reply that is only a laugh");
     require(chat::tighten_spacing("啥情况 PK 输了？用 C++ 写") == "啥情况PK输了？用C++写" &&
                 chat::tighten_spacing("use godot 吧") == "use godot吧" && chat::tighten_spacing("还没玩 最近在追番") == "还没玩 最近在追番",
             "no spaces around English words; spaces between Chinese clauses stay");

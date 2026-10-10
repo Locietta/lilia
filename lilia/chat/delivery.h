@@ -52,6 +52,10 @@ std::string drop_leading_laugh(std::string_view text);
 /// Whether `text` laughs (草, www).
 bool laughs(std::string_view text);
 
+/// Whether `text` is nothing but a laugh ("草", "www", "笑死", "hhh"…): people
+/// here send a sticker for that instead.
+bool only_laughs(std::string_view text);
+
 /// Removes the spaces models put between Chinese and Latin letters or digits
 /// ("PK 输了" -> "PK输了"); people rarely type them.
 std::string tighten_spacing(std::string_view text);
