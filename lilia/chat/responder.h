@@ -63,6 +63,10 @@ struct Responder {
     /// (context only: they never start a turn).
     void notice(const onebot::NoticeEvent &notice);
 
+    /// Starts the chat's turn worker unless one is running (it looks again
+    /// after its turn).
+    void wake(const store::ChatKey &chat);
+
     /// The message is stored as recalled and is never answered.
     void recall(const store::ChatKey &chat, i64 message_id);
 
@@ -112,12 +116,8 @@ struct Responder {
         /// Why she is only now looking (just woke up, was busy), for the
         /// next turn; consumed by it.
         std::string presence_note;
-        /// The text of the last 复读 chain she joined (once a chain).
-        std::string repeated;
-        /// When she last laughed (草, www) here (unix seconds).
-        i64 last_laugh = 0;
-        /// When she last poked each person back (unix seconds).
-        std::map<i64, i64> poked_back;
+        /// When she last poked each person (unix seconds).
+        std::map<i64, i64> poked;
         /// When she last sent a sticker here (unix seconds).
         i64 last_sticker = 0;
         /// Muted here until then (unix seconds): no turns, no model calls.

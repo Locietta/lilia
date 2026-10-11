@@ -75,13 +75,8 @@ constexpr usize k_fact_context = 8;
 /// (plus the newest few).
 constexpr usize k_self_facts = 6;
 constexpr usize k_self_context = 4;
-/// Poked, she pokes back this often, at most once per person in this many seconds.
-constexpr double k_poke_back_chance = 0.7;
-/// Messages looked at for a 复读 chain.
-constexpr usize k_repeat_lookback = 8;
-/// After she laughed (草, www), a leading laugh is dropped for this long.
-constexpr i64 k_laugh_gap_seconds = 600;
-constexpr i64 k_poke_back_seconds = 60;
+/// She pokes the same person at most once in this many seconds.
+constexpr i64 k_poke_gap_seconds = 60;
 /// MaiBot's response_splitter: more pieces than this go out as one message;
 /// the rest are packed into at most this many messages.
 constexpr usize k_max_pieces = 8;
@@ -315,32 +310,7 @@ Task<bool> call_action(Responder *r, std::string action, std::string params) {
     co_return true;
 }
 
-/// Joins a 复读 chain: the same text again after a moment.
 bool muted(Responder *r, const store::ChatKey &chat) { return r->chats[chat].muted_until > r->now(); }
-
-Task<> join_repeat(Responder *r, store::ChatKey chat, std::string text) {
-    if (r->realtime) co_await lighter::sleep(std::chrono::seconds(random_seconds(r, 1, 4)));
-    if (muted(r, chat) || !co_await send_and_record(r, chat, {onebot::text_segment(text)})) co_return;
-    auto &state = r->chats[chat];
-    note_spoke(state.flow);
-    if (r->observer) r->observer(chat, {.reply = true, .intent = "复读"}, {text});
-    log::info("{} joins the 复读: {}", describe(chat), text);
-}
-
-/// Poked in an allowed group: usually she pokes back after a moment, the
-/// way people do; at most once a minute per person, never while asleep.
-Task<> poke_back(Responder *r, i64 group, i64 user) {
-    const store::ChatKey chat{.type = "group", .id = group};
-    auto &state = r->chats[chat];
-    const i64 now = r->now();
-    if (now - state.poked_back[user] < k_poke_back_seconds || muted(r, chat)) co_return;
-    if (presence_at(r->config.chat.schedule, now, r->config.chat.utc_offset_minutes).presence == Presence::ASLEEP) co_return;
-    if (!std::bernoulli_distribution(k_poke_back_chance)(r->rng)) co_return;
-    state.poked_back[user] = now;
-    co_await lighter::sleep(std::chrono::seconds(random_seconds(r, 1, 4)));
-    if (co_await call_action(r, "send_poke", std::format(R"({{"group_id":{},"user_id":{}}})", group, user)))
-        log::info("{} pokes {} back", describe(chat), user);
-}
 
 /// Waits until `until` (unix seconds), looking every half minute; returns
 /// early once someone calls her, if `called_ends_it`.
@@ -922,19 +892,6 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
     const auto chat = stored.chat;
     note_arrival(state.flow, now());
     state.flow.unseen.push_back(std::move(stored));
-    // QQ's 复读: people sending the same short line in a row; she may join.
-    if (message.is_group()) {
-        if (auto recent = store.recent_messages(chat, k_repeat_lookback); recent.has_value()) {
-            if (const auto chain = repeat_chain(*recent); chain && chain->people >= 2 && chain->text != state.repeated) {
-                const double chance = chain->people >= 4 ? 0.6 : chain->people == 3 ? 0.5 : 0.35;
-                const auto presence = presence_at(config.chat.schedule, now(), config.chat.utc_offset_minutes).presence;
-                if (presence == Presence::AWAKE && std::bernoulli_distribution(chance)(rng)) {
-                    state.repeated = chain->text;
-                    spawn(join_repeat(this, chat, chain->text));
-                }
-            }
-        }
-    }
     // Due now, or once the idle backoff ends (the worker waits for it).
     if (!should_plan(state.flow, flow_settings(), now()) && !next_check(state.flow, flow_settings(), now())) return std::nullopt;
     return chat;
@@ -961,18 +918,27 @@ std::string message_ref(Responder *r, const store::ChatKey &chat, i64 message_id
     return std::format("{}的「{}」", message.from_self ? r->self_name(chat) : person(r, chat, message.sender_id), text);
 }
 
-/// Stores a notice line: context for her, never a turn of its own.
-void record_notice(Responder *r, const store::ChatKey &chat, i64 time, std::string text) {
-    auto added = r->store.add_message({
+/// Stores a notice line (who did it, when known, in its segments: a poke can
+/// be returned); returns it.
+store::StoredMessage record_notice(Responder *r, const store::ChatKey &chat, i64 time, std::string text, i64 actor = 0) {
+    store::StoredMessage line{
         .chat = chat,
         .message_id = r->next_notice_id--,
         .sender_id = 0,
         .sender_name = std::string(k_notice_sender),
         .time = time > 0 ? time : r->now(),
-        .segments_json = "[]",
+        .segments_json = actor ? std::format(R"([{{"type":"notice","data":{{"user_id":{}}}}}])", actor) : std::string("[]"),
         .text = std::move(text),
-    });
-    if (added.has_error()) log::error("cannot store a notice: {}", added.error().message());
+    };
+    if (auto added = r->store.add_message(line); added.has_error()) log::error("cannot store a notice: {}", added.error().message());
+    return line;
+}
+
+/// Who did what a notice line tells (a poke's poker); 0 when unknown.
+i64 notice_actor(const store::StoredMessage &line) {
+    onebot::Message segments;
+    if (glz::read<onebot::k_read_opts>(segments, line.segments_json) || segments.empty()) return 0;
+    return onebot::data_integer(segments.front(), "user_id").value_or(0);
 }
 
 /// "15分钟" / "2小时" / "3天" for a mute duration in seconds.
@@ -1025,9 +991,15 @@ void Responder::notice(const onebot::NoticeEvent &notice) {
     const auto &sub = notice.sub_type;
     const auto operator_name = [&] { return person(this, chat, notice.operator_id.value_or(0)); };
     if (type == "notify" && sub == "poke" && notice.target_id) {
-        record_notice(this, chat, notice.time,
-                      std::format("{}戳了戳{}", person(this, chat, notice.user_id), person(this, chat, *notice.target_id)));
-        if (notice.target_id == self.user_id && notice.user_id != self.user_id) spawn(poke_back(this, *notice.group_id, notice.user_id));
+        auto line = record_notice(this, chat, notice.time,
+                                  std::format("{}戳了戳{}", person(this, chat, notice.user_id), person(this, chat, *notice.target_id)),
+                                  notice.user_id);
+        // Poked: like an @, the planner looks at once (and may poke back).
+        if (notice.target_id == self.user_id && notice.user_id != self.user_id && state.muted_until <= now()) {
+            state.flow.addressed = line.message_id;
+            state.flow.unseen.push_back(std::move(line));
+            wake(chat);
+        }
     } else if (type == "group_recall" && notice.message_id) {
         recall(chat, *notice.message_id);
     } else if (type == "group_ban") {
@@ -1074,12 +1046,14 @@ void Responder::on_event(onebot::Event event) {
     // Every group may teach her how people talk; only allowed chats go further.
     if (learner) learner->observe(*message, self.user_id);
     if (stickers) stickers->observe(*message, self.user_id);
-    const auto chat = ingest(*message);
-    if (!chat) return;
-    auto &state = chats[*chat];
+    if (const auto chat = ingest(*message)) wake(*chat);
+}
+
+void Responder::wake(const store::ChatKey &chat) {
+    auto &state = chats[chat];
     if (state.busy) return; // the running worker looks again after its turn
     state.busy = true;
-    spawn(turn_worker(this, *chat));
+    spawn(turn_worker(this, chat));
 }
 
 namespace {
@@ -1162,8 +1136,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
                         plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
                                                                                      settings.long_reply_chars;
-    // Emoji go unless people use them (they show up in learned expressions);
-    // the feeling one stood for becomes a sticker, the way people answer.
+    // Emoji go unless people use them (they show up in learned expressions).
     auto styles = r->store.expression_styles();
     const auto learned = styles.has_value() ? *std::move(styles) : std::vector<std::string>{};
     std::vector<char32_t> removed;
@@ -1171,14 +1144,6 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         fit_length(clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes),
                    budget),
         emoji_in(learned), removed);
-    if (!removed.empty() && plan.sticker.empty() && stickers_ready(r)) {
-        for (const auto emoji : removed) {
-            if (const auto feeling = emoji_feeling(emoji); !feeling.empty()) {
-                plan.sticker = std::string(feeling);
-                break;
-            }
-        }
-    }
 
     // Casual replies go out the way MaiBot sends them: split at punctuation,
     // neighbours merged at random, a homophone typo now and then (sometimes
@@ -1190,16 +1155,8 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
     } else {
         // Every line, trimmed, blank ones dropped; no spaces around English words.
-        auto casual = replace_haha(tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max())), r->rng);
-        // A laugh at the start of every message is a tic; one now and then is not.
-        if (r->now() - state.last_laugh < k_laugh_gap_seconds) casual = drop_leading_laugh(casual);
-        // Nothing but a laugh: people here send a sticker for that.
-        if (only_laughs(casual) && stickers_ready(r) &&
-            co_await send_sticker(r, chat, "笑死：" + (plan.intent.empty() ? std::string("觉得好笑") : plan.intent), log_lines)) {
-            if (r->observer) r->observer(chat, plan, {"[表情]"});
-            note_spoke(state.flow);
-            co_return Delivered{.sent = true, .said = "[表情包]"};
-        }
+        const auto casual = tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max()));
+
         segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);
         if (segments.size() > k_max_pieces) {
             segments.clear();
@@ -1210,12 +1167,6 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     std::vector<std::string> bubbles;
     for (const auto &segment : segments) bubbles.push_back(segment.text);
     if (bubbles.empty()) {
-        // Nothing but emoji: the sticker says it.
-        if (!plan.sticker.empty() && co_await send_sticker(r, chat, plan.sticker + "：" + plan.intent, log_lines)) {
-            if (r->observer) r->observer(chat, plan, {"[表情]"});
-            note_spoke(state.flow);
-            co_return Delivered{.sent = true, .said = "[表情包]"};
-        }
         log::warn("writer returned an empty reply for {}", describe(chat));
         co_return Delivered{};
     }
@@ -1250,7 +1201,6 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
 
     std::string said;
     for (usize i = 0; i < sent; ++i) said += (said.empty() ? "" : " ") + bubbles[i];
-    if (laughs(said)) state.last_laugh = r->now();
     state.replied.emplace_back(plan.target, said);
     if (state.replied.size() > k_replied_memory) state.replied.pop_front();
     co_return Delivered{.sent = true, .said = std::move(said)};
@@ -1343,7 +1293,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                                                                     {"memory_rule", memory_rule(memory != nullptr)},
                                                                     {"search_rule", search_rule(config.model.web_search)},
                                                                     {"sticker_rule", sticker_rule(stickers_ready(this))}});
-    const auto tools = planner_tools(settings.handoff == "reference", memory != nullptr, config.model.web_search, stickers_ready(this));
+    const auto tools = planner_tools({.reference_handoff = settings.handoff == "reference",
+                                      .memory = memory != nullptr,
+                                      .web = config.model.web_search,
+                                      .stickers = stickers_ready(this),
+                                      .poke = chat.type == "group"});
     const u64 cycle = ++state.cycles;
 
     // Notes for this turn: in the tail of every round, never in the history.
@@ -1378,8 +1332,14 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     const auto facts = [&](const std::optional<i64> &called, const std::optional<i64> &mentioned) {
         std::vector<std::string> out;
         if (chat.type != "group") return out;
-        if (const i64 row = called ? row_of(*called) : 0) out.push_back(std::format("#{} 是叫她的（@ 了她或者回复了她的消息）。", row));
+        if (const auto it = called ? std::ranges::find(rows, *called, &store::StoredMessage::message_id) : rows.end(); it != rows.end()) {
+            out.push_back(is_notice(*it) ? std::format("#{} 有人戳了戳她。", it->row_id) :
+                                           std::format("#{} 是叫她的（@ 了她或者回复了她的消息）。", it->row_id));
+        }
         if (const i64 row = mentioned ? row_of(*mentioned) : 0) out.push_back(std::format("#{} 提到了她的名字。", row));
+        // QQ's 复读: what people are doing, for the planner to join or not.
+        if (const auto chain = repeat_chain(rows); chain && chain->people >= 2)
+            out.push_back(std::format("最后 {} 个人在复读「{}」。", chain->people, chain->text));
         return out;
     };
     i64 first_new_row = 0;
@@ -1518,7 +1478,6 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                 receipt = "这条不适合复读（只复读别人的短消息），没有发。";
             } else if (co_await send_and_record(this, chat, {onebot::text_segment(target->text)})) {
                 ++replies;
-                state.repeated = target->text;
                 note_spoke(state.flow);
                 if (observer) observer(chat, plan, {target->text});
                 log::info("{} repeats {}: {}", describe(chat), plan.target, target->text);
@@ -1531,6 +1490,31 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                 ended = "replied enough";
                 break;
             }
+            co_await refresh();
+            continue;
+        }
+        if (plan.poke) {
+            // Whoever wrote the line, or whoever a poke notice says poked her.
+            const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
+            const i64 user = target == rows.end() ? 0 :
+                             is_notice(*target)   ? notice_actor(*target) :
+                             target->from_self    ? 0 :
+                                                    target->sender_id;
+            std::string receipt;
+            if (user == 0 || user == self.user_id) {
+                receipt = "这条找不到可以戳的人。";
+            } else if (now() - state.poked[user] < k_poke_gap_seconds) {
+                receipt = "刚戳过这个人，过一会儿再戳。";
+            } else if (co_await call_action(this, "send_poke", std::format(R"({{"group_id":{},"user_id":{}}})", chat.id, user))) {
+                state.poked[user] = now();
+                note_spoke(state.flow);
+                if (observer) observer(chat, plan, {"[戳一戳]"});
+                log::info("{} pokes {}", describe(chat), user);
+                receipt = std::format("她戳了戳 {}。", person(this, chat, user));
+            } else {
+                receipt = "没戳成。";
+            }
+            keep(receipt);
             co_await refresh();
             continue;
         }
@@ -1555,7 +1539,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         }
         waits = 0;
         if (!plan.reply) {
-            if (tool == "reply" || tool == "repeat" || tool == "send_sticker") {
+            if (tool == "reply" || tool == "repeat" || tool == "send_sticker" || tool == "poke") {
                 // A target that is not in the history: let it look again.
                 keep("没找到这个编号的消息，没有发。");
                 continue;

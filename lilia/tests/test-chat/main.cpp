@@ -199,12 +199,12 @@ void test_planner() {
         for (const auto &tool : tools) out.push_back(tool.name);
         return out;
     };
-    require(names(chat::planner_tools(false, false, false, false)) == std::vector<std::string>{"reply", "repeat", "wait", "stay_silent"},
+    require(names(chat::planner_tools({})) == std::vector<std::string>{"reply", "repeat", "wait", "stay_silent"},
             "reply, repeat, wait, stay_silent");
-    require(names(chat::planner_tools(false, true, true, true)) ==
-                std::vector<std::string>{"reply", "send_sticker", "repeat", "wait", "search_history", "search_web", "stay_silent"},
-            "with stickers, memory and the web");
-    const auto briefed = chat::planner_tools(true, false, false, false);
+    require(names(chat::planner_tools({.memory = true, .web = true, .stickers = true, .poke = true})) ==
+                std::vector<std::string>{"reply", "send_sticker", "repeat", "wait", "poke", "search_history", "search_web", "stay_silent"},
+            "with stickers, pokes, memory and the web");
+    const auto briefed = chat::planner_tools({.reference_handoff = true});
     require(std::ranges::contains(briefed[0].input_schema.required, std::string("brief")) &&
                 !std::ranges::contains(briefed[0].input_schema.required, std::string("intent")),
             "the reference handoff asks for brief instead of intent");
@@ -401,23 +401,6 @@ void test_bubbles() {
     const auto packed = chat::pack_segments(corrected, 3);
     require(texts(packed) == std::vector<std::string>({"一 二", "三 四 五", "六"}) && packed[2].quote_previous,
             "a correction keeps its own message");
-    std::mt19937 laugh(3);
-    for (int i = 0; i < 20; ++i) {
-        const auto out = chat::replace_haha("哈哈不是吧 真的哈哈哈", laugh);
-        require(out.find("哈哈") == std::string::npos &&
-                    (out.starts_with("草不是吧") || out.starts_with("www不是吧") || out.starts_with("不是吧")),
-                "哈哈 becomes 草 or www, or goes: " + out);
-    }
-    require(chat::replace_haha("哈？真的假的", laugh) == "哈？真的假的", "a lone 哈 stays");
-    bool dropped = false;
-    for (int i = 0; i < 30; ++i) dropped = dropped || chat::replace_haha("哈哈 不是吧", laugh) == "不是吧";
-    require(dropped, "in front of more words the laugh sometimes just goes");
-    require(chat::drop_leading_laugh("草 又抽运势") == "又抽运势" && chat::drop_leading_laugh("wwww 好") == "好" &&
-                chat::drop_leading_laugh("草") == "草" && chat::laughs("这也行 草") && !chat::laughs("好耶"),
-            "laugh limiter helpers");
-    require(chat::only_laughs("草") && chat::only_laughs("www") && chat::only_laughs(" 笑死 ") && chat::only_laughs("草草草") &&
-                !chat::only_laughs("草 又抽运势") && !chat::only_laughs(""),
-            "a reply that is only a laugh");
     require(chat::tighten_spacing("啥情况 PK 输了？用 C++ 写") == "啥情况PK输了？用C++写" &&
                 chat::tighten_spacing("use godot 吧") == "use godot吧" && chat::tighten_spacing("还没玩 最近在追番") == "还没玩 最近在追番",
             "no spaces around English words; spaces between Chinese clauses stay");
@@ -449,8 +432,6 @@ void test_bubbles() {
     removed.clear();
     require(chat::strip_emoji("这也太🐔了", chat::emoji_in({"用\"太🐔了\""}), removed) == "这也太🐔了" && removed.empty(),
             "emoji people use (learned) stay");
-    require(chat::emoji_feeling(U'😂') == "笑死" && chat::emoji_feeling(U'🙈') == "害羞" && chat::emoji_feeling(U'🍎').empty(),
-            "feelings for stickers");
     require(chat::typing_delay("在", 1.0) == std::chrono::milliseconds(1200), "a lone character: 1.2s");
     require(chat::typing_delay("好耶ok", 1.0) == std::chrono::milliseconds(900), "0.3s per Han character, 0.15s per other");
     require(chat::typing_delay("好耶ok", 2.0) == std::chrono::milliseconds(450), "faster typing");

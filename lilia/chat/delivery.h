@@ -41,21 +41,6 @@ std::vector<Segment> split_pieces(std::string_view text);
 /// (or their newline), as people type, not by the mark they were split at.
 std::vector<Segment> pack_segments(std::vector<Segment> segments, usize max_count);
 
-/// Replaces every "哈哈…" with "草" or "www" (at random), or, in front of
-/// more words, half the time drops it: models laugh in 哈哈, people in these
-/// groups do not.
-std::string replace_haha(std::string_view text, std::mt19937 &rng);
-
-/// `text` without a leading "草"/"www" laugh when more follows it.
-std::string drop_leading_laugh(std::string_view text);
-
-/// Whether `text` laughs (草, www).
-bool laughs(std::string_view text);
-
-/// Whether `text` is nothing but a laugh ("草", "www", "笑死", "hhh"…): people
-/// here send a sticker for that instead.
-bool only_laughs(std::string_view text);
-
 /// Removes the spaces models put between Chinese and Latin letters or digits
 /// ("PK 输了" -> "PK输了"); people rarely type them.
 std::string tighten_spacing(std::string_view text);
@@ -86,10 +71,6 @@ std::string strip_emoji(std::string_view text, const std::vector<char32_t> &kept
 /// Emoji appearing in `texts` (e.g. learned expressions): the ones people
 /// actually use.
 std::vector<char32_t> emoji_in(const std::vector<std::string> &texts);
-
-/// The feeling an emoji stood for, to send as a sticker instead ("笑死" for
-/// 😂); empty when there is no obvious one.
-std::string_view emoji_feeling(char32_t emoji);
 
 /// MaiBot's calculate_typing_time, the pause before the second and later
 /// messages of a reply: 0.3s per Han character and 0.15s per other

@@ -128,7 +128,8 @@ void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep
     std::erase_if(records, [](const PlannerRecord &record) { return record.output.empty(); });
 }
 
-std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool memory_search, bool web_search, bool stickers) {
+std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
+    const bool reference_handoff = set.reference_handoff;
     std::vector<provider::ToolDefinition> tools;
     tools.push_back({
         .name = "reply",
@@ -141,7 +142,7 @@ std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool
                                                              property("string", "一句话描述她想表达的意思，不是台词")}},
                          .required = {"target", "style", reference_handoff ? "brief" : "intent"}},
     });
-    if (stickers) {
+    if (set.stickers) {
         auto &reply = tools.back().input_schema;
         reply.properties.emplace("sticker", property("string", "可选：说完话后想配的表情包的感觉，比如\"无语\"；大多数时候不填"));
         // A tool of its own, like MaiBot's send_emoji: buried in reply, it was never picked.
@@ -165,7 +166,15 @@ std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool
                                         {"reason", property("string", "为什么等，简短")}},
                          .required = {"seconds"}},
     });
-    if (memory_search) {
+    if (set.poke) {
+        tools.push_back({
+            .name = "poke",
+            .description = "戳一戳群友（QQ 的戳一戳）：被人戳了想戳回去，或者想逗一下谁",
+            .input_schema = {.properties = {{"target", property("string", "那人发的某条消息的编号，或者「戳了戳她」那条群通知的编号")}},
+                             .required = {"target"}},
+        });
+    }
+    if (set.memory) {
         tools.push_back({
             .name = "search_history",
             .description = "搜索这个群以前的聊天记录，结果会告诉你，然后你再决定下一步",
@@ -174,7 +183,7 @@ std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool
                              .required = {"query"}},
         });
     }
-    if (web_search) {
+    if (set.web) {
         tools.push_back({
             .name = "search_web",
             .description = "上网搜索她不知道或者拿不准的事：新闻、事实、数据、天气、价格。结果会告诉你，然后你再决定下一步",
@@ -201,6 +210,11 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
             const auto *target = find_target(string_field(input, "target"), rows);
             if (!target) return {.reason = "invalid repeat target " + string_field(input, "target")};
             return {.target = target->message_id, .repeat = true};
+        }
+        if (tool->call.name == "poke") {
+            const auto *target = find_target(string_field(input, "target"), rows);
+            if (!target) return {.reason = "invalid poke target " + string_field(input, "target")};
+            return {.target = target->message_id, .poke = true};
         }
         if (tool->call.name == "send_sticker") {
             // Aimed at the given message, else the newest one shown.

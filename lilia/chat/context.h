@@ -43,6 +43,8 @@ struct Plan {
     bool follow_up = false;
     /// The repeat tool: send `target`'s text again as it is (复读).
     bool repeat = false;
+    /// The poke tool: poke whoever wrote `target` (or poked her, for a poke notice).
+    bool poke = false;
     std::string reason; ///< why she stays silent or waits
     /// What the planner wrote before its tool call (its view of the chat).
     std::string analysis;

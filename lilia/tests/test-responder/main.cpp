@@ -374,13 +374,45 @@ Task<> test_the_planner_searches() {
     };
     std::ignore = h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 西湖区今天下雨吗")});
     co_await h.responder->run_turn(k_chat);
-    require(h.planner->tools.front().size() == 5 && h.planner->tools.front()[3].name == "search_web", "the planner can search the web");
+    require(std::ranges::contains(h.planner->tools.front(), std::string("search_web"), &provider::ToolDefinition::name),
+            "the planner can search the web");
     std::string second;
     for (const auto &item : h.planner->requests[1]) second += text_of(item);
     require(second.contains("查到的：西湖区今天下午有小雨"), "it sees what it found before deciding");
     require(h.sent == std::vector<std::string>{"下午有点小雨"}, "then replies");
     const auto &writer = h.writer->requests.back();
     require(text_of(writer.back()).contains("你刚去查过了，情况如下：西湖区今天下午有小雨"), "the writer knows what was found");
+    co_await tasks.join();
+}
+
+Task<> test_pokes_and_repeats() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        std::string seen;
+        for (const auto &item : history) seen += text_of(item);
+        if (after_tool_result(history)) return analysed("好了", test::tool_call("stay_silent", R"({"reason":"好了"})"));
+        if (seen.contains("有人戳了戳她")) {
+            return analysed("小明戳她，戳回去", test::tool_call("poke", R"({"target":")" + line_number(history, "戳了戳") + R"("})"));
+        }
+        return analysed("在复读，不跟", test::tool_call("stay_silent", R"({"reason":"不跟"})"));
+    };
+    // People repeating: a fact for the planner, nothing is sent on its own.
+    std::ignore = h.say(1, 20001, "小明", {onebot::text_segment("6")});
+    std::ignore = h.say(2, 20002, "小红", {onebot::text_segment("6")});
+    co_await h.responder->run_turn(k_chat);
+    require(text_of(h.planner->requests.back().back()).contains("最后 2 个人在复读「6」") && h.sent.empty(),
+            "a 复读 chain is pointed out; she only joins if the planner says so");
+
+    // Poked: the planner looks at once and decides to poke back.
+    h.responder->notice(
+        {.time = h.clock, .notice_type = "notify", .sub_type = "poke", .group_id = k_group, .user_id = 20001, .target_id = k_self});
+    auto &flow = h.responder->chats[k_chat].flow;
+    require(flow.addressed && flow.unseen.size() == 1, "a poke on her makes the planner look");
+    co_await h.responder->run_turn(k_chat);
+    std::string last;
+    for (const auto &item : h.planner->requests.back()) last += text_of(item);
+    require(last.contains("没戳成"), "it tried to poke back (no live session here): " + last);
     co_await tasks.join();
 }
 
