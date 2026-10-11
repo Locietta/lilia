@@ -957,8 +957,13 @@ Result<std::string> encode_complete_request(const provider::History &history, co
                 case provider::ToolKind::WEB_FETCH: encoded_tools.push_back({.type = "web_fetch_20250910", .name = "web_fetch"}); break;
             }
         }
-        // Every call offers the same tools: cache them on their own too.
-        if (options.prompt_cache) encoded_tools.back().cache_control = wire::CacheControl{};
+        // Every call offers the same tools: cache them on their own too, unless
+        // a system breakpoint (after them in the prefix) already covers them;
+        // breakpoints are limited to four, and relays may add their own.
+        const bool system_cached = request.system && std::holds_alternative<std::vector<wire::SystemBlock>>(*request.system) &&
+                                   std::ranges::any_of(std::get<std::vector<wire::SystemBlock>>(*request.system),
+                                                       [](const wire::SystemBlock &block) { return block.cache_control.has_value(); });
+        if (options.prompt_cache && !system_cached) encoded_tools.back().cache_control = wire::CacheControl{};
         request.tools = std::move(encoded_tools);
         if (options.require_tool) request.tool_choice = wire::MessageRequest::ToolChoice{.type = "any"};
     }

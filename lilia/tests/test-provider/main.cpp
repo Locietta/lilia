@@ -62,16 +62,18 @@ void test_system_cache() {
     require(!cached(blocks->get_array()[1]), "none on the DEVELOPER block");
     require(cached(json), "top-level automatic caching");
     const auto &tools = field(json, "tools")->get_array();
-    require(!cached(tools[0]) && cached(tools[1]), "breakpoint on the last tool only");
+    require(!cached(tools[0]) && !cached(tools[1]), "no tool breakpoint: the system one covers the tools before it");
 
     // A prompt that opens with DEVELOPER text has no stable part to mark.
     provider::History dynamic;
     provider::append_developer(dynamic, "NOW");
     provider::append_system(dynamic, "PERSONA");
     provider::append_user(dynamic, "hi");
-    for (const auto &block : field(encode(dynamic, true), "system")->get_array()) {
+    const auto dynamic_json = encode(dynamic, true);
+    for (const auto &block : field(dynamic_json, "system")->get_array()) {
         require(!cached(block), "no breakpoint after changing text");
     }
+    require(cached(field(dynamic_json, "tools")->get_array().back()), "then the last tool gets the breakpoint");
 }
 
 void test_part_cache() {
