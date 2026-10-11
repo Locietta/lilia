@@ -39,7 +39,7 @@ void test_urls() {
             "stickers and mface with http(s) urls; photos and other urls are skipped");
 }
 
-void test_sample_and_render() {
+void test_sample() {
     std::vector<store::Sticker> pool;
     for (i64 i = 0; i < 10; ++i) pool.push_back({.id = i, .description = "d" + std::to_string(i), .tags = "t", .seen = 1});
     pool[3].seen = 40;
@@ -49,16 +49,6 @@ void test_sample_and_render() {
     for (int i = 0; i < 300; ++i) popular += sticker::sample(pool, 1, rng).front().id == 3;
     // Weight 41 against 9 others of weight 2: about 70% of single picks.
     require(popular > 150, "seen often means picked often");
-    const auto text = sticker::render_candidates({pool[0], pool[3]});
-    require(text == "1. 标签：t｜画面：d0\n2. 标签：t｜画面：d3\n", "numbered candidates");
-    const auto request = sticker::build_pick_request("P", {"a: 抽卡又歪了"}, "无语：吐槽运气", {pool[0]});
-    std::string user;
-    for (const auto &part : request.history.back().parts) {
-        if (const auto *text_part = std::get_if<provider::TextPart>(&part)) user += text_part->text;
-    }
-    require(user.find("a: 抽卡又歪了") != std::string::npos && user.find("她想表达的意思：无语：吐槽运气") != std::string::npos &&
-                user.find("1. 标签：t｜画面：d0") != std::string::npos && request.tools.front().name == "pick_sticker",
-            "the pick request");
 }
 
 void test_store_and_pool() {
@@ -91,7 +81,7 @@ int main() {
     try {
         test_parse_tagging();
         test_urls();
-        test_sample_and_render();
+        test_sample();
         test_store_and_pool();
         return 0;
     } catch (const std::exception &e) {

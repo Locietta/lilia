@@ -230,9 +230,6 @@ struct Store {
     /// The newest `limit` messages of a chat, oldest first.
     Result<std::vector<StoredMessage>> recent_messages(const ChatKey &chat, usize limit);
 
-    /// True when lilia itself sent `message_id` in `chat`.
-    Result<bool> is_own_message(const ChatKey &chat, i64 message_id);
-
     /// One stored message by its QQ id (row_id set); nullopt when not stored.
     Result<std::optional<StoredMessage>> message(const ChatKey &chat, i64 message_id);
 

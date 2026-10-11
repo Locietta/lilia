@@ -660,16 +660,6 @@ Result<std::vector<PersonFact>> Store::facts(i64 person_id, usize limit) {
     return facts;
 }
 
-Result<bool> Store::is_own_message(const ChatKey &chat, i64 message_id) {
-    auto statement =
-        database.prepare("SELECT 1 FROM messages WHERE chat_type = ?1 AND chat_id = ?2 AND message_id = ?3 AND from_self = 1 LIMIT 1");
-    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, chat.type);
-    statement->bind(2, chat.id);
-    statement->bind(3, message_id);
-    return statement->step();
-}
-
 Result<std::optional<StoredMessage>> Store::message(const ChatKey &chat, i64 message_id) {
     auto statement = database.prepare("SELECT message_id, sender_id, sender_name, time, segments, text, from_self, id FROM messages "
                                       "WHERE chat_type = ?1 AND chat_id = ?2 AND message_id = ?3");

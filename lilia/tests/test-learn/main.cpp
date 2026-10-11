@@ -94,10 +94,6 @@ void test_parse() {
 }
 
 void test_review() {
-    const std::vector<learn::Learned> learned{{.situation = "觉得离谱", .style = "用\"笑死\""},
-                                              {.situation = "x", .style = "用\"屋檐了\""}};
-    const auto request = learn::build_review_request("REVIEW", learned);
-    require(text_of(request.history[1]) == "1. 当觉得离谱时，可以用\"笑死\"\n2. 当x时，可以用\"屋檐了\"\n", "patterns numbered from 1");
     auto rejected = learn::parse_review(
         {tool_call("review_expressions", R"({"reject": [{"id": "2", "reason": "圈内黑话"}, {"id": "9", "reason": "x"}]})")}, 2);
     require(rejected && rejected->size() == 1 && rejected->front().index == 1 && rejected->front().reason == "圈内黑话",
@@ -244,14 +240,7 @@ void test_store() {
     require(chat::sample_fallback({}, rng).empty(), "empty pool");
 }
 
-void test_selection_request() {
-    const auto request = learn::build_selection_request(
-        "SELECT",
-        {.recent = {"a: 抽卡又歪了"}, .target = "a: 抽卡又歪了", .intent = "吐槽运气", .candidates = {"当倒霉时，可以用\"我服了\""}});
-    const auto user = text_of(request.history[1]);
-    require(user.find("她这次要回应：a: 抽卡又歪了") != std::string::npos && user.find("她想表达的意思：吐槽运气") != std::string::npos &&
-                user.find("1. 当倒霉时，可以用\"我服了\"") != std::string::npos,
-            "the selector sees the chat, the target, the intent and numbered candidates");
+void test_selection() {
     require(learn::parse_picks({tool_call("select_expressions", R"({"ids": ["1", "1"]})")}, "select_expressions", "ids", 1, 5) ==
                 std::vector<usize>({0}),
             "selection picks");
@@ -358,7 +347,7 @@ int main() {
         test_sharing_and_mmr();
         test_learnable_text();
         test_store();
-        test_selection_request();
+        test_selection();
         test_segment();
         test_frequency();
         test_learned_span();

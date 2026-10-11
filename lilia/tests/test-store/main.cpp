@@ -47,9 +47,11 @@ void test_messages() {
     require(all.has_value() && all->size() == 6, "duplicate was not inserted");
     require((*all)[2].text == "m3", "the original row is kept on conflict");
 
-    require(*db.is_own_message({.type = "group", .id = 42}, -77), "own message is recognized");
-    require(!*db.is_own_message({.type = "group", .id = 42}, 3), "others' messages are not own");
-    require(!*db.is_own_message({.type = "group", .id = 43}, -77), "own-message lookup is per chat");
+    auto own = db.message({.type = "group", .id = 42}, -77);
+    require(own.has_value() && *own && (*own)->from_self && (*own)->row_id > 0, "one message by its QQ id, with its row");
+    require(!*db.message({.type = "group", .id = 43}, -77), "per chat");
+    require(*db.sender_name({.type = "group", .id = 42}, 7) == "魔王" && db.sender_name({.type = "group", .id = 42}, 8)->empty(),
+            "the name on someone's newest message");
 }
 
 void test_llm_calls() {
