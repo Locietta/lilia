@@ -150,7 +150,8 @@ provider::History build_search_history(const ChatInfo &info, const store::Stored
 /// note that it is her turn to answer `target`.
 provider::History build_writer_history(const WriterInput &input);
 
-/// "[HH:MM] name(qq): text", with "(你)" marking lilia's own lines.
+/// "[HH:MM] name(qq): text", with "(她自己)" marking lilia's own lines (the
+/// planner is told it is not her).
 std::string render_line(const store::StoredMessage &message, i32 utc_offset_minutes);
 
 /// "YYYY-MM-DD HH:MM" in the given offset.

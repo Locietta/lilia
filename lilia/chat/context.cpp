@@ -169,7 +169,7 @@ i64 local_day_start(i64 unix_seconds, i32 utc_offset_minutes) {
 std::string render_line(const store::StoredMessage &message, i32 utc_offset_minutes) {
     std::string line = std::format("[{:%H:%M}] ", local_seconds(message.time, utc_offset_minutes));
     line += display_name(message);
-    line += message.from_self ? std::string("(你)") : "(" + std::to_string(message.sender_id) + ")";
+    line += message.from_self ? std::string("(她自己)") : "(" + std::to_string(message.sender_id) + ")";
     line += ": ";
     line += message.text;
     return line;

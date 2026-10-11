@@ -118,6 +118,7 @@ void test_planner() {
     require(user.find(std::string(60, 'x')) == std::string::npos, "the oldest line is dropped first when over budget");
     require(request.ids == std::vector<i64>({102, 103, 104}), "ids map #n to message ids in order");
     require(user.find("#3 [21:04] c(20104): 有人看新番吗") != std::string::npos, "lines are numbered");
+    require(user.find("#2 [21:02] 闭锁(她自己): 我在") != std::string::npos, "her lines are hers, not the planner's");
     require(user.find("以下是新消息") < user.find("#3 "), "the new messages are marked");
     require(user.find("以下是新消息") > user.find("#2 "), "old lines come before the marker");
     require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");
@@ -466,6 +467,7 @@ void test_clean_reply() {
     const std::vector<std::string> aliases{"莉莉娅"};
     require(chat::clean_reply("  好的呀\n", info, aliases, 100) == "好的呀", "trim");
     require(chat::clean_reply("[21:05] lilia(你): 在的", info, aliases, 100) == "在的", "copied log prefix is stripped");
+    require(chat::clean_reply("[21:05] lilia(她自己): 在的", info, aliases, 100) == "在的", "with the planner's label too");
     require(chat::clean_reply("莉莉娅：嗯嗯", info, aliases, 100) == "嗯嗯", "full-width colon label is stripped");
     require(chat::clean_reply("lilia 很开心", info, aliases, 100) == "lilia 很开心", "a name without a colon is content");
     require(chat::clean_reply("@阿紫 芒果\n昨天说的", info, aliases, 100) == "芒果\n昨天说的", "a typed leading mention is dropped");
