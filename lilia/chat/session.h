@@ -36,7 +36,6 @@ struct PlannerTail {
     i64 first_new_row = 0;          ///< 0: nothing new since it last looked
     std::vector<std::string> facts; ///< "#18345 @ 了她" and the like
     std::string presence;           ///< just woke up, was busy, back online
-    std::string people;             ///< "- 名字：事实；事实"
     std::string self_notes;         ///< what she said about herself before
     std::string jargon;             ///< slang in the recent lines
     std::string recall;             ///< an older summary the chat brings back
@@ -64,6 +63,7 @@ void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep
 struct PlannerToolSet {
     bool reference_handoff = false; ///< reply asks for `brief` instead of `intent`
     bool memory = false;            ///< search_history
+    bool people = false;            ///< look_up_person
     bool web = false;               ///< search_web
     bool stickers = false;          ///< send_sticker, and reply's sticker
     bool poke = false;              ///< poke (groups only)

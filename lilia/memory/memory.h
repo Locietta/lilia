@@ -141,10 +141,6 @@ struct Memory {
     /// among those that end before `log` begins; empty when none does.
     lighter::Task<std::string> recall(store::ChatKey chat, std::vector<store::StoredMessage> log);
 
-    /// "群友资料" lines for these people (QQ number, display name), with
-    /// their newest facts; empty when none has any.
-    std::string people_notes(const std::vector<std::pair<i64, std::string>> &people);
-
     std::move_only_function<i64()> now;
     const MemoryConfig &config;
     std::string self_name;

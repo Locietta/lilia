@@ -218,10 +218,17 @@ std::string_view sticker_rule(bool enabled) {
            "认真回答问题、说正事时不用表情包；刚发过一张就隔一会儿。\n";
 }
 
-std::string_view memory_rule(bool enabled) {
-    if (!enabled) return "";
-    return "- 有人问到以前的事（\"上次\"\"之前\"\"来着\"\"还记得吗\"、过去的约定和时间、某人以前说过的话），而上面的聊天记录里没有时，"
-           "一定先用 search_history 查，不要直接让她说不记得。寒暄、接梗、看最近的聊天就能回的，不要查。\n";
+std::string memory_rule(bool history, bool people) {
+    std::string rule;
+    if (history) {
+        rule += "- 有人问到以前的事（\"上次\"\"之前\"\"来着\"\"还记得吗\"、过去的约定和时间、某人以前说过的话），而上面的聊天记录里没有时，"
+                "一定先用 search_history 查，不要直接让她说不记得。寒暄、接梗、看最近的聊天就能回的，不要查。\n";
+    }
+    if (people) {
+        rule += "- 要接某个群友自己的事（近况、工作、爱好、住哪）时，可以先用 look_up_person 看看她以前记下的关于这个人的事，"
+                "免得问人家早就说过的。\n";
+    }
+    return rule;
 }
 
 std::string_view handoff_rule(bool reference) {

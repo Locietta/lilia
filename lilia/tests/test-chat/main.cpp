@@ -175,6 +175,8 @@ void test_planner() {
     // Targets are row numbers.
     const auto repeated = chat::parse_plan({OutputItem(tool_call("repeat", R"({"target":"#103"})"))}, rows);
     require(repeated.repeat && !repeated.reply && repeated.target == 1030, "repeat a message");
+    const auto looked = chat::parse_plan({OutputItem(tool_call("look_up_person", R"({"target":"#103"})"))}, rows);
+    require(looked.look_up && !looked.reply && looked.target == 1030, "look up whoever wrote a message");
     const auto reply = chat::parse_plan(
         {OutputItem(tool_call("reply", R"({"target":"#105 c: 哪部","quote":true,"style":"normal","intent":"说是哪部"})"))}, rows);
     require(reply.reply && reply.target == 1050 && reply.quote && reply.style == chat::ReplyStyle::NORMAL && reply.intent == "说是哪部",
@@ -201,9 +203,10 @@ void test_planner() {
     };
     require(names(chat::planner_tools({})) == std::vector<std::string>{"reply", "repeat", "wait", "stay_silent"},
             "reply, repeat, wait, stay_silent");
-    require(names(chat::planner_tools({.memory = true, .web = true, .stickers = true, .poke = true})) ==
-                std::vector<std::string>{"reply", "send_sticker", "repeat", "wait", "poke", "search_history", "search_web", "stay_silent"},
-            "with stickers, pokes, memory and the web");
+    require(names(chat::planner_tools({.memory = true, .people = true, .web = true, .stickers = true, .poke = true})) ==
+                std::vector<std::string>{"reply", "send_sticker", "repeat", "wait", "poke", "search_history", "look_up_person",
+                                         "search_web", "stay_silent"},
+            "with stickers, pokes, memory, people and the web");
     const auto briefed = chat::planner_tools({.reference_handoff = true});
     require(std::ranges::contains(briefed[0].input_schema.required, std::string("brief")) &&
                 !std::ranges::contains(briefed[0].input_schema.required, std::string("intent")),

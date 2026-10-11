@@ -45,6 +45,8 @@ struct Plan {
     bool repeat = false;
     /// The poke tool: poke whoever wrote `target` (or poked her, for a poke notice).
     bool poke = false;
+    /// The look_up_person tool: what she knows about whoever wrote `target`.
+    bool look_up = false;
     std::string reason; ///< why she stays silent or waits
     /// What the planner wrote before its tool call (its view of the chat).
     std::string analysis;
@@ -57,8 +59,9 @@ std::string chat_place(const ChatInfo &info);
 /// "现在是 2026-10-03 21:05（UTC+8）。": changes every call, so it goes last.
 std::string clock_line(i64 now, i32 utc_offset_minutes);
 
-/// The planner.md rule about search_history; empty when memory is off.
-std::string_view memory_rule(bool enabled);
+/// The planner.md rules about search_history and look_up_person; empty when
+/// both are off.
+std::string memory_rule(bool history, bool people);
 
 /// The planner.md rule about web_search; empty when it is off.
 std::string_view search_rule(bool enabled);

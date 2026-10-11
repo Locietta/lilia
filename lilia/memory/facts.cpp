@@ -187,14 +187,4 @@ Task<std::string> Memory::self_notes(i64 self_id, std::string context, usize lim
     co_return notes;
 }
 
-std::string Memory::people_notes(const std::vector<std::pair<i64, std::string>> &people) {
-    std::string notes;
-    for (const auto &[id, name] : people) {
-        auto facts = store.facts(id, config.facts_per_person);
-        if (facts.has_error() || facts->empty()) continue;
-        notes += std::format("- {}：{}\n", name, render_facts(*facts));
-    }
-    return notes;
-}
-
 } // namespace lilia::memory

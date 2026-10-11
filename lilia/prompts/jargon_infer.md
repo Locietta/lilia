@@ -13,4 +13,4 @@
 
 {previous_instruction}
 
-调用 record_meaning 提交。meaning 写详细的含义说明（使用场景、来源、具体解释等）。
+调用 record_meaning 提交。meaning 用一两句话说清它在这个群里是什么意思、什么时候用，五十字以内。

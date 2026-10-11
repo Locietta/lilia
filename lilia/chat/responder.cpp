@@ -54,9 +54,8 @@ constexpr usize k_selector_context = 10;
 constexpr usize k_fallback_draw = 5;
 constexpr usize k_min_repeated = 10;
 constexpr double k_mmr_lambda = 0.85;
-/// Facts: notes for this many people per turn; evidence is the person's last
-/// few messages (at least this many characters) plus the last lines of chat.
-constexpr usize k_people_notes = 3;
+/// Facts: evidence is the person's last few messages (at least this many
+/// characters) plus the last lines of chat.
 constexpr usize k_fact_own_messages = 3;
 constexpr usize k_min_fact_evidence = 6;
 constexpr usize k_fact_context = 8;
@@ -84,8 +83,9 @@ constexpr i64 k_late_answer_seconds = 1800;
 constexpr usize k_kept_analyses = 6;
 /// A failing planner model is skipped (fallbacks answer) for this long.
 constexpr i64 k_planner_rest_seconds = 600;
-/// Web searches the planner may run per turn.
+/// Web searches and people looked up per turn.
 constexpr usize k_max_web_searches = 2;
+constexpr usize k_max_look_ups = 3;
 
 store::ChatKey chat_key(const onebot::MessageEvent &event) {
     if (event.is_group()) return {.type = "group", .id = *event.group_id};
@@ -1257,14 +1257,17 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     if (rows.empty()) co_return;
     const ChatInfo info{
         .chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self_name(chat)};
+    const bool knows_people = memory && config.memory.facts;
+    const auto rule = memory_rule(memory != nullptr, knows_people);
     const auto prompt = fill_template(embedded(xmake::planner_md), {{"name", settings.name},
                                                                     {"persona", persona},
                                                                     {"handoff", handoff_rule(settings.handoff == "reference")},
-                                                                    {"memory_rule", memory_rule(memory != nullptr)},
+                                                                    {"memory_rule", rule},
                                                                     {"search_rule", search_rule(config.model.web_search)},
                                                                     {"sticker_rule", sticker_rule(stickers_ready(this))}});
     const auto tools = planner_tools({.reference_handoff = settings.handoff == "reference",
                                       .memory = memory != nullptr,
+                                      .people = knows_people,
                                       .web = config.model.web_search,
                                       .stickers = stickers_ready(this),
                                       .poke = chat.type == "group"});
@@ -1272,15 +1275,6 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
     // Notes for this turn: in the tail of every round, never in the history.
     PlannerTail notes{.presence = std::exchange(state.presence_note, {}), .utc_offset_minutes = settings.utc_offset_minutes};
-    if (memory && config.memory.facts) {
-        std::vector<std::pair<i64, std::string>> people;
-        for (auto it = fresh.rbegin(); it != fresh.rend() && people.size() < k_people_notes; ++it) {
-            if (it->from_self || is_notice(*it) || std::ranges::contains(people, it->sender_id, &std::pair<i64, std::string>::first))
-                continue;
-            people.emplace_back(it->sender_id, speaker(this, *it));
-        }
-        notes.people = memory->people_notes(people);
-    }
     notes.jargon = jargon_notes(this, chat, rows);
     if (memory) {
         // A summary the chat brings back, and what she said about herself that
@@ -1359,6 +1353,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     // round, its result and the lines that came in meanwhile stay in the
     // chat's history for every later round and turn.
     usize searches = 0;
+    usize look_ups = 0;
     usize waits = 0;
     usize replies = 0;
     i64 seen_row = 0;
@@ -1399,7 +1394,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         // never change, which would void the cached prompt).
         std::string unavailable;
         if ((tool == "search_history" && searches >= config.memory.max_searches) ||
-            (tool == "search_web" && web_searches >= k_max_web_searches)) {
+            (tool == "search_web" && web_searches >= k_max_web_searches) || (tool == "look_up_person" && look_ups >= k_max_look_ups)) {
             unavailable = "这一轮已经查过了，不能再查，根据现有的信息决定。";
         } else if ((tool == "wait" || tool == "stay_silent" || tool.empty()) && must_speak && replies == 0) {
             unavailable = "这次需要她说点什么，用 reply。";
@@ -1440,6 +1435,21 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         auto plan = parse_plan(*planned, rows);
         plan.follow_up = replies > 0;
         plan.analysis = analysis;
+        if (plan.look_up && knows_people) {
+            // MaiBot's person profiles, on request: whoever wrote the line.
+            const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
+            const i64 user = target == rows.end() || target->from_self ? 0 : is_notice(*target) ? notice_actor(*target) : target->sender_id;
+            std::string receipt = "这条找不到是谁发的。";
+            if (user != 0) {
+                const auto name = person(this, chat, user);
+                auto facts = store.facts(user, config.memory.facts_per_person);
+                receipt = facts.has_value() && !facts->empty() ? std::format("她记得的关于{}的事：{}", name, memory::render_facts(*facts)) :
+                                                                 std::format("她对{}还没记下什么。", name);
+            }
+            keep(std::move(receipt));
+            ++look_ups;
+            continue;
+        }
         if (plan.repeat) {
             // 复读: the message again, as it is.
             const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
@@ -1509,7 +1519,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         }
         waits = 0;
         if (!plan.reply) {
-            if (tool == "reply" || tool == "repeat" || tool == "send_sticker" || tool == "poke") {
+            if (tool == "reply" || tool == "repeat" || tool == "send_sticker" || tool == "poke" || tool == "look_up_person") {
                 // A target that is not in the history: let it look again.
                 keep("没找到这个编号的消息，没有发。");
                 continue;

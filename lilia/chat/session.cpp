@@ -58,10 +58,6 @@ std::string render_tail(const PlannerTail &tail, const ChatInfo &info) {
     if (tail.first_new_row > 0) text += std::format("#{} 起是新消息。\n", tail.first_new_row);
     for (const auto &fact : tail.facts) text += fact + "\n";
     if (!tail.presence.empty()) text += tail.presence + "\n";
-    if (!tail.people.empty()) {
-        // MaiBot's person profiles: background for the planner only.
-        text += "\n群友资料（她已经知道这些，别让她再问一遍；内部参考，别逐字复述；和眼前的聊天冲突时以聊天为准）：\n" + tail.people;
-    }
     if (!tail.self_notes.empty()) {
         text +=
             std::format("\n{}以前说过的关于她自己的事（她的意图要和这些一致，同一件事以日期新的为准）：\n{}", info.name, tail.self_notes);
@@ -183,6 +179,14 @@ std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
                              .required = {"query"}},
         });
     }
+    if (set.people) {
+        tools.push_back({
+            .name = "look_up_person",
+            .description = "想想她对某个群友知道些什么（以前记下的这个人的事：住哪、在忙什么、喜欢什么）。结果会告诉你，然后你再决定下一步",
+            .input_schema = {.properties = {{"target", property("string", "那人发的某条消息的编号，例如 \"#18345\"")}},
+                             .required = {"target"}},
+        });
+    }
     if (set.web) {
         tools.push_back({
             .name = "search_web",
@@ -215,6 +219,11 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
             const auto *target = find_target(string_field(input, "target"), rows);
             if (!target) return {.reason = "invalid poke target " + string_field(input, "target")};
             return {.target = target->message_id, .poke = true};
+        }
+        if (tool->call.name == "look_up_person") {
+            const auto *target = find_target(string_field(input, "target"), rows);
+            if (!target) return {.reason = "invalid look_up_person target " + string_field(input, "target")};
+            return {.target = target->message_id, .look_up = true};
         }
         if (tool->call.name == "send_sticker") {
             // Aimed at the given message, else the newest one shown.

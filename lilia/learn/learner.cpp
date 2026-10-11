@@ -478,6 +478,19 @@ std::vector<usize> mmr(const std::vector<std::vector<float>> &vectors, const std
     return chosen;
 }
 
+namespace {
+
+/// A meaning up to its first full stop or line break: older inferences ran
+/// to whole paragraphs, and the reference is sent with every planner round.
+std::string_view first_sentence(std::string_view meaning) {
+    constexpr std::string_view k_stop = "。";
+    const auto stop = std::min(meaning.find(k_stop), meaning.find('\n'));
+    if (stop == std::string_view::npos) return meaning;
+    return meaning.substr(0, meaning.compare(stop, k_stop.size(), k_stop) == 0 ? stop + k_stop.size() : stop);
+}
+
+} // namespace
+
 std::string jargon_reference(const std::vector<store::Jargon> &terms, const std::vector<store::StoredMessage> &log,
                              const std::vector<store::FrequentTerm> &frequent, usize limit) {
     // MaiBot's maisaka/jargon_context_matcher.py: each slang term is placed
@@ -531,7 +544,7 @@ std::string jargon_reference(const std::vector<store::Jargon> &terms, const std:
     if (matches.size() > limit) matches.resize(limit);
     std::string text = "以下黑话来自当前上下文中其他用户消息的机械匹配，仅作理解聊天语境的参考：\n";
     for (usize i = 0; i < matches.size(); ++i)
-        text += std::format("{}. {}：{}{}\n", i + 1, matches[i].term->content, matches[i].term->meaning,
+        text += std::format("{}. {}：{}{}\n", i + 1, matches[i].term->content, first_sentence(matches[i].term->meaning),
                             matches[i].frequent ? "，同时命中高频词" : "");
     return text;
 }

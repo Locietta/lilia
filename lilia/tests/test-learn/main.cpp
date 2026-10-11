@@ -145,7 +145,7 @@ void test_jargon() {
 
     const std::vector<store::Jargon> terms{
         {.content = "T0", .meaning = "最强一档", .is_jargon = 1, .count = 5},
-        {.content = "xswl", .meaning = "笑死我了", .is_jargon = 1, .count = 9},
+        {.content = "xswl", .meaning = "笑死我了\n来源：拼音首字母缩写，常用于……", .is_jargon = 1, .count = 9},
         {.content = "急了", .meaning = "", .is_jargon = 1, .count = 50},
         {.content = "也觉得", .meaning = "普通", .is_jargon = 0, .count = 50},
     };
@@ -154,7 +154,7 @@ void test_jargon() {
     require(notes.find("以下黑话来自当前上下文中其他用户消息的机械匹配") == 0 && notes.find("1. xswl：笑死我了\n") != std::string::npos &&
                 notes.find("2. T0：最强一档\n") != std::string::npos && notes.find("急了") == std::string::npos &&
                 notes.find("也觉得") == std::string::npos,
-            "slang with a meaning that others used, most seen first");
+            "slang with a meaning that others used, most seen first, each meaning's first sentence only");
     require(learn::jargon_reference(terms, {}, {}, 10).empty(), "nothing matched");
     const auto boosted = learn::jargon_reference(terms, log, {{.term = "t0", .occurrence_count = 3, .rank = 1}}, 10);
     require(boosted.find("1. T0：最强一档，同时命中高频词\n") != std::string::npos &&

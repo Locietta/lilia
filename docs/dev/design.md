@@ -45,13 +45,16 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     - Each round it writes a short analysis, then calls one tool:
       `reply(target, quote, style, intent)`, `send_sticker`, `repeat`,
       `wait(seconds)`, `poke(target)`, `search_history(query)`,
+      `look_up_person(target)` (the facts she noted about whoever wrote it),
       `search_web(query)` or `stay_silent(reason)`; no call means silence.
       Results are short ("她回复了 #n", "等了 N 秒", what a search found);
       her bubbles show up as her own lines. Side actions are its calls too:
       it is told that people are repeating a line or that someone poked her,
       and decides whether to join or poke back.
     - Per round only a tail changes: the first new line, facts ("#n 是叫她
-      的"), presence, people notes, self notes, slang, recall, the time.
+      的"), presence, self notes, slang (MaiBot's matcher, first sentence of
+      each meaning), recall, the time. What she knows about people comes on
+      request, through `look_up_person`.
     - Past twice `context_messages` / `context_bytes` the anchor moves to
       keep 1×; rounds about lines no longer shown go, older turns keep their
       calls but lose their analyses. After a restart the history is the
