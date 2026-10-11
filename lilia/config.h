@@ -159,7 +159,8 @@ struct ChatConfig {
     ScheduleConfig schedule;
     /// How long a turn waits for new images to be described.
     u32 image_wait_seconds = 8;
-    /// Input plus output tokens per local calendar day across all chats.
+    /// Input plus output tokens per local calendar day across all chats
+    /// (calls made for them; learning has its own budget).
     u64 daily_token_budget = 2'000'000;
     usize max_reply_bytes = 1'500;
     /// Safety limits (characters) per planner style, about twice what the
@@ -217,6 +218,10 @@ struct LearningConfig {
     usize jargon_evidence = 10;
     /// Terms shown to the planner per turn.
     usize jargon_matches = 10;
+    /// Tokens per rolling 24 hours for background work (learning batches and
+    /// sticker tagging count). Past it new learning batches wait; replies are
+    /// not affected. 0: no limit.
+    u64 daily_token_budget = 1'000'000;
 };
 
 struct MemoryConfig {

@@ -58,6 +58,15 @@ void test_codecs() {
     constexpr std::array<u8, 20> expected{0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
                                           0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d};
     require(digest == expected, "sha1(\"abc\") test vector");
+    // Fed in pieces of every size, across block boundaries, the digest is the same.
+    std::string long_input;
+    for (int i = 0; i < 1000; ++i) long_input += static_cast<char>('a' + i % 26);
+    const auto whole = sha1(long_input);
+    for (const usize piece : {1, 7, 63, 64, 65, 333}) {
+        Sha1 streamed;
+        for (usize at = 0; at < long_input.size(); at += piece) streamed.update(std::string_view(long_input).substr(at, piece));
+        require(streamed.finish() == whole, "streamed sha1 in pieces of " + std::to_string(piece));
+    }
 
     // RFC 6455 section 1.3 example.
     require(ws::accept_key("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", "RFC 6455 accept key example");

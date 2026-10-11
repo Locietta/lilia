@@ -215,6 +215,33 @@ Task<> test_names_do_not_force() {
     co_await tasks.join();
 }
 
+Task<> test_planner_rests() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    // The planner model is down (its subscription window is used up, say).
+    auto fallback = std::make_shared<test::FakeProvider::State>();
+    fallback->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
+        return std::vector{test::tool_call("reply", R"({"target":"#1","style":"short","intent":"在"})")};
+    };
+    h.responder->planner_fallbacks.push_back({.model = "fallback", .provider = test::fake_provider(fallback)});
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("在")};
+    };
+    std::ignore = h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 在吗")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent == std::vector<std::string>{"在"}, "the fallback answered");
+    require(h.planner->requests.size() == 2 && h.responder->planner_down_until > h.clock, "two failures in a row: it rests");
+    std::ignore = h.say(2, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 好")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.planner->requests.size() == 2 && fallback->requests.size() == 4, "while it rests, the fallback is asked directly");
+    h.clock = h.responder->planner_down_until;
+    std::ignore = h.say(3, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" ？")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.planner->requests.size() == 3, "after the rest it is tried again");
+    co_await tasks.join();
+}
+
 /// The text of the planner's cached log part in one request.
 std::string log_part(const provider::History &history) {
     for (const auto &item : history) {
@@ -262,7 +289,8 @@ Task<> test_cacheable_prompts() {
 
 int main() {
     try {
-        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_names_do_not_force, &test_cacheable_prompts}) {
+        for (auto *test :
+             {&test_quotes_and_recalls, &test_mutes_and_notices, &test_names_do_not_force, &test_cacheable_prompts, &test_planner_rests}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

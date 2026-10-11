@@ -65,6 +65,19 @@ void test_llm_calls() {
     require(*db->tokens_since(0) == 130, "all tokens");
     require(*db->tokens_since(15) == 10, "tokens since a time");
     require(*db->tokens_since(30) == 0, "no calls");
+    require(
+        db->add_llm_call({.time = 40, .chat = {.type = "learn", .id = 9}, .model = "m", .input_tokens = 7, .output_tokens = 1}).has_value(),
+        "a learning call");
+    require(*db->tokens_since(0, store::TokenScope::CHATS) == 130 && *db->tokens_since(0, store::TokenScope::BACKGROUND) == 8 &&
+                *db->tokens_since(0) == 138,
+            "chats and background are counted apart");
+
+    require(db->learn_expression({.type = "group", .id = 1}, "觉得离谱", "用\"笑死\"", 1).has_value(), "an expression");
+    require(db->set_expression_vector(1, "m", std::string(16, 'v')).has_value(), "with a vector");
+    require(*db->expression_styles() == std::vector<std::string>{"用\"笑死\""}, "styles alone");
+    const auto sampled = db->random_expressions(0, 5);
+    require(sampled.has_value() && sampled->size() == 1 && sampled->front().style == "用\"笑死\"" && sampled->front().vector.empty(),
+            "a random sample leaves the vectors behind");
 }
 
 void test_file_store() {

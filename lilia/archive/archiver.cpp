@@ -6,7 +6,6 @@
 #include <chrono>
 #include <format>
 #include <fstream>
-#include <sstream>
 #include <system_error>
 #include <tuple>
 #include <utility>
@@ -60,6 +59,14 @@ constexpr usize k_max_description_code_points = 120;
 constexpr std::string_view k_vision_prompt =
     "用一两句中文描述这张图，像跟朋友转述一样简洁。是表情包的话说它表达的情绪或者梗；图上有文字就照写出来。不要用 Markdown，不要换行。";
 
+constexpr std::chrono::seconds k_vision_deadline{60};
+
+/// with_timeout takes lighter's error type; hand the outcome through as a value.
+Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
+    auto outcome = co_await std::move(call);
+    co_return outcome;
+}
+
 /// Collapses whitespace and newlines and bounds the length.
 std::string one_line(std::string_view text) {
     std::string out;
@@ -84,14 +91,24 @@ std::string one_line(std::string_view text) {
     return out;
 }
 
-std::string sha1_hex(std::string_view bytes) {
+/// Large media is read, hashed and written this much at a time, with the
+/// loop free to serve chats in between (everything runs on one thread).
+constexpr usize k_io_chunk = 1 << 20;
+
+/// The SHA-1 of `bytes` as hex, a chunk at a time; `bytes` must outlive it.
+Task<std::string> sha1_hex(std::string_view bytes) {
     static constexpr std::string_view k_hex = "0123456789abcdef";
+    net::Sha1 hash;
+    for (usize at = 0; at < bytes.size(); at += k_io_chunk) {
+        hash.update(bytes.substr(at, k_io_chunk));
+        if (at + k_io_chunk < bytes.size()) co_await lighter::yield();
+    }
     std::string out;
-    for (const u8 byte : net::sha1(bytes)) {
+    for (const u8 byte : hash.finish()) {
         out.push_back(k_hex[byte >> 4]);
         out.push_back(k_hex[byte & 0xf]);
     }
-    return out;
+    co_return out;
 }
 
 FetchResult too_large(u64 bytes, u64 limit) {
@@ -113,18 +130,25 @@ Task<FetchResult> download(Archiver &archiver, std::string url) {
     co_return Fetched{.bytes = std::string(response->text()), .source = std::move(url)};
 }
 
-FetchResult read_container_file(const Archiver &archiver, std::string_view container_path) {
+Task<FetchResult> read_container_file(const Archiver &archiver, std::string container_path) {
     const auto host = map_container_path(container_path, archiver.config);
-    if (!host) return lighter::outcome_error(FetchError{.detail = "path outside the shared QQ directory: " + std::string(container_path)});
+    if (!host) co_return lighter::outcome_error(FetchError{.detail = "path outside the shared QQ directory: " + container_path});
     std::error_code ec;
     const auto size = std::filesystem::file_size(*host, ec);
-    if (ec) return lighter::outcome_error(FetchError{.detail = "cannot stat " + host->string() + ": " + ec.message()});
-    if (size > archiver.config.max_file_bytes) return too_large(size, archiver.config.max_file_bytes);
+    if (ec) co_return lighter::outcome_error(FetchError{.detail = "cannot stat " + host->string() + ": " + ec.message()});
+    if (size > archiver.config.max_file_bytes) co_return too_large(size, archiver.config.max_file_bytes);
     std::ifstream file(*host, std::ios::binary);
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    if (!file && !file.eof()) return lighter::outcome_error(FetchError{.detail = "cannot read " + host->string()});
-    return Fetched{.bytes = buffer.str(), .source = "napcat:" + std::string(container_path)};
+    if (!file) co_return lighter::outcome_error(FetchError{.detail = "cannot open " + host->string()});
+    std::string bytes;
+    bytes.reserve(static_cast<usize>(size));
+    std::string chunk(k_io_chunk, '\0');
+    while (file) {
+        file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        bytes.append(chunk.data(), static_cast<usize>(file.gcount()));
+        if (file) co_await lighter::yield();
+    }
+    if (file.bad()) co_return lighter::outcome_error(FetchError{.detail = "cannot read " + host->string()});
+    co_return Fetched{.bytes = std::move(bytes), .source = "napcat:" + container_path};
 }
 
 template <typename T>
@@ -137,7 +161,7 @@ std::optional<T> parse_data(std::string_view json) {
 Task<FetchResult> fetch(Archiver &archiver, const std::shared_ptr<onebot::Session> &session, const store::ChatKey &chat,
                         const MediaRef &ref) {
     if (is_http(ref.url)) co_return co_await download(archiver, ref.url);
-    if (!ref.path.empty()) co_return read_container_file(archiver, ref.path);
+    if (!ref.path.empty()) co_return co_await read_container_file(archiver, ref.path);
     if (!session || !session->is_open()) co_return lighter::outcome_error(FetchError{.detail = "no OneBot session to resolve the file"});
 
     if (ref.kind == MediaKind::FILE && chat.type == "group" && !ref.file_id.empty()) {
@@ -155,29 +179,34 @@ Task<FetchResult> fetch(Archiver &archiver, const std::shared_ptr<onebot::Sessio
         if (data.has_error()) co_return lighter::outcome_error(FetchError{.detail = "get_file failed: " + data.error().message()});
         auto info = parse_data<FileInfo>(*data);
         if (!info) co_return lighter::outcome_error(FetchError{.detail = "get_file returned undecodable data"});
-        if (info->file && info->file->starts_with('/')) co_return read_container_file(archiver, *info->file);
+        if (info->file && info->file->starts_with('/')) co_return co_await read_container_file(archiver, *info->file);
         if (info->url && is_http(*info->url)) co_return co_await download(archiver, *info->url);
         co_return lighter::outcome_error(FetchError{.detail = "get_file returned neither a path nor a url"});
     }
     co_return lighter::outcome_error(FetchError{.detail = "segment carries no url, path or file id"});
 }
 
-/// Writes `bytes` to `target` atomically unless an identical file exists.
-Result<void> write_content(const std::filesystem::path &target, std::string_view bytes) {
+/// Writes `bytes` to `target` atomically unless an identical file exists, a
+/// chunk at a time; `bytes` must outlive it.
+Task<Result<void>> write_content(std::filesystem::path target, std::string_view bytes) {
     std::error_code ec;
-    if (std::filesystem::exists(target, ec)) return {};
+    if (std::filesystem::exists(target, ec)) co_return Result<void>{};
     std::filesystem::create_directories(target.parent_path(), ec);
-    if (ec) return lighter::outcome_error(Error::storage("cannot create " + target.parent_path().string() + ": " + ec.message()));
+    if (ec) co_return lighter::outcome_error(Error::storage("cannot create " + target.parent_path().string() + ": " + ec.message()));
     auto temporary = target;
     temporary += ".partial";
     {
         std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-        file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        if (!file) return lighter::outcome_error(Error::storage("cannot write " + temporary.string()));
+        for (usize at = 0; file && at < bytes.size(); at += k_io_chunk) {
+            const auto chunk = bytes.substr(at, k_io_chunk);
+            file.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+            if (at + k_io_chunk < bytes.size()) co_await lighter::yield();
+        }
+        if (!file) co_return lighter::outcome_error(Error::storage("cannot write " + temporary.string()));
     }
     std::filesystem::rename(temporary, target, ec);
-    if (ec) return lighter::outcome_error(Error::storage("cannot rename into " + target.string() + ": " + ec.message()));
-    return {};
+    if (ec) co_return lighter::outcome_error(Error::storage("cannot rename into " + target.string() + ": " + ec.message()));
+    co_return Result<void>{};
 }
 
 /// One or two sentences about an image, cached by content hash; empty when
@@ -203,7 +232,11 @@ Task<std::string> describe(Archiver &archiver, const store::ChatKey &chat, const
             },
     };
     const auto started = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    auto completion = co_await (*archiver.vision)->complete(history, {}, callbacks);
+    // A hung call must not hold an archive slot (and the turns waiting on it).
+    auto settled = co_await lighter::with_timeout(settle((*archiver.vision)->complete(history, {}, callbacks)), k_vision_deadline);
+    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
+                                                Error::api("timeout", "image description exceeded its deadline", "", true))) :
+                                            *std::move(settled);
 
     store::LlmCall call{.time = started, .chat = chat, .model = archiver.vision_model};
     if (completion.has_error()) {
@@ -245,10 +278,10 @@ Task<std::string> archive_one(Archiver &archiver, const std::shared_ptr<onebot::
                   message.chat.id, record.error);
     } else {
         const auto &bytes = fetched->bytes;
-        record.sha1 = sha1_hex(bytes);
+        record.sha1 = co_await sha1_hex(bytes);
         const auto relative =
             std::filesystem::path("media") / record.sha1.substr(0, 2) / (record.sha1 + detect_extension(bytes, ref.kind, ref.name));
-        auto written = write_content(archiver.data_dir / relative, bytes);
+        auto written = co_await write_content(archiver.data_dir / relative, bytes);
         if (written.has_error()) {
             record.status = "failed";
             record.error = written.error().message();

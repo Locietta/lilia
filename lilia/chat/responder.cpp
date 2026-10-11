@@ -15,6 +15,7 @@
 
 #include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/timeout.h>
+#include <lighter/async/runtime/when.h>
 
 #include <xmake/bin2obj/facts_md.hpp>
 #include <xmake/bin2obj/self_facts_md.hpp>
@@ -98,6 +99,8 @@ constexpr usize k_max_replies = 3;
 /// whoever called her this recently is still answered.
 constexpr usize k_catch_up_messages = 100;
 constexpr i64 k_late_answer_seconds = 1800;
+/// A failing planner model is skipped (fallbacks answer) for this long.
+constexpr i64 k_planner_rest_seconds = 600;
 
 store::ChatKey chat_key(const onebot::MessageEvent &event) {
     if (event.is_group()) return {.type = "group", .id = *event.group_id};
@@ -183,6 +186,9 @@ Task<std::optional<i64>> send_and_record(Responder *r, const store::ChatKey &cha
     co_return id;
 }
 
+/// Nothing to add, as a task (the other side of a when_all).
+Task<std::string> no_text() { co_return std::string(); }
+
 /// with_timeout takes lighter's error type; this hands the provider's
 /// outcome through as a plain value instead.
 Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
@@ -199,11 +205,10 @@ std::chrono::seconds call_deadline(const Responder *r, std::string_view purpose)
 }
 
 /// Runs one model call, records its usage, and returns the completed output
-/// items (nullopt on failure).
-Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, provider::Provider &provider, std::string model,
-                                                                  std::string_view purpose, const store::ChatKey &chat,
-                                                                  const provider::History &history,
-                                                                  const std::vector<provider::ToolDefinition> &tools) {
+/// items (nullopt on failure, with the error in `failure` when given).
+Task<std::optional<std::vector<provider::OutputItem>>>
+call_model(Responder *r, provider::Provider &provider, std::string model, std::string_view purpose, const store::ChatKey &chat,
+           const provider::History &history, const std::vector<provider::ToolDefinition> &tools, Error *failure = nullptr) {
     std::vector<provider::OutputItem> items;
     const provider::StreamCallbacks callbacks{
         .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
@@ -236,15 +241,33 @@ Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, 
     if (auto recorded = r->store.add_llm_call(call); recorded.has_error()) {
         log::error("cannot record model call: {}", recorded.error().message());
     }
-    if (completion.has_error()) co_return std::nullopt;
+    if (completion.has_error()) {
+        if (failure) *failure = completion.error();
+        co_return std::nullopt;
+    }
     co_return std::move(items);
 }
 
 /// A planner-model call, then each planner fallback in turn while they fail.
+/// A planner that is rate limited (a used-up subscription window) or failed
+/// twice in a row is skipped for a while, so every call does not first wait
+/// out its deadline.
 Task<std::optional<std::vector<provider::OutputItem>>> call_planner(Responder *r, std::string_view purpose, const store::ChatKey &chat,
                                                                     const provider::History &history,
                                                                     const std::vector<provider::ToolDefinition> &tools) {
-    auto items = co_await call_model(r, r->planner, r->config.model.planner_model, purpose, chat, history, tools);
+    std::optional<std::vector<provider::OutputItem>> items;
+    if (r->planner_fallbacks.empty() || r->now() >= r->planner_down_until) {
+        Error failure;
+        items = co_await call_model(r, r->planner, r->config.model.planner_model, purpose, chat, history, tools, &failure);
+        if (items) {
+            r->planner_failures = 0;
+        } else if (!r->planner_fallbacks.empty() && (failure.status == 429 || ++r->planner_failures >= 2)) {
+            r->planner_down_until = r->now() + k_planner_rest_seconds;
+            r->planner_failures = 1; // after the rest, one more failure is enough
+            log::warn("planner {} is resting for {} min; the fallbacks answer meanwhile", r->config.model.planner_model,
+                      k_planner_rest_seconds / 60);
+        }
+    }
     for (auto &fallback : r->planner_fallbacks) {
         if (items) break;
         log::warn("planner fallback for {}: {}", describe(chat), fallback.model);
@@ -504,11 +527,13 @@ Task<> handle_admin(Responder *r, store::StoredMessage command, std::string argu
     std::string reply;
     if (arguments == "status") {
         const i64 day = local_day_start(r->now(), r->config.chat.utc_offset_minutes);
-        auto used = r->store.tokens_since(day);
-        reply = std::format("lilia {} ({}{})\n模型：{} / 规划 {}\n今日 token：{} / {}\n已允许群：{} 个", xmake::version::version,
-                            xmake::version::commit.substr(0, 8), xmake::version::dirty ? "-dirty" : "", r->config.model.model,
-                            r->config.model.planner_model, used.has_value() ? *used : 0, r->config.chat.daily_token_budget,
-                            r->config.chat.groups.size());
+        auto used = r->store.tokens_since(day, store::TokenScope::CHATS);
+        auto background = r->store.tokens_since(r->now() - 86'400, store::TokenScope::BACKGROUND);
+        reply = std::format("lilia {} ({}{})\n模型：{} / 规划 {}\n今日聊天 token：{} / {}\n24 小时学习 token：{} / {}\n已允许群：{} 个",
+                            xmake::version::version, xmake::version::commit.substr(0, 8), xmake::version::dirty ? "-dirty" : "",
+                            r->config.model.model, r->config.model.planner_model, used.has_value() ? *used : 0,
+                            r->config.chat.daily_token_budget, background.has_value() ? *background : 0,
+                            r->config.learning.daily_token_budget, r->config.chat.groups.size());
     } else if (arguments == "reload") {
         auto reloaded = r->reload_persona();
         reply = reloaded.has_value() ? "人设已重新加载。" : "重新加载失败：" + reloaded.error().message();
@@ -1056,6 +1081,20 @@ void Responder::on_event(onebot::Event event) {
 
 namespace {
 
+/// The web search step for a reply: a dedicated call (writers asked to search
+/// "if needed" often don't), summarised in a few sentences; empty on failure.
+Task<std::string> search_reference(Responder *r, store::ChatKey chat, ChatInfo info, store::StoredMessage target, Plan plan, i64 started) {
+    const auto search_history = build_search_history(info, target, plan, started, r->config.chat.utc_offset_minutes);
+    const std::vector<provider::ToolDefinition> search_tools{{.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"}};
+    std::string reference;
+    if (const auto found = co_await call_model(r, r->searcher, r->config.model.helper(), "search", chat, search_history, search_tools)) {
+        reference = clean_reply(final_text(*found), info, {}, 2'000);
+    }
+    log::info("search for {} returned {} bytes", describe(chat), reference.size());
+    log::debug("search reference: {}", reference);
+    co_return reference;
+}
+
 /// What one reply came to.
 struct Delivered {
     bool sent = false;
@@ -1086,19 +1125,11 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(r->rng)) {
         style_override = k_alt_styles[std::uniform_int_distribution<usize>(0, k_alt_styles.size() - 1)(r->rng)];
     }
-    std::string reference;
-    if (plan.search && r->config.model.web_search) {
-        // A dedicated call: writers asked to search "if needed" often don't.
-        const auto search_history = build_search_history(info, target, plan, started, settings.utc_offset_minutes);
-        const std::vector<provider::ToolDefinition> search_tools{{.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"}};
-        if (const auto found =
-                co_await call_model(r, r->searcher, r->config.model.helper(), "search", chat, search_history, search_tools)) {
-            reference = clean_reply(final_text(*found), info, {}, 2'000);
-        }
-        log::info("search for {} returned {} bytes", describe(chat), reference.size());
-        log::debug("search reference: {}", reference);
-    }
-    const auto habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
+    // The search (when asked for) and the expression pick do not depend on
+    // each other: side by side.
+    auto search = plan.search && r->config.model.web_search ? search_reference(r, chat, info, target, plan, started) : no_text();
+    auto [reference, habits] = co_await lighter::when_all(
+        std::move(search), select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent));
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
     const auto history = build_writer_history({
         .persona = r->persona,
@@ -1133,10 +1164,8 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
                                                                                      settings.long_reply_chars;
     // Emoji go unless people use them (they show up in learned expressions);
     // the feeling one stood for becomes a sticker, the way people answer.
-    std::vector<std::string> learned;
-    if (auto rows = r->store.expressions(0); rows.has_value()) {
-        for (auto &row : *rows) learned.push_back(std::move(row.style));
-    }
+    auto styles = r->store.expression_styles();
+    const auto learned = styles.has_value() ? *std::move(styles) : std::vector<std::string>{};
     std::vector<char32_t> removed;
     const auto reply = strip_emoji(
         fit_length(clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes),
@@ -1268,7 +1297,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     const auto &settings = config.chat;
     const i64 started = now();
     const i64 day = local_day_start(started, settings.utc_offset_minutes);
-    auto used = store.tokens_since(day);
+    // Learning and sticker tagging have their own budget; they never silence her.
+    auto used = store.tokens_since(day, store::TokenScope::CHATS);
     if (used.has_error()) log::error("cannot read token usage: {}", used.error().message());
     if (used.has_value() && *used >= settings.daily_token_budget) {
         log::warn("daily token budget exhausted ({} >= {})", *used, settings.daily_token_budget);
@@ -1340,16 +1370,19 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         planner_input.people = memory->people_notes(people);
         if (!planner_input.people.empty()) log::debug("{} notes on people:\n{}", describe(chat), planner_input.people);
     }
-    if (memory) planner_input.recall = co_await memory->recall(chat, log_lines);
     planner_input.jargon = jargon_notes(this, chat, log_lines);
     planner_input.presence = std::exchange(state.presence_note, {});
-    if (memory && config.memory.facts) {
-        // What she said about herself that bears on the last few lines.
+    if (memory) {
+        // A summary the chat brings back, and what she said about herself that
+        // bears on the last few lines: two lookups, side by side.
         std::string context;
         for (auto it = log_lines.end() - static_cast<std::ptrdiff_t>(std::min<usize>(log_lines.size(), k_self_context));
              it != log_lines.end(); ++it)
             context += it->text + "\n";
-        planner_input.self_notes = co_await memory->self_notes(self.user_id, std::move(context), k_self_facts);
+        auto self_notes = config.memory.facts ? memory->self_notes(self.user_id, std::move(context), k_self_facts) : no_text();
+        auto [recalled, notes] = co_await lighter::when_all(memory->recall(chat, log_lines), std::move(self_notes));
+        planner_input.recall = std::move(recalled);
+        planner_input.self_notes = std::move(notes);
     }
     auto request = build_planner_request(planner_input);
     auto &history = request.history;

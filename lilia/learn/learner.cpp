@@ -612,6 +612,14 @@ void Learner::observe(const onebot::MessageEvent &message, i64 self_id) {
     if (others < std::max<usize>(config.batch_messages, 2)) return;
     if (now() - last_batch[group] < config.min_interval_seconds || running >= std::max<usize>(config.max_concurrent, 1)) return;
     last_batch[group] = now();
+    if (config.daily_token_budget > 0) {
+        // Background work has its own budget, so busy groups cannot eat the chats'.
+        auto used = store.tokens_since(now() - 86'400, store::TokenScope::BACKGROUND);
+        if (used.has_value() && *used >= config.daily_token_budget) {
+            log::warn("learning budget used up ({} >= {} tokens in 24 h); group {} waits", *used, config.daily_token_budget, group);
+            return;
+        }
+    }
     spawn(learn_batch(this, group, std::exchange(buffer, {})));
 }
 

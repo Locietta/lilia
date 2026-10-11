@@ -8,6 +8,7 @@
 
 #include <glaze/json.hpp>
 
+#include <lighter/async/runtime/timeout.h>
 #include <lighter/http/bound_client.h>
 
 #include <xmake/bin2obj/sticker_md.hpp>
@@ -27,6 +28,13 @@ namespace {
 
 /// The line before a sticker, shown to the tagging call (memory only).
 constexpr usize k_context_code_points = 60;
+constexpr std::chrono::seconds k_vision_deadline{60};
+
+/// with_timeout takes lighter's error type; hand the outcome through as a value.
+Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
+    auto outcome = co_await std::move(call);
+    co_return outcome;
+}
 
 std::string_view trim(std::string_view text) {
     constexpr std::string_view k_space = " \t\r\n";
@@ -222,7 +230,10 @@ Task<> Collector::tag(store::Sticker sticker, std::string bytes, std::string con
             },
     };
     const i64 started = now();
-    auto completion = co_await (*vision)->complete(history, {}, callbacks);
+    auto settled = co_await lighter::with_timeout(settle((*vision)->complete(history, {}, callbacks)), k_vision_deadline);
+    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
+                                                Error::api("timeout", "sticker tagging exceeded its deadline", "", true))) :
+                                            *std::move(settled);
     store::LlmCall call{.time = started, .chat = {.type = "sticker", .id = sticker.id}, .model = vision_model};
     if (completion.has_error()) {
         call.error = completion.error().message();

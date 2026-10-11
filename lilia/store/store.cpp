@@ -724,8 +724,12 @@ Result<void> Store::add_llm_call(const LlmCall &call) {
     return statement->run();
 }
 
-Result<u64> Store::tokens_since(i64 since) {
-    auto statement = database.prepare("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM llm_calls WHERE time >= ?1");
+Result<u64> Store::tokens_since(i64 since, TokenScope scope) {
+    const std::string_view filter = scope == TokenScope::CHATS      ? " AND chat_type IN ('group', 'private')" :
+                                    scope == TokenScope::BACKGROUND ? " AND chat_type NOT IN ('group', 'private')" :
+                                                                      "";
+    auto statement =
+        database.prepare(std::format("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM llm_calls WHERE time >= ?1{}", filter));
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, since);
     auto row = statement->step();
@@ -782,6 +786,9 @@ i64 sql_limit(usize limit) { return limit == 0 ? -1 : static_cast<i64>(limit); }
 
 constexpr std::string_view k_expression_columns =
     "id, chat_type, chat_id, situation, style, situations, count, first_seen, last_active, checked, modified_by, model, vector";
+/// The same, with an empty vector: for callers that only read the text.
+constexpr std::string_view k_expression_text_columns =
+    "id, chat_type, chat_id, situation, style, situations, count, first_seen, last_active, checked, modified_by, model, x''";
 
 Result<std::vector<Expression>> read_expressions(Statement &statement) {
     std::vector<Expression> rows;
@@ -865,11 +872,24 @@ Result<std::vector<Expression>> Store::random_expressions(usize skip_top, usize 
     auto statement = database.prepare(std::format("SELECT {} FROM expressions WHERE id NOT IN "
                                                   "(SELECT id FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1) "
                                                   "ORDER BY RANDOM() LIMIT ?2",
-                                                  k_expression_columns));
+                                                  k_expression_text_columns));
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, static_cast<i64>(skip_top));
     statement->bind(2, sql_limit(limit));
     return read_expressions(*statement);
+}
+
+Result<std::vector<std::string>> Store::expression_styles() {
+    auto statement = database.prepare("SELECT style FROM expressions");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    std::vector<std::string> styles;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        styles.push_back(statement->column_text(0));
+    }
+    return styles;
 }
 
 Result<std::vector<Expression>> Store::expressions(usize limit) {

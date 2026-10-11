@@ -143,6 +143,10 @@ struct Responder {
     std::vector<NamedProvider> writer_fallbacks;
     /// Tried in order when a `planner` call fails.
     std::vector<NamedProvider> planner_fallbacks;
+    /// The planner model is skipped until then (unix seconds): it was rate
+    /// limited or failed twice in a row. Consecutive failures so far.
+    i64 planner_down_until = 0;
+    u32 planner_failures = 0;
     std::filesystem::path persona_path;
     std::string persona;
     /// The writer's rules (writer.md); replays may swap in a variant.

@@ -111,7 +111,20 @@ search, intent)`, `wait(seconds)`, `search_history(query)` or
   - Message events are ignored until `get_login_info` has identified the bot.
 
 Everything runs on one libuv loop thread. SQLite calls are synchronous; their
-latency is negligible at this scale.
+latency is negligible at this scale. Large media is read, hashed and written a
+megabyte at a time with the loop free in between, and every model call has a
+deadline (2026-10-11).
+
+Model calls (2026-10-11):
+
+- A planner model that is rate limited, or fails twice in a row, rests for 10
+  minutes; its fallbacks answer meanwhile instead of each call first waiting
+  out the deadline.
+- Independent steps run side by side: the summary recall and her self notes
+  before the planner, the web search and the expression pick before the writer.
+- `chat.daily_token_budget` counts only calls made for chats.
+  `learning.daily_token_budget` (rolling 24 h) holds back learning batches;
+  learning from busy groups can no longer silence her.
 
 ## Roadmap
 

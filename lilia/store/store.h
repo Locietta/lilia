@@ -32,6 +32,13 @@ struct StoredMessage {
     i64 row_id = 0; ///< messages.id; filled by queries that need an order key
 };
 
+/// Which model calls a token sum covers; see Store::tokens_since.
+enum struct TokenScope {
+    ALL,
+    CHATS,
+    BACKGROUND,
+};
+
 struct LlmCall {
     i64 time = 0;
     ChatKey chat;
@@ -235,8 +242,10 @@ struct Store {
 
     Result<void> add_llm_call(const LlmCall &call);
 
-    /// Input plus output tokens of every call at or after `since` (unix seconds).
-    Result<u64> tokens_since(i64 since);
+    /// Input plus output tokens of the calls at or after `since` (unix
+    /// seconds): all of them, those made for chats (group and private), or
+    /// the background ones (learning, sticker tagging).
+    Result<u64> tokens_since(i64 since, TokenScope scope = TokenScope::ALL);
 
     Result<void> add_media(const MediaRecord &media);
 
@@ -306,6 +315,9 @@ struct Store {
     /// Up to `limit` patterns picked at random, excluding the `skip_top`
     /// that `expressions` would list first.
     Result<std::vector<Expression>> random_expressions(usize skip_top, usize limit);
+
+    /// The style text of every learned expression (no vectors), in no order.
+    Result<std::vector<std::string>> expression_styles();
 
     /// Messages of `chat` stored after row `after_row`, oldest first (with
     /// row_id set), at most `limit`.
