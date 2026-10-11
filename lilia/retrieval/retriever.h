@@ -31,7 +31,7 @@ namespace lilia::retrieval {
 //   and, where asked, BM25 keywords (lexical.h). Each leg ranks
 //   `k_leg_factor` x top_k; reciprocal rank fusion (k 60, weights 0.7/0.3)
 //   merges them. The relevance gate looks at the dense similarity only.
-// - Optional MMR for variety (expressions).
+// - Optional MMR among the fused candidates, for variety (expressions).
 //
 // The callers choose the candidates (a chat, a person, a status); the
 // retriever only ranks them.

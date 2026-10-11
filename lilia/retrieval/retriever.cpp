@@ -93,9 +93,9 @@ std::vector<Match> fuse(const std::vector<std::optional<double>> &dense, const s
                         const std::vector<double> &lexical, const Options &options, const std::vector<const Vector *> &vectors) {
     const usize count = dense.size();
     const auto passes = [&](usize i) { return !dense[i] || *dense[i] >= options.min_similarity; };
-    // MMR picks from everything that passes; otherwise each leg ranks a few
-    // times what is wanted.
-    const usize pool = options.mmr_lambda > 0 ? count : options.top_k * k_leg_factor;
+    // Each leg ranks a few times what is wanted (MMR picks among those, as
+    // MaiBot's expression index does).
+    const usize pool = options.top_k * k_leg_factor;
     const auto boost = [&](usize i) { return i < boosts.size() ? boosts[i] : 0.0; };
 
     std::vector<usize> by_meaning;
@@ -135,22 +135,18 @@ std::vector<Match> fuse(const std::vector<std::optional<double>> &dense, const s
         return candidates;
     }
 
-    // MMR: relevance against likeness to what is already picked.
+    // MMR: relevance against likeness to what is already picked; each
+    // candidate's likeness is updated with the newest pick only.
     const auto vector_of = [&](usize i) { return i < vectors.size() ? vectors[i] : nullptr; };
     std::vector<Match> picked;
     std::vector<bool> taken(candidates.size(), false);
+    std::vector<double> redundancy(candidates.size(), 0.0);
     while (picked.size() < options.top_k && picked.size() < candidates.size()) {
         usize best = candidates.size();
         double best_value = -1e9;
         for (usize c = 0; c < candidates.size(); ++c) {
             if (taken[c]) continue;
-            double redundancy = 0;
-            if (const auto *own = vector_of(candidates[c].index)) {
-                for (const auto &chosen : picked) {
-                    if (const auto *other = vector_of(chosen.index)) redundancy = std::max(redundancy, dot(*own, *other));
-                }
-            }
-            const double value = options.mmr_lambda * candidates[c].similarity.value_or(0) - (1 - options.mmr_lambda) * redundancy;
+            const double value = options.mmr_lambda * candidates[c].similarity.value_or(0) - (1 - options.mmr_lambda) * redundancy[c];
             if (value > best_value) {
                 best_value = value;
                 best = c;
@@ -159,6 +155,12 @@ std::vector<Match> fuse(const std::vector<std::optional<double>> &dense, const s
         if (best == candidates.size()) break;
         taken[best] = true;
         picked.push_back(candidates[best]);
+        if (const auto *newest = vector_of(candidates[best].index)) {
+            for (usize c = 0; c < candidates.size(); ++c) {
+                const auto *own = taken[c] ? nullptr : vector_of(candidates[c].index);
+                if (own) redundancy[c] = std::max(redundancy[c], dot(*own, *newest));
+            }
+        }
     }
     return picked;
 }

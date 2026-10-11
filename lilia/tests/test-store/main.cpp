@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -80,7 +81,8 @@ void test_llm_calls() {
 }
 
 void test_file_store() {
-    const auto dir = std::filesystem::temp_directory_path() / ("lilia-test-store-" + std::to_string(std::rand()));
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("lilia-test-store-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     {
         auto db = store::Store::open(dir / "nested" / "lilia.db");
         require(db.has_value(), db ? std::string() : db.error().message());
@@ -98,7 +100,8 @@ void test_file_store() {
 
 /// A schema 11 database (vectors in their tables) opened by this build.
 void test_migration() {
-    const auto dir = std::filesystem::temp_directory_path() / ("lilia-test-migrate-" + std::to_string(std::rand()));
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("lilia-test-migrate-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     const auto path = dir / "lilia.db";
     {
         std::filesystem::create_directories(dir);
@@ -189,7 +192,8 @@ void test_config() {
     auto missing = resolve_secret("$LILIA_TEST_UNSET_VARIABLE", "x");
     require(missing.has_error(), "an unset reference is an error");
 
-    const auto dir = std::filesystem::temp_directory_path() / ("lilia-test-config-" + std::to_string(std::rand()));
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("lilia-test-config-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(dir);
     const auto path = dir / "config.json";
     std::ofstream(path) << R"({"onebot": {"access_token": "$LILIA_TEST_TOKEN"}, "model": {"api_key": "$LILIA_TEST_KEY"},

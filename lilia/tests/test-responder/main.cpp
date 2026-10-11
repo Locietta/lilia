@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -425,7 +426,8 @@ Task<> test_pokes_and_repeats() {
 Task<> test_stickers() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
-    const auto dir = std::filesystem::temp_directory_path() / ("lilia-test-stickers-" + std::to_string(std::rand()));
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("lilia-test-stickers-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(dir / "stickers");
     std::ofstream(dir / "stickers" / "a.png", std::ios::binary) << "PNG";
     h.config.stickers.enabled = true;
