@@ -75,9 +75,9 @@ struct WriterInput {
     ChatInfo info;
     std::vector<store::StoredMessage> recent;
     store::StoredMessage target;
+    /// Its analysis reaches the writer too, "#row" numbers replaced by the
+    /// lines they stand for.
     Plan plan;
-    /// Occasional one-off style that replaces the planner's style.
-    std::string style_override;
     i64 now = 0;
     i32 utc_offset_minutes = 480;
     usize log_bytes = 12'000;
@@ -96,13 +96,7 @@ struct WriterInput {
     std::string presence;
     /// What she already said to this same target, when she answers it again.
     std::string previous_reply;
-    /// A random handful of phrases people in the groups actually say, to
-    /// anchor her voice in real chat rather than the model's own register.
-    std::vector<std::string> voice;
 };
-
-/// The quoted phrase of a learned style: 用"何意味" -> 何意味; empty if none.
-std::string quoted_phrase(std::string_view style);
 
 /// The planner's web_search tool: one call with only the provider-hosted
 /// web_search tool, asked to summarise what it finds about `query`.

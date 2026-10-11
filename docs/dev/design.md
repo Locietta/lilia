@@ -43,11 +43,13 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       rounds among them: its analysis, its tool call and the result. New lines
       simply follow. Between trims it only grows, so it is a cached prefix.
     - Each round it writes a short analysis, then calls one tool:
-      `reply(target, quote, style, search, intent)`, `send_sticker`,
-      `repeat`, `wait(seconds)`, `search_history(query)` or
-      `stay_silent(reason)`; no call means silence. Results are short ("她回
-      复了 #n", "等了 N 秒", what a search found); her bubbles show up as her
-      own lines.
+      `reply(target, quote, style, intent)`, `send_sticker`, `repeat`,
+      `wait(seconds)`, `poke(target)`, `search_history(query)`,
+      `search_web(query)` or `stay_silent(reason)`; no call means silence.
+      Results are short ("她回复了 #n", "等了 N 秒", what a search found);
+      her bubbles show up as her own lines. Side actions are its calls too:
+      it is told that people are repeating a line or that someone poked her,
+      and decides whether to join or poke back.
     - Per round only a tail changes: the first new line, facts ("#n 是叫她
       的"), presence, people notes, self notes, slang, recall, the time.
     - Past twice `context_messages` / `context_bytes` the anchor moves to
@@ -57,9 +59,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     - Limits: 8 rounds and 3 replies per turn, 3 waits in a row (MaiBot's),
       waits of 1–60 s. Replay passes waits in simulated time.
   - The writer (`prompts/persona.md` + `prompts/writer.md`) sees the log as
-    turns (her lines are assistant turns) plus the planner's style and
-    intent; `alt_style_probability` swaps in a one-off style. Web search is
-    offered only when the planner asks for it.
+    turns (her lines are assistant turns) plus the planner's style, intent
+    and analysis (MaiBot's reply reason; "#n" becomes the line it names),
+    what the planner looked up this turn, and picked expressions.
+    Everything else about how she talks lives in `writer.md`.
   - `delivery` sends replies the way MaiBot does (2026-10-10).
     - Casual replies are split at "，,。;", spaces and newlines, then
       neighbours merge at random. `typos` swaps in a homophone now and then
@@ -88,8 +91,9 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     with a receipt instead.
   - `lilia replay <chat.jsonl>` runs the same ingest and turn code on a
     recorded or synthetic log without NapCat and prints every decision;
-    `scripts/replay-remote.sh` runs it on cachy with the live keys.- **`archive/`**: copies the media of allowed chats (pictures, stickers,
-    voice, video, files) into `<data_dir>/media/<sha1[:2]>/<sha1><ext>`.
+    `scripts/replay-remote.sh` runs it on cachy with the live keys.
+- **`archive/`**: copies the media of allowed chats (pictures, stickers,
+  voice, video, files) into `<data_dir>/media/<sha1[:2]>/<sha1><ext>`.
   - **Why:** the QQ client cache on the host is pruned after a few days, and
     Tencent's download links expire.
   - **Sources, in order:** the segment's `url`; a container `path` mapped

@@ -286,7 +286,24 @@ void test_writer() {
     require(briefed_note.find("回复信息参考：b 在问她追不追第三集") != std::string::npos &&
                 briefed_note.find("不用完全遵守") != std::string::npos && briefed_note.find("你想表达的意思") == std::string::npos,
             "a brief reaches the writer as optional reference");
-    require(last.find("口气") == std::string::npos, "no voice section without samples");
+    require(last.find("旁观者") == std::string::npos, "no analysis, no section for it");
+
+    auto asked = stored(205, t - 60, "b", "莉莉娅你追吗，第三集作画崩成这样");
+    asked.row_id = 18'345;
+    const auto analysed =
+        text_of(chat::build_writer_history(
+                    {
+                        .persona = "PERSONA",
+                        .rules = "RULES",
+                        .info = group_info(),
+                        .recent = {asked},
+                        .target = asked,
+                        .plan = {.reply = true, .target = 205, .intent = "说在追", .analysis = "#18345 在问她，#9 早就刷走了"},
+                        .now = t,
+                    })
+                    .back());
+    require(analysed.contains("可以参考：「b: 莉莉娅你追吗，第三集作画…」在问她，那条消息早就刷走了"),
+            "the planner's analysis reaches the writer, its row numbers as lines: " + analysed);
 }
 
 void test_flow() {

@@ -309,10 +309,6 @@ struct Store {
     /// Patterns, most counted first; `limit` 0 returns all of them.
     Result<std::vector<Expression>> expressions(usize limit);
 
-    /// Up to `limit` patterns picked at random, excluding the `skip_top`
-    /// that `expressions` would list first.
-    Result<std::vector<Expression>> random_expressions(usize skip_top, usize limit);
-
     /// The style text of every learned expression (no vectors), in no order.
     Result<std::vector<std::string>> expression_styles();
 

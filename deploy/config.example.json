@@ -32,7 +32,6 @@
     // every batch, MaiBot's default; 0 = only when called). It decides whether she speaks.
     "talk_value": 1,
     "debounce_seconds": 3,
-    "alt_style_probability": 0.15,
     "typing_speed": 1.0,
     // A turn waits this long for new images to be described.
     "image_wait_seconds": 8,

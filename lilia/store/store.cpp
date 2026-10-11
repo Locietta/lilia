@@ -776,9 +776,6 @@ i64 sql_limit(usize limit) { return limit == 0 ? -1 : static_cast<i64>(limit); }
 
 constexpr std::string_view k_expression_columns =
     "id, chat_type, chat_id, situation, style, situations, count, first_seen, last_active, checked, modified_by, model, vector";
-/// The same, with an empty vector: for callers that only read the text.
-constexpr std::string_view k_expression_text_columns =
-    "id, chat_type, chat_id, situation, style, situations, count, first_seen, last_active, checked, modified_by, model, x''";
 
 Result<std::vector<Expression>> read_expressions(Statement &statement) {
     std::vector<Expression> rows;
@@ -856,17 +853,6 @@ Result<void> Store::set_expression_checked(i64 id, bool checked) {
     statement->bind(1, id);
     statement->bind(2, i64{checked ? 1 : 0});
     return statement->run();
-}
-
-Result<std::vector<Expression>> Store::random_expressions(usize skip_top, usize limit) {
-    auto statement = database.prepare(std::format("SELECT {} FROM expressions WHERE id NOT IN "
-                                                  "(SELECT id FROM expressions ORDER BY count DESC, last_active DESC LIMIT ?1) "
-                                                  "ORDER BY RANDOM() LIMIT ?2",
-                                                  k_expression_text_columns));
-    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, static_cast<i64>(skip_top));
-    statement->bind(2, sql_limit(limit));
-    return read_expressions(*statement);
 }
 
 Result<std::vector<std::string>> Store::expression_styles() {

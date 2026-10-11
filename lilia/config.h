@@ -147,8 +147,6 @@ struct ChatConfig {
     double talk_value = 1;
     /// Wait for a burst of messages to end before deciding.
     u32 debounce_seconds = 3;
-    /// Chance that one reply uses a random alternative style (e.g. one word).
-    double alt_style_probability = 0.15;
     /// What the planner hands the writer: "intent" (a short stance to voice)
     /// or "reference" (notes the writer may use or ignore, like MaiBot).
     std::string handoff = "intent";

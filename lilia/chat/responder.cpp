@@ -43,18 +43,7 @@ namespace {
 
 std::string_view embedded(std::span<const std::byte> content) { return {reinterpret_cast<const char *>(content.data()), content.size()}; }
 
-/// One-off styles that occasionally replace the planner's choice, so lilia
-/// does not always sound the same.
-constexpr std::array<std::string_view, 4> k_alt_styles{
-    "这次只用一两个字或者一个词回应。",
-    "这次随口接一句就行，像顺手回的消息。",
-    "这次可以带点吐槽的语气。",
-    "这次用反问或者疑问的口气回应。",
-};
-
 constexpr i64 k_max_debounce_seconds = 15;
-/// Learned phrases shown to the writer as a sample of how the groups talk.
-constexpr usize k_voice_samples = 8;
 /// Recent targets whose reply she remembers.
 constexpr usize k_replied_memory = 20;
 /// Expression selection: too few candidates skip the call; the selector sees
@@ -548,19 +537,6 @@ std::vector<store::Expression> sample_fallback(std::vector<store::Expression> po
     draw(everything, k_fallback_draw);
     if (repeated.size() >= k_min_repeated) draw(repeated, k_fallback_draw);
     return picked;
-}
-
-std::vector<std::string> sample_voice(store::Store &store, usize count) {
-    // Over-fetch: some styles ("句尾加…") have no quoted phrase.
-    auto rows = store.random_expressions(0, count * 2);
-    if (rows.has_error()) return {};
-    std::vector<std::string> phrases;
-    for (const auto &row : *rows) {
-        if (auto phrase = quoted_phrase(row.style); !phrase.empty() && !std::ranges::contains(phrases, phrase))
-            phrases.push_back(std::move(phrase));
-        if (phrases.size() >= count) break;
-    }
-    return phrases;
 }
 
 namespace {
@@ -1099,10 +1075,6 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         plan.style = ReplyStyle::SHORT; // nothing fitting: say it in words
     }
 
-    std::string style_override;
-    if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(r->rng)) {
-        style_override = k_alt_styles[std::uniform_int_distribution<usize>(0, k_alt_styles.size() - 1)(r->rng)];
-    }
     const auto habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
     const auto history = build_writer_history({
@@ -1112,7 +1084,6 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .recent = log_lines,
         .target = target,
         .plan = plan,
-        .style_override = style_override,
         .now = started,
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = std::numeric_limits<usize>::max(), // log_window() bounds it
@@ -1123,7 +1094,6 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .self_notes = self_notes,
         .presence = presence,
         .previous_reply = previous == state.replied.end() ? std::string() : previous->second,
-        .voice = r->config.learning.enabled ? sample_voice(r->store, k_voice_samples) : std::vector<std::string>{},
     });
     auto written = co_await call_model(r, r->writer, r->config.model.model, "writer", chat, history, {});
     for (auto &fallback : r->writer_fallbacks) {
@@ -1133,9 +1103,9 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     }
     if (!written) co_return Delivered{};
     log::debug("writer raw: {}", final_text(*written));
-    const auto budget = !style_override.empty() || plan.style == ReplyStyle::SHORT ? settings.short_reply_chars :
-                        plan.style == ReplyStyle::NORMAL                           ? settings.normal_reply_chars :
-                                                                                     settings.long_reply_chars;
+    const auto budget = plan.style == ReplyStyle::SHORT  ? settings.short_reply_chars :
+                        plan.style == ReplyStyle::NORMAL ? settings.normal_reply_chars :
+                                                           settings.long_reply_chars;
     // Emoji go unless people use them (they show up in learned expressions).
     auto styles = r->store.expression_styles();
     const auto learned = styles.has_value() ? *std::move(styles) : std::vector<std::string>{};
@@ -1149,12 +1119,12 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     // neighbours merged at random, a homophone typo now and then (sometimes
     // corrected right after), at most three messages. A long reply is on
     // purpose (an explanation, a copypasta): one message, untouched.
-    const bool deliberate = plan.style == ReplyStyle::LONG && style_override.empty();
     std::vector<Segment> segments;
-    if (deliberate) {
+    if (plan.style == ReplyStyle::LONG) {
         for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
     } else {
-        // Every line, trimmed, blank ones dropped; no spaces around English words.
+        // Every line, trimmed, blank ones dropped; no spaces around English
+        // words, which the split would take for breaks.
         const auto casual = tighten_spacing(first_lines(reply, std::numeric_limits<usize>::max()));
 
         segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);

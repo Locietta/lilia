@@ -115,23 +115,58 @@ std::string_view without_quote(std::string_view text) {
     return text;
 }
 
+namespace {
+
+/// The first `count` code points of a message, without what it quotes, on
+/// one line ("…" when cut).
+std::string excerpt(std::string_view text, usize count) {
+    text = without_quote(text);
+    std::string out;
+    usize kept = 0;
+    for (usize i = 0; i < text.size() && kept < count; ++kept) {
+        usize next = i + 1;
+        while (next < text.size() && (static_cast<unsigned char>(text[next]) & 0xC0) == 0x80) ++next;
+        out.append(text.substr(i, next - i));
+        i = next;
+    }
+    if (out.size() < text.size()) out += "…";
+    std::ranges::replace(out, '\n', ' ');
+    return out;
+}
+
+/// The planner's "#18345" (a row number the writer never sees) as the line
+/// itself: 「阿紫: 第三集…」.
+std::string resolve_rows(std::string_view text, const std::vector<store::StoredMessage> &recent) {
+    constexpr usize k_excerpt_code_points = 12;
+    std::string out;
+    for (usize i = 0; i < text.size();) {
+        usize end = i + 1;
+        while (text[i] == '#' && end < text.size() && text[end] >= '0' && text[end] <= '9') ++end;
+        if (end == i + 1) {
+            out.push_back(text[i++]);
+            continue;
+        }
+        i64 row = 0;
+        for (usize k = i + 1; k < end; ++k) row = row * 10 + (text[k] - '0');
+        if (const auto it = std::ranges::find(recent, row, &store::StoredMessage::row_id); it != recent.end()) {
+            out +=
+                std::format("「{}: {}」", it->from_self ? std::string("你") : display_name(*it), excerpt(it->text, k_excerpt_code_points));
+        } else {
+            out += "那条消息";
+        }
+        i = end < text.size() && text[end] == ' ' ? end + 1 : end; // "#12 在问" was spaced for the number
+    }
+    return out;
+}
+
+} // namespace
+
 std::string quote_prefix(const store::StoredMessage *quoted, std::string_view self_name) {
     constexpr usize k_excerpt_code_points = 20;
     if (!quoted) return "[回复] ";
     // Only the quoted line itself, not what it quoted in turn.
-    const auto text = without_quote(quoted->text);
-    std::string excerpt;
-    usize kept = 0;
-    for (usize i = 0; i < text.size() && kept < k_excerpt_code_points; ++kept) {
-        usize next = i + 1;
-        while (next < text.size() && (static_cast<unsigned char>(text[next]) & 0xC0) == 0x80) ++next;
-        excerpt.append(text.substr(i, next - i));
-        i = next;
-    }
-    if (excerpt.size() < text.size()) excerpt += "…";
-    std::ranges::replace(excerpt, '\n', ' ');
     const auto name = quoted->from_self ? std::string(self_name) : display_name(*quoted);
-    return std::format("[回复 {}: {}] ", name, excerpt);
+    return std::format("[回复 {}: {}] ", name, excerpt(quoted->text, k_excerpt_code_points));
 }
 
 std::string render_line(const store::StoredMessage &message, i32 utc_offset_minutes) {
@@ -198,14 +233,6 @@ std::string_view handoff_rule(bool reference) {
            "不要写成台词，也不要写成一套论证或建议（\"认同……但提醒……建议……\"）。";
 }
 
-std::string quoted_phrase(std::string_view style) {
-    const auto open = style.find('"');
-    if (open == std::string_view::npos) return {};
-    const auto close = style.find('"', open + 1);
-    if (close == std::string_view::npos || close == open + 1) return {};
-    return std::string(style.substr(open + 1, close - open - 1));
-}
-
 provider::History build_writer_history(const WriterInput &input) {
     // Persona and rules never change, then the anchored log: both cacheable.
     // Where, when, the style and every note come in the final user part.
@@ -232,16 +259,17 @@ provider::History build_writer_history(const WriterInput &input) {
     if (history.size() > 2) std::get<provider::TextPart>(history.back().parts.back()).cache = true;
 
     std::string note = chat_place(input.info) + clock_line(input.now, input.utc_offset_minutes) + "\n";
-    note += input.style_override.empty() ? style_instruction(input.plan.style) : std::string_view(input.style_override);
-    if (!input.voice.empty()) {
-        note += "\n群里的人平时会说这样的话，只是让你找找大家说话的口气，不用照搬：";
-        for (usize i = 0; i < input.voice.size(); ++i) note += (i ? "、" : "") + std::format("「{}」", input.voice[i]);
+    note += style_instruction(input.plan.style);
+    if (!input.plan.analysis.empty()) {
+        // MaiBot hands its replyer the planner's reasoning the same way.
+        note += std::format("\n【旁观者对眼下情况的看法（里面的\"她\"就是你），可以参考：{}】",
+                            resolve_rows(input.plan.analysis, input.recent));
     }
     note += std::format("\n【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
     if (!input.plan.brief.empty()) {
-        note += std::format("】\n【回复信息参考：{}\n可以参考，但视情况而定，不用完全遵守】", input.plan.brief);
+        note += std::format("】\n【回复信息参考：{}\n可以参考，但视情况而定，不用完全遵守】", resolve_rows(input.plan.brief, input.recent));
     } else {
-        if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
+        if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", resolve_rows(input.plan.intent, input.recent));
         note += "】";
     }
     if (!input.reference.empty()) {

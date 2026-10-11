@@ -80,7 +80,6 @@ struct Harness {
     explicit Harness(lighter::TaskGroup<> &tasks) : store(std::move(*store::Store::open_memory())) {
         config.chat.groups = {k_group};
         config.chat.typos.enabled = false;
-        config.chat.alt_style_probability = 0;
         config.learning.enabled = false;
         config.model.web_search = false;
         responder = std::make_unique<chat::Responder>(config, store, test::fake_provider(planner), test::fake_provider(writer),

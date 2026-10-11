@@ -187,7 +187,4 @@ std::string_view default_persona();
 /// once (when there are enough), without repeats.
 std::vector<store::Expression> sample_fallback(std::vector<store::Expression> pool, std::mt19937 &rng);
 
-/// Up to `count` distinct quoted phrases from random learned patterns.
-std::vector<std::string> sample_voice(store::Store &store, usize count);
-
 } // namespace lilia::chat
