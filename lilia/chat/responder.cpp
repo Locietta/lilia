@@ -100,6 +100,8 @@ constexpr i64 k_late_answer_seconds = 1800;
 constexpr usize k_kept_analyses = 6;
 /// A failing planner model is skipped (fallbacks answer) for this long.
 constexpr i64 k_planner_rest_seconds = 600;
+/// Web searches the planner may run per turn.
+constexpr usize k_max_web_searches = 2;
 
 store::ChatKey chat_key(const onebot::MessageEvent &event) {
     if (event.is_group()) return {.type = "group", .id = *event.group_id};
@@ -1082,18 +1084,18 @@ void Responder::on_event(onebot::Event event) {
 
 namespace {
 
-/// The web search step for a reply: a dedicated call (writers asked to search
-/// "if needed" often don't), summarised in a few sentences; empty on failure.
-Task<std::string> search_reference(Responder *r, store::ChatKey chat, ChatInfo info, store::StoredMessage target, Plan plan, i64 started) {
-    const auto search_history = build_search_history(info, target, plan, started, r->config.chat.utc_offset_minutes);
+/// The planner's search_web tool: a call with only the provider-hosted
+/// web_search tool, summarised in a few sentences; empty on failure.
+Task<std::string> search_web(Responder *r, store::ChatKey chat, ChatInfo info, std::string query) {
+    const auto search_history = build_search_history(query, r->now(), r->config.chat.utc_offset_minutes);
     const std::vector<provider::ToolDefinition> search_tools{{.kind = provider::ToolKind::WEB_SEARCH, .name = "web_search"}};
-    std::string reference;
-    if (const auto found = co_await call_model(r, r->searcher, r->config.model.helper(), "search", chat, search_history, search_tools)) {
-        reference = clean_reply(final_text(*found), info, {}, 2'000);
+    std::string found;
+    if (const auto items = co_await call_model(r, r->searcher, r->config.model.helper(), "search", chat, search_history, search_tools)) {
+        found = clean_reply(final_text(*items), info, {}, 2'000);
     }
-    log::info("search for {} returned {} bytes", describe(chat), reference.size());
-    log::debug("search reference: {}", reference);
-    co_return reference;
+    log::info("{} searched the web for \"{}\": {} bytes", describe(chat), query, found.size());
+    log::debug("search result: {}", found);
+    co_return found;
 }
 
 /// What one reply came to.
@@ -1102,16 +1104,15 @@ struct Delivered {
     std::string said; ///< her messages, joined
     /// Why nothing was attempted (the target was recalled), for the planner.
     std::string refused;
-    /// What the web search found for it, if she searched.
-    std::string reference;
 };
 
 /// One reply as the planner asked for it: a sticker alone, or the writer's
-/// text (after an optional web search and the expression selection) sent the
-/// way MaiBot sends replies, plus a sticker when asked. Records what she said.
+/// text (with what the planner looked up this turn and the picked
+/// expressions) sent the way MaiBot sends replies, plus a sticker when asked.
+/// Records what she said.
 Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vector<store::StoredMessage> log_lines,
-                        store::StoredMessage target, ChatInfo info, i64 started, std::string remembered, std::string self_notes,
-                        std::string presence) {
+                        store::StoredMessage target, ChatInfo info, i64 started, std::string remembered, std::string reference,
+                        std::string self_notes, std::string presence) {
     auto &state = r->chats[chat];
     const auto &settings = r->config.chat;
     if (plan.sticker_only) {
@@ -1128,11 +1129,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     if (plan.style != ReplyStyle::LONG && std::bernoulli_distribution(std::clamp(settings.alt_style_probability, 0.0, 1.0))(r->rng)) {
         style_override = k_alt_styles[std::uniform_int_distribution<usize>(0, k_alt_styles.size() - 1)(r->rng)];
     }
-    // The search (when asked for) and the expression pick do not depend on
-    // each other: side by side.
-    auto search = plan.search && r->config.model.web_search ? search_reference(r, chat, info, target, plan, started) : no_text();
-    auto [reference, habits] = co_await lighter::when_all(
-        std::move(search), select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent));
+    const auto habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
     const auto history = build_writer_history({
         .persona = r->persona,
@@ -1256,7 +1253,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     if (laughs(said)) state.last_laugh = r->now();
     state.replied.emplace_back(plan.target, said);
     if (state.replied.size() > k_replied_memory) state.replied.pop_front();
-    co_return Delivered{.sent = true, .said = std::move(said), .reference = std::move(reference)};
+    co_return Delivered{.sent = true, .said = std::move(said)};
 }
 
 /// The id of the first tool call in a planner response.
@@ -1344,8 +1341,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                                                                     {"persona", persona},
                                                                     {"handoff", handoff_rule(settings.handoff == "reference")},
                                                                     {"memory_rule", memory_rule(memory != nullptr)},
+                                                                    {"search_rule", search_rule(config.model.web_search)},
                                                                     {"sticker_rule", sticker_rule(stickers_ready(this))}});
-    const auto tools = planner_tools(settings.handoff == "reference", memory != nullptr, stickers_ready(this));
+    const auto tools = planner_tools(settings.handoff == "reference", memory != nullptr, config.model.web_search, stickers_ready(this));
     const u64 cycle = ++state.cycles;
 
     // Notes for this turn: in the tail of every round, never in the history.
@@ -1402,7 +1400,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (auto latest = log_window(chat); !latest.empty()) rows = std::move(latest);
         if (!arrived.empty()) newest = arrived.back().message_id;
     };
-    std::string remembered;
+    std::string remembered; // from search_history, for the writer
+    std::string online;     // from search_web, for the writer
+    usize web_searches = 0;
     const auto reply_to = [&](Plan plan) -> Task<Delivered> {
         auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
         if (target != rows.end() && target->from_self) {
@@ -1420,9 +1420,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             log::info("{}: {} was recalled; not answering it", describe(chat), plan.target);
             co_return Delivered{.refused = "那条消息已经被撤回了，没有回。"};
         }
-        log::info("{} replies to {} ({}, quote {}, search {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
-                  plan.search, plan.intent.empty() ? plan.brief : plan.intent);
-        co_return co_await deliver(this, chat, plan, rows, *target, info, now(), remembered, notes.self_notes, notes.presence);
+        log::info("{} replies to {} ({}, quote {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
+                  plan.intent.empty() ? plan.brief : plan.intent);
+        co_return co_await deliver(this, chat, plan, rows, *target, info, now(), remembered, online, notes.self_notes, notes.presence);
     };
 
     // MaiBot's planner loop: each round an analysis and one tool call; the
@@ -1468,7 +1468,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         // One she cannot use right now gets a receipt saying why (the tools
         // never change, which would void the cached prompt).
         std::string unavailable;
-        if (tool == "search_history" && searches >= config.memory.max_searches) {
+        if ((tool == "search_history" && searches >= config.memory.max_searches) ||
+            (tool == "search_web" && web_searches >= k_max_web_searches)) {
             unavailable = "这一轮已经查过了，不能再查，根据现有的信息决定。";
         } else if ((tool == "wait" || tool == "stay_silent" || tool.empty()) && must_speak && replies == 0) {
             unavailable = "这次需要她说点什么，用 reply。";
@@ -1491,6 +1492,18 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             if (!hits.empty()) remembered += found;
             keep(found);
             ++searches;
+            continue;
+        }
+        // A look online: what it finds goes back to the planner, and to the
+        // writer if she replies.
+        if (config.model.web_search && tool == "search_web") {
+            const auto &call = std::get<provider::ToolCallItem>(*std::ranges::find_if(*planned, [](const provider::OutputItem &item) {
+                                   return std::holds_alternative<provider::ToolCallItem>(item);
+                               })).call;
+            const auto found = co_await search_web(this, chat, info, string_input(call.input, "query"));
+            if (!found.empty()) online += (online.empty() ? "" : "\n") + found;
+            keep(found.empty() ? std::string("没查到。") : "查到的：" + found);
+            ++web_searches;
             continue;
         }
 
@@ -1564,9 +1577,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             break;
         }
         ++replies;
-        // What her search found stays with the round, for follow-up questions.
         std::string receipt = std::format("她回复了 #{}，说的话在上面的聊天记录里。", row_of(plan.target));
-        if (!delivered.reference.empty()) receipt += "\n她查到的：" + delivered.reference;
         keep(std::move(receipt));
         if (replies >= k_max_replies) {
             ended = "replied enough";

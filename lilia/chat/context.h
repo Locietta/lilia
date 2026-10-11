@@ -30,7 +30,6 @@ struct Plan {
     i64 target = 0; ///< message id lilia answers
     bool quote = false;
     ReplyStyle style = ReplyStyle::SHORT;
-    bool search = false;
     std::string intent;
     /// "reference" handoff: the planner's notes for the writer.
     std::string brief;
@@ -58,6 +57,9 @@ std::string clock_line(i64 now, i32 utc_offset_minutes);
 
 /// The planner.md rule about search_history; empty when memory is off.
 std::string_view memory_rule(bool enabled);
+
+/// The planner.md rule about web_search; empty when it is off.
+std::string_view search_rule(bool enabled);
 
 /// The planner.md rule about stickers; empty when she has none to send.
 std::string_view sticker_rule(bool enabled);
@@ -100,10 +102,9 @@ struct WriterInput {
 /// The quoted phrase of a learned style: 用"何意味" -> 何意味; empty if none.
 std::string quoted_phrase(std::string_view style);
 
-/// The search step: one call with only the web_search tool, asked to
-/// summarise what it finds about the target message in a few sentences.
-provider::History build_search_history(const ChatInfo &info, const store::StoredMessage &target, const Plan &plan, i64 now,
-                                       i32 utc_offset_minutes);
+/// The planner's web_search tool: one call with only the provider-hosted
+/// web_search tool, asked to summarise what it finds about `query`.
+provider::History build_search_history(std::string_view query, i64 now, i32 utc_offset_minutes);
 
 /// SYSTEM persona and rules; then the chat log as alternating turns (lilia's
 /// own lines are assistant turns; the last one ends a cached prefix); then a

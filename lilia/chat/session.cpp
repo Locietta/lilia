@@ -128,7 +128,7 @@ void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep
     std::erase_if(records, [](const PlannerRecord &record) { return record.output.empty(); });
 }
 
-std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool memory_search, bool stickers) {
+std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool memory_search, bool web_search, bool stickers) {
     std::vector<provider::ToolDefinition> tools;
     tools.push_back({
         .name = "reply",
@@ -136,7 +136,6 @@ std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool
         .input_schema = {.properties = {{"target", property("string", "要回应的消息编号，例如 \"#18345\"")},
                                         {"quote", property("boolean", "是否引用那条消息")},
                                         {"style", property("string", "short | normal | long")},
-                                        {"search", property("boolean", "是否需要联网搜索")},
                                         {reference_handoff ? "brief" : "intent",
                                          reference_handoff ? property("string", "给她的参考信息，不是台词，也不规定她怎么说") :
                                                              property("string", "一句话描述她想表达的意思，不是台词")}},
@@ -172,6 +171,15 @@ std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool
             .description = "搜索这个群以前的聊天记录，结果会告诉你，然后你再决定下一步",
             .input_schema = {.properties = {{"query",
                                              property("string", "要找的内容，写成一句完整的问题或描述，例如\"谁说过对芒果过敏\"")}},
+                             .required = {"query"}},
+        });
+    }
+    if (web_search) {
+        tools.push_back({
+            .name = "search_web",
+            .description = "上网搜索她不知道或者拿不准的事：新闻、事实、数据、天气、价格。结果会告诉你，然后你再决定下一步",
+            .input_schema = {.properties = {{"query",
+                                             property("string", "要查什么，写成一句完整的搜索需求，例如\"杭州西湖区今天下雨吗\"")}},
                              .required = {"query"}},
         });
     }
@@ -227,7 +235,6 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
             .style = style == "long"   ? ReplyStyle::LONG :
                      style == "normal" ? ReplyStyle::NORMAL :
                                          ReplyStyle::SHORT,
-            .search = bool_field(input, "search"),
             .intent = string_field(input, "intent"),
             .brief = string_field(input, "brief"),
             .sticker = string_field(input, "sticker"),

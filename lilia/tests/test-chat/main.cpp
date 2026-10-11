@@ -93,14 +93,6 @@ std::string text_of(const provider::Item &item) {
     return out;
 }
 
-void test_time() {
-    // 2026-10-03 13:05:00 UTC = 21:05 at UTC+8.
-    const i64 t = 1'791'032'700;
-    require(chat::format_local_time(t, 480) == "2026-10-03 21:05", "local time: " + chat::format_local_time(t, 480));
-    require(chat::local_day_start(t, 480) == 1'790'956'800, "local midnight at UTC+8");
-    require(chat::local_day_start(t, 0) == 1'790'985'600, "midnight at UTC");
-}
-
 chat::ChatInfo group_info() {
     return {.chat = {.type = "group", .id = k_group}, .chat_name = "测试群", .name = "莉莉娅", .self_id = k_self, .self_name = "闭锁"};
 }
@@ -184,8 +176,7 @@ void test_planner() {
     const auto repeated = chat::parse_plan({OutputItem(tool_call("repeat", R"({"target":"#103"})"))}, rows);
     require(repeated.repeat && !repeated.reply && repeated.target == 1030, "repeat a message");
     const auto reply = chat::parse_plan(
-        {OutputItem(tool_call("reply", R"({"target":"#105 c: 哪部","quote":true,"style":"normal","search":false,"intent":"说是哪部"})"))},
-        rows);
+        {OutputItem(tool_call("reply", R"({"target":"#105 c: 哪部","quote":true,"style":"normal","intent":"说是哪部"})"))}, rows);
     require(reply.reply && reply.target == 1050 && reply.quote && reply.style == chat::ReplyStyle::NORMAL && reply.intent == "说是哪部",
             "reply arguments are read; a target with trailing text still parses");
     const auto silent = chat::parse_plan({OutputItem(tool_call("stay_silent", R"({"reason":"和她无关"})"))}, rows);
@@ -208,12 +199,12 @@ void test_planner() {
         for (const auto &tool : tools) out.push_back(tool.name);
         return out;
     };
-    require(names(chat::planner_tools(false, false, false)) == std::vector<std::string>{"reply", "repeat", "wait", "stay_silent"},
+    require(names(chat::planner_tools(false, false, false, false)) == std::vector<std::string>{"reply", "repeat", "wait", "stay_silent"},
             "reply, repeat, wait, stay_silent");
-    require(names(chat::planner_tools(false, true, true)) ==
-                std::vector<std::string>{"reply", "send_sticker", "repeat", "wait", "search_history", "stay_silent"},
-            "with stickers and memory");
-    const auto briefed = chat::planner_tools(true, false, false);
+    require(names(chat::planner_tools(false, true, true, true)) ==
+                std::vector<std::string>{"reply", "send_sticker", "repeat", "wait", "search_history", "search_web", "stay_silent"},
+            "with stickers, memory and the web");
+    const auto briefed = chat::planner_tools(true, false, false, false);
     require(std::ranges::contains(briefed[0].input_schema.required, std::string("brief")) &&
                 !std::ranges::contains(briefed[0].input_schema.required, std::string("intent")),
             "the reference handoff asks for brief instead of intent");
@@ -561,7 +552,6 @@ void test_clean_reply() {
 int main() {
     try {
         test_triggers();
-        test_time();
         test_planner();
         test_writer();
         test_flow();

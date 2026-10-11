@@ -61,7 +61,7 @@ provider::History render_session(std::string_view prompt, const ChatInfo &info, 
 void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep_cycles);
 
 /// The planner's tools; the same every round, so they never break the cache.
-std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool memory_search, bool stickers);
+std::vector<provider::ToolDefinition> planner_tools(bool reference_handoff, bool memory_search, bool web_search, bool stickers);
 
 /// Reads the planner's tool call. Targets are "#<row id>" among `rows`; no
 /// call, an unknown tool or an invalid target means silence. Waits are

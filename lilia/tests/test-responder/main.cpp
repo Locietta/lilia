@@ -349,6 +349,41 @@ Task<> test_cacheable_prompts() {
     co_await tasks.join();
 }
 
+Task<> test_the_planner_searches() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.config.model.web_search = true;
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        std::string seen;
+        for (const auto &item : history) seen += text_of(item);
+        if (seen.contains("她回复了")) return analysed("答完了", test::tool_call("stay_silent", R"({"reason":"说完了"})"));
+        if (seen.contains("查到的：")) {
+            const auto target = line_number(history, "西湖区");
+            return analysed("查到了，告诉他",
+                            test::tool_call("reply", R"({"target":")" + target + R"(","style":"short","intent":"说有小雨"})"));
+        }
+        return analysed("她不知道，先查", test::tool_call("search_web", R"({"query":"杭州西湖区今天下雨吗"})"));
+    };
+    // One fake answers both the search call (offered only the hosted search
+    // tool) and the writer.
+    h.writer->answer = [](const auto &,
+                          const std::vector<provider::ToolDefinition> &tools) -> std::optional<std::vector<provider::OutputItem>> {
+        if (!tools.empty() && tools.front().kind == provider::ToolKind::WEB_SEARCH)
+            return std::vector{test::text_answer("西湖区今天下午有小雨")};
+        return std::vector{test::text_answer("下午有点小雨")};
+    };
+    std::ignore = h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 西湖区今天下雨吗")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.planner->tools.front().size() == 5 && h.planner->tools.front()[3].name == "search_web", "the planner can search the web");
+    std::string second;
+    for (const auto &item : h.planner->requests[1]) second += text_of(item);
+    require(second.contains("查到的：西湖区今天下午有小雨"), "it sees what it found before deciding");
+    require(h.sent == std::vector<std::string>{"下午有点小雨"}, "then replies");
+    const auto &writer = h.writer->requests.back();
+    require(text_of(writer.back()).contains("你刚去查过了，情况如下：西湖区今天下午有小雨"), "the writer knows what was found");
+    co_await tasks.join();
+}
+
 Task<> test_history_survives_many_turns() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
@@ -375,7 +410,7 @@ Task<> test_history_survives_many_turns() {
 int main() {
     try {
         for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
-                           &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns}) {
+                           &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

@@ -238,17 +238,18 @@ provider::History build_writer_history(const WriterInput &input) {
         for (usize i = 0; i < input.voice.size(); ++i) note += (i ? "、" : "") + std::format("「{}」", input.voice[i]);
     }
     note += std::format("\n【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
-    if (!input.reference.empty()) {
-        // The planner's intent predates the search; after it she knows.
-        note += std::format("。你刚去查过了，情况如下：{}\n"
-                            "你已经知道是怎么回事了，不要再问真假或者出处。挑最关键的一点或者你的看法，用一句大白话说，"
-                            "不报数字、日期和来源，不贴链接，别照抄】",
-                            input.reference);
-    } else if (!input.plan.brief.empty()) {
+    if (!input.plan.brief.empty()) {
         note += std::format("】\n【回复信息参考：{}\n可以参考，但视情况而定，不用完全遵守】", input.plan.brief);
     } else {
         if (!input.plan.intent.empty()) note += std::format("。你想表达的意思：{}", input.plan.intent);
         note += "】";
+    }
+    if (!input.reference.empty()) {
+        // What the planner looked up online before deciding to reply.
+        note += std::format("\n【你刚去查过了，情况如下：{}\n"
+                            "你已经知道是怎么回事了，不要再问真假或者出处。挑最关键的一点或者你的看法，用一句大白话说，"
+                            "不报数字、日期和来源，不贴链接，别照抄】",
+                            input.reference);
     }
     if (!input.known.empty()) {
         note += std::format("\n【你知道的关于{}的事，用得上就自然地用，别逐条复述，也别再问一遍：{}】", display_name(input.target),
@@ -280,18 +281,19 @@ provider::History build_writer_history(const WriterInput &input) {
     return history;
 }
 
-provider::History build_search_history(const ChatInfo &info, const store::StoredMessage &target, const Plan &plan, i64 now,
-                                       i32 utc_offset_minutes) {
+provider::History build_search_history(std::string_view query, i64 now, i32 utc_offset_minutes) {
     provider::History history;
     provider::append_system(history, std::format("你是搜索助手。现在是 {}。用 web_search 搜索最新信息，然后用三四句中文客观总结查到的要点"
-                                                 "（发生了什么、什么时候、关键细节和争议），不评论，不用 Markdown。",
+                                                 "（发生了什么、什么时候、关键细节和争议），不评论，不用 Markdown。查不到就直说查不到。",
                                                  format_local_time(now, utc_offset_minutes)));
-    std::string user = std::format("群聊里{}说：「{}」", display_name(target), target.text);
-    if (!plan.intent.empty()) user += std::format("\n{}想知道的：{}", info.name, plan.intent);
-    if (!plan.brief.empty()) user += std::format("\n背景：{}", plan.brief);
-    user += "\n请先搜索再总结。";
-    provider::append_user(history, std::move(user));
+    provider::append_user(history, std::format("要查的：{}\n请先搜索再总结。", query));
     return history;
+}
+
+std::string_view search_rule(bool enabled) {
+    if (!enabled) return "";
+    return "- 有人提到具体的新闻、发布、事件、数据或者说法，她不确定真假、不了解细节，或者被问到要查才知道的事（天气、价格、时间、"
+           "最新消息）时，先用 web_search 查一下，看到结果再决定怎么回。纯闲聊、接梗不要查。\n";
 }
 
 std::string strip_markdown(std::string_view text) {

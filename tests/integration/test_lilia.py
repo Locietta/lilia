@@ -684,6 +684,7 @@ def test_reply_and_reconnect(tmp_path):
         "reply",
         "repeat",
         "wait",
+        "search_web",
         "stay_silent",
     ]
     # The round, its result, then her own lines: one persistent history.
