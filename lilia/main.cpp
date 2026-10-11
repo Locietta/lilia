@@ -117,7 +117,10 @@ std::vector<std::string> embedded_texts(const Config &config, store::Store &stor
     if (config.learning.enabled) std::ranges::move(learn::embedded_texts(store), std::back_inserter(texts));
     if (config.stickers.enabled) {
         if (auto pool = store.stickers("registered"); pool.has_value()) {
-            for (const auto &sticker : *pool) texts.push_back(sticker::embedding_text(sticker));
+            for (const auto &sticker : *pool) {
+                std::ranges::move(sticker::embedding_inputs(sticker, config.data_dir, config.memory.embed_images),
+                                  std::back_inserter(texts));
+            }
         }
     }
     return texts;
@@ -160,8 +163,9 @@ Task<int> run_retrieval(const Config &config, std::filesystem::path database, st
     auto pool = store->stickers("registered");
     std::vector<retrieval::Document> stickers;
     for (const auto &sticker : pool.has_value() ? *pool : std::vector<store::Sticker>{}) {
-        stickers.push_back(
-            {.id = sticker.id, .texts = {sticker::embedding_text(sticker)}, .lexical = sticker.tags + " " + sticker.description});
+        stickers.push_back({.id = sticker.id,
+                            .texts = sticker::embedding_inputs(sticker, config.data_dir, config.memory.embed_images),
+                            .lexical = sticker.tags + " " + sticker.description});
     }
     std::vector<retrieval::Document> expressions;
     for (auto &text : learn::embedded_texts(*store)) expressions.push_back({.texts = {std::move(text)}});

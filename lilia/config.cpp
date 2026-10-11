@@ -83,6 +83,9 @@ Result<Config> parse_config(std::string_view text) {
     if (auto ec = glz::read<k_config_opts>(config, text)) {
         return lighter::outcome_error(Error::config("invalid config: " + glz::format_error(ec, text)));
     }
+    if (config.memory.instruction_mode != "inline" && config.memory.instruction_mode != "field") {
+        return lighter::outcome_error(Error::config("memory.instruction_mode must be \"inline\" or \"field\""));
+    }
     return config;
 }
 

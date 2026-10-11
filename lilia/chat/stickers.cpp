@@ -29,8 +29,9 @@ Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feelin
     if (!r->memory) co_return sticker::match(*std::move(pool), feeling, count, r->rng);
     std::vector<retrieval::Document> documents;
     for (const auto &sticker : *pool) {
-        documents.push_back(
-            {.id = sticker.id, .texts = {sticker::embedding_text(sticker)}, .lexical = sticker.tags + " " + sticker.description});
+        documents.push_back({.id = sticker.id,
+                             .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images),
+                             .lexical = sticker.tags + " " + sticker.description});
     }
     const auto matches =
         co_await r->memory->retriever.search(retrieval::k_sticker_task, std::move(feeling), documents, {.top_k = count, .lexical = true});

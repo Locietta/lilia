@@ -30,11 +30,15 @@ struct FakeService {
     usize requests = 0;
     usize texts = 0;
     bool down = false;
+    std::vector<std::string> last_batch;
+    std::string last_instruction;
 
     retrieval::Retriever::Backend backend() {
-        return [this](std::vector<std::string> batch) -> Task<Result<std::vector<retrieval::Vector>>> {
+        return [this](std::vector<std::string> batch, std::string instruction) -> Task<Result<std::vector<retrieval::Vector>>> {
             ++requests;
             texts += batch.size();
+            last_batch = batch;
+            last_instruction = std::move(instruction);
             if (down) co_return lighter::outcome_error(Error::protocol("down"));
             std::vector<retrieval::Vector> out;
             for (const auto &text : batch) {
@@ -170,6 +174,26 @@ Task<> test_search() {
     require(alike && (*alike)[0] > 0.9 && (*alike)[1] < 0.2, "document to document likeness");
 }
 
+/// "field" mode sends the task beside the query; pictures travel as tagged paths.
+Task<> test_instruction_field_and_images() {
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    FakeService service;
+    const MemoryConfig config{.embedding_model = "fake", .instruction_mode = "field"};
+    retrieval::Retriever retriever(config, *db);
+    retriever.backend = service.backend();
+    std::ignore = co_await retriever.query("Find stickers", "无语");
+    require(service.last_batch == std::vector<std::string>{"无语"} && service.last_instruction == "Find stickers",
+            "the query goes bare, the task as the instruction");
+    std::ignore = co_await retriever.query("Find chats", "无语");
+    require(service.requests == 2, "the same text under another task is another query");
+
+    const auto picture = retrieval::image_input("/data/stickers/abc.png");
+    require(picture.starts_with(retrieval::k_image_tag) && picture.ends_with("/data/stickers/abc.png"), "a tagged path");
+    const auto found = co_await retriever.vectors({picture});
+    require(found[0] && service.last_batch.front() == picture && service.last_instruction.empty(), "documents carry no instruction");
+}
+
 } // namespace
 
 int main() {
@@ -177,7 +201,7 @@ int main() {
         test_vectors_and_text();
         test_lexical();
         test_fusion();
-        for (auto *test : {&test_cache, &test_search}) {
+        for (auto *test : {&test_cache, &test_search, &test_instruction_field_and_images}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

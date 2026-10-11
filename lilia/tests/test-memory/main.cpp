@@ -161,7 +161,7 @@ void test_summaries() {
 
 /// Memory on a fake embedding service: a direction per topic word.
 retrieval::Retriever::Backend fake_embeddings() {
-    return [](std::vector<std::string> texts) -> Task<Result<std::vector<retrieval::Vector>>> {
+    return [](std::vector<std::string> texts, std::string) -> Task<Result<std::vector<retrieval::Vector>>> {
         static const std::vector<std::pair<std::string, retrieval::Vector>> k_topics{
             {"芒果", {1, 0, 0, 0}}, {"成都", {0, 1, 0, 0}}, {"MC", {0, 0, 1, 0}}};
         std::vector<retrieval::Vector> out;

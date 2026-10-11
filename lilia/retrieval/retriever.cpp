@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <unordered_set>
+#include <variant>
 
 #include <glaze/json.hpp>
 
@@ -38,12 +40,28 @@ struct EmbeddingResponse {
     std::vector<EmbeddingItem> data;
 };
 
-struct EmbeddingRequest {
-    std::vector<std::string> input;
-    std::string model;
+struct ImagePath {
+    std::string path;
 };
 
+struct ImageInput {
+    ImagePath image;
+};
+
+struct EmbeddingRequest {
+    std::vector<std::variant<std::string, ImageInput>> input;
+    std::string model;
+    std::optional<std::string> instruction;
+};
+
+/// The query's cache key: its text with the task it was embedded for.
+std::string query_key(const MemoryConfig &config, std::string_view task, std::string_view text) {
+    return config.instruction_mode == "field" ? std::format("{}\x1f{}", task, text) : query_text(task, text);
+}
+
 } // namespace
+
+std::string image_input(const std::filesystem::path &file) { return std::string(k_image_tag) + file.string(); }
 
 std::string encode(const Vector &vector) {
     static_assert(std::endian::native == std::endian::little, "vectors are stored little-endian");
@@ -166,8 +184,17 @@ std::vector<Match> fuse(const std::vector<std::optional<double>> &dense, const s
 }
 
 Retriever::Retriever(const MemoryConfig &config, store::Store &store) : config(config), store(store), profile(profile_of(config)) {
-    backend = [this](std::vector<std::string> texts) -> Task<Result<std::vector<Vector>>> {
-        auto body = glz::write_json(EmbeddingRequest{.input = std::move(texts), .model = this->config.embedding_model});
+    backend = [this](std::vector<std::string> inputs, std::string instruction) -> Task<Result<std::vector<Vector>>> {
+        EmbeddingRequest payload{.model = this->config.embedding_model};
+        for (auto &input : inputs) {
+            if (input.starts_with(k_image_tag)) {
+                payload.input.emplace_back(ImageInput{.image = {.path = input.substr(k_image_tag.size())}});
+            } else {
+                payload.input.emplace_back(std::move(input));
+            }
+        }
+        if (!instruction.empty()) payload.instruction = std::move(instruction);
+        auto body = glz::write_json(payload);
         if (!body) co_return lighter::outcome_error(Error::protocol("cannot encode the embedding request"));
         auto request = http.on().post(this->config.embedding_url + this->config.embedding_path);
         request.json_text(*std::move(body));
@@ -217,7 +244,7 @@ Task<std::vector<const Vector *>> Retriever::vectors(std::vector<std::string> te
         const usize end = std::min(missing.size(), start + k_batch);
         std::vector<std::string> batch;
         for (usize k = start; k < end; ++k) batch.push_back(texts[missing[k]]);
-        auto embedded = co_await backend(std::move(batch));
+        auto embedded = co_await backend(std::move(batch), {});
         if (embedded.has_error() || embedded->size() != end - start) {
             if (!failing) {
                 log::warn("retrieval: embedding failed: {}", embedded.has_error() ? embedded.error().message() : "wrong number of vectors");
@@ -247,9 +274,10 @@ Task<std::vector<const Vector *>> Retriever::vectors(std::vector<std::string> te
 }
 
 Task<std::optional<Vector>> Retriever::query(std::string_view task, std::string text) {
-    auto key = query_text(task, text);
+    auto key = query_key(config, task, text);
     if (const auto found = queries.find(key); found != queries.end()) co_return found->second;
-    auto embedded = co_await backend({key});
+    auto embedded =
+        config.instruction_mode == "field" ? co_await backend({std::move(text)}, std::string(task)) : co_await backend({key}, {});
     if (embedded.has_error() || embedded->size() != 1) {
         if (!failing) log::warn("retrieval: cannot embed a query: {}", embedded.has_error() ? embedded.error().message() : "no vector");
         failing = true;

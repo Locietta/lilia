@@ -227,13 +227,19 @@ struct MemoryConfig {
     bool enabled = false;
     std::string embedding_url = "http://127.0.0.1:8090";
     /// OpenAI-style embeddings route: /v1/embeddings (llama.cpp) or
-    /// /v3/embeddings (OpenVINO Model Server).
+    /// /v3/embeddings (OpenVINO Model Server, qvl).
     std::string embedding_path = "/v1/embeddings";
     /// Sent as the request's model and stored with every vector; changing it drops and rebuilds all chunks.
     std::string embedding_model = "Qwen3-Embedding-0.6B";
-    /// Prepended to search queries in Qwen3-Embedding's instruction format;
-    /// empty sends the query as is.
+    /// The task of chat-search queries; empty sends the query as is.
     std::string query_instruction = "Given a question about a group chat, retrieve the chat messages that answer it";
+    /// How a query's task reaches the model: "inline" prefixes it in
+    /// Qwen3-Embedding's "Instruct: …\nQuery:…" form; "field" sends it as the
+    /// request's "instruction", which qvl puts in Qwen3-VL-Embedding's system turn.
+    std::string instruction_mode = "inline";
+    /// Also embed each sticker's picture (by its file path), for a multimodal
+    /// service such as qvl that may read lilia's sticker files.
+    bool embed_images = false;
     /// Messages per chunk, and the pause that starts a new chunk.
     usize chunk_messages = 6;
     i64 chunk_gap_seconds = 1800;

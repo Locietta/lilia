@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
@@ -24,9 +25,12 @@ namespace lilia::retrieval {
 //   and the text's hash, in memory and in the `embeddings` table. A text is
 //   embedded once; another model gets a profile of its own, and the startup
 //   backfill re-embeds everything under it.
-// - Queries carry Qwen3-Embedding's instruction ("Instruct: …\nQuery:…"),
-//   one task per corpus; documents are embedded bare. Vectors are
+// - Queries carry a task, one per corpus: inline in Qwen3-Embedding's form
+//   ("Instruct: …\nQuery:…"), or as the request's "instruction" for qvl
+//   (memory.instruction_mode). Documents are embedded bare. Vectors are
 //   L2-normalized, so similarity is a dot product.
+// - An input may be a picture (image_input()): its file path, which the
+//   service reads. It is cached like a text, by the hash of the tagged path.
 // - Two legs: dense (brute force; the corpora are thousands of rows at most)
 //   and, where asked, BM25 keywords (lexical.h). Each leg ranks
 //   `k_leg_factor` x top_k; reciprocal rank fusion (k 60, weights 0.7/0.3)
@@ -45,7 +49,15 @@ inline constexpr std::string_view k_recall_task =
 inline constexpr std::string_view k_self_task =
     "Given recent group chat messages, retrieve things the speaker has said about herself that are relevant to them";
 inline constexpr std::string_view k_expression_task = "Given a chat situation and what to say, retrieve ways of speaking that would fit it";
-inline constexpr std::string_view k_sticker_task = "Given a feeling or reaction, retrieve stickers whose tags and description express it";
+inline constexpr std::string_view k_sticker_task =
+    "Given a feeling or reaction, retrieve stickers whose picture, tags or description express it";
+
+/// Marks an input that names a picture file instead of text.
+inline constexpr std::string_view k_image_tag = "\x1b"
+                                                "image:";
+
+/// The input for the picture at `file` (an absolute path the service can read).
+std::string image_input(const std::filesystem::path &file);
 
 /// Raw little-endian float32, as stored.
 std::string encode(const Vector &vector);
@@ -107,8 +119,9 @@ inline constexpr double k_lexical_weight = 0.3;
 inline constexpr usize k_leg_factor = 4;
 
 struct Retriever {
-    /// One request to the embedding service: a vector per text, in order.
-    using Backend = std::move_only_function<lighter::Task<Result<std::vector<Vector>>>(std::vector<std::string>)>;
+    /// One request to the embedding service: a vector per input, in order;
+    /// `instruction` is the query task in "field" mode, empty otherwise.
+    using Backend = std::move_only_function<lighter::Task<Result<std::vector<Vector>>>(std::vector<std::string>, std::string)>;
 
     /// Embeds through memory.embedding_url + embedding_path.
     Retriever(const MemoryConfig &config, store::Store &store);

@@ -21,6 +21,7 @@
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
+#include <lilia/retrieval/retriever.h>
 
 namespace lilia::sticker {
 
@@ -112,6 +113,12 @@ std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count
 }
 
 std::string embedding_text(const store::Sticker &sticker) { return std::format("{}：{}", sticker.tags, sticker.description); }
+
+std::vector<std::string> embedding_inputs(const store::Sticker &sticker, const std::filesystem::path &data_dir, bool images) {
+    std::vector<std::string> out{embedding_text(sticker)};
+    if (images) out.push_back(retrieval::image_input(data_dir / sticker.path));
+    return out;
+}
 
 std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng) {
     std::vector<std::string_view> words;

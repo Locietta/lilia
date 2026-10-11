@@ -47,6 +47,10 @@ std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count
 /// What a sticker is embedded as: its tags and description.
 std::string embedding_text(const store::Sticker &sticker);
 
+/// The retrieval inputs of a sticker: embedding_text(), and its picture
+/// (under `data_dir`) when `images`. A search scores the better of the two.
+std::vector<std::string> embedding_inputs(const store::Sticker &sticker, const std::filesystem::path &data_dir, bool images);
+
 /// Without embeddings: stickers whose tags or description contain words of
 /// `feeling` ("无语、震惊"), most matched and most popular first, then a
 /// weighted sample to fill up to `count`.
