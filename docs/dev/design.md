@@ -149,13 +149,19 @@ Model calls (2026-10-11):
      summaries (below) with `retrieval/`.
    - One retrieval layer (2026-10-11, `retrieval/`), after MaiBot, OpenClaw
      and LangChain, for chunks, summaries, facts, expressions and stickers:
-     - Embeddings (Qwen3-Embedding-0.6B on cachy's iGPU, OpenVINO) live in
+     - Embeddings (Qwen3-VL-Embedding-2B through qvl, the sibling OpenVINO
+       service, since 2026-10-12; Qwen3-Embedding-0.6B before) live in
        `embeddings`, keyed by profile (model and input format) and the
        text's SHA-1, cached in memory. A startup backfill embeds whatever
        the current profile lacks, then drops other profiles: a model change
        heals itself.
-     - Queries carry Qwen3's `Instruct:` with one task per corpus; documents
-       are bare; vectors are normalized, so similarity is a dot product.
+     - Queries carry one task per corpus, inline as Qwen3-Embedding's
+       `Instruct:` or as the request's `instruction` field
+       (`memory.instruction_mode`, qvl puts it in the system turn);
+       documents are bare; vectors are normalized, so similarity is a dot
+       product. With `memory.embed_images` a sticker is also embedded by
+       its picture (a tagged file path), and a search takes the better of
+       its text and picture.
      - Dense (brute force) and, for chat search and stickers, BM25 over
        jieba words and Han pairs in memory (FTS5 cannot segment Chinese).
        Each leg ranks 4x what is wanted; RRF (k 60, 0.7/0.3) fuses them.
