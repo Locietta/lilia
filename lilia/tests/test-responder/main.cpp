@@ -349,12 +349,33 @@ Task<> test_cacheable_prompts() {
     co_await tasks.join();
 }
 
+Task<> test_history_survives_many_turns() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.planner->answer = [](const provider::History &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return analysed("只是闲聊，不用接", test::tool_call("stay_silent", R"({"reason":"闲聊"})"));
+    };
+    // A fresh database: row ids start at 1, so the window's anchor is 0.
+    for (i64 id = 1; id <= 9; ++id) {
+        std::ignore = h.say(id, 20001, "小明", {onebot::text_segment("第" + std::to_string(id) + "句")});
+        h.responder->chats[k_chat].flow.backoff_until = 0; // look every time
+        co_await h.responder->run_turn(k_chat);
+    }
+    const auto &requests = h.planner->requests;
+    require(requests.size() == 9, "a cycle per line");
+    for (usize i = 1; i < requests.size(); ++i) {
+        require(stable_text(requests[i]).starts_with(stable_text(requests[i - 1])),
+                "nothing is folded while the window has not moved (turn " + std::to_string(i + 1) + ")");
+    }
+    co_await tasks.join();
+}
+
 } // namespace
 
 int main() {
     try {
         for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
-                           &test_planner_rests, &test_conversations_go_on}) {
+                           &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

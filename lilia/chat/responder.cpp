@@ -830,8 +830,8 @@ std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &ch
     auto &state = chats[chat];
     const auto &settings = config.chat;
     const auto size = [](const store::StoredMessage &message) { return message.text.size() + message.sender_name.size() + 24; };
-    if (state.log_anchor > 0) {
-        if (auto window = store.messages_after(chat, state.log_anchor, 2 * settings.context_messages + 1); window.has_value()) {
+    if (state.log_anchor) {
+        if (auto window = store.messages_after(chat, *state.log_anchor, 2 * settings.context_messages + 1); window.has_value()) {
             usize bytes = 0;
             for (const auto &message : *window) bytes += size(message);
             if (window->size() <= 2 * settings.context_messages && bytes <= 2 * settings.context_bytes) return *std::move(window);
@@ -840,7 +840,7 @@ std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &ch
     auto recent = store.recent_messages(chat, settings.context_messages);
     if (!recent.has_value() || recent->empty()) {
         if (recent.has_error()) log::error("cannot read chat log: {}", recent.error().message());
-        state.log_anchor = 0;
+        state.log_anchor.reset();
         return {};
     }
     usize bytes = 0;
@@ -850,10 +850,12 @@ std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &ch
         bytes += size(*it);
     }
     recent->erase(recent->begin(), recent->end() - static_cast<std::ptrdiff_t>(kept));
+    const bool first = !state.log_anchor;
     state.log_anchor = recent->front().row_id - 1;
     // The planner's rounds about lines no longer shown go with them; older
-    // turns keep their calls and results but lose their analyses.
-    trim_records(state.records, state.log_anchor, k_kept_analyses);
+    // turns keep their calls and results but lose their analyses. (The very
+    // first anchor has nothing to trim.)
+    if (!first) trim_records(state.records, *state.log_anchor, k_kept_analyses);
     return *std::move(recent);
 }
 

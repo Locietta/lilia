@@ -124,9 +124,9 @@ struct Responder {
         i64 muted_until = 0;
         /// Her group card here; empty when she has none (or it is unknown).
         std::string self_card;
-        /// The log turns show starts after this row (messages.id); 0: not
-        /// set yet. See log_window().
-        i64 log_anchor = 0;
+        /// The log turns show starts after this row (messages.id); nullopt:
+        /// not set yet. See log_window().
+        std::optional<i64> log_anchor;
     };
 
     /// The chat log a turn shows, oldest first: everything after the chat's
