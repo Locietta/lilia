@@ -396,9 +396,7 @@ Task<> live_presence(Responder *r, const store::ChatKey &chat) {
     if (!schedule.enabled) co_return;
     // A moment to read before reacting; quicker when someone is talking to her.
     const auto &flow = r->chats[chat].flow;
-    const bool in_conversation = flow.partner != 0 && r->now() - flow.last_spoke <= r->config.chat.conversation_window_seconds &&
-                                 std::ranges::contains(flow.unseen, flow.partner, &store::StoredMessage::sender_id);
-    const bool called = flow.addressed || flow.named || in_conversation;
+    const bool called = flow.addressed || flow.named || partner_in(flow, r->flow_settings(), r->now(), flow.unseen);
     co_await lighter::sleep(std::chrono::seconds(called ?
                                                      random_seconds(r, schedule.read_called_min_seconds, schedule.read_called_max_seconds) :
                                                      random_seconds(r, schedule.read_min_seconds, schedule.read_max_seconds)));
@@ -865,7 +863,9 @@ std::string Responder::self_name(const store::ChatKey &chat) const {
 void Responder::detach() noexcept { session.reset(); }
 
 FlowSettings Responder::flow_settings() const {
-    return {.talk_value = config.chat.talk_value, .window_seconds = config.chat.conversation_window_seconds};
+    return {.talk_value = config.chat.talk_value,
+            .window_seconds = config.chat.conversation_window_seconds,
+            .partner_seconds = config.chat.partner_window_seconds};
 }
 
 Result<void> Responder::reload_persona() {
@@ -1101,6 +1101,8 @@ struct Delivered {
     std::string said; ///< her messages, joined
     /// Why nothing was attempted (the target was recalled), for the planner.
     std::string refused;
+    /// What the web search found for it, if she searched.
+    std::string reference;
 };
 
 /// One reply as the planner asked for it: a sticker alone, or the writer's
@@ -1253,7 +1255,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     if (laughs(said)) state.last_laugh = r->now();
     state.replied.emplace_back(plan.target, said);
     if (state.replied.size() > k_replied_memory) state.replied.pop_front();
-    co_return Delivered{.sent = true, .said = std::move(said)};
+    co_return Delivered{.sent = true, .said = std::move(said), .reference = std::move(reference)};
 }
 
 /// The id of the first tool call in a planner response.
@@ -1262,6 +1264,14 @@ std::string first_call_id(const std::vector<provider::OutputItem> &items) {
         if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) return call->call.id;
     }
     return {};
+}
+
+/// How the log names `partner`, from their newest line among `messages`.
+std::string partner_name(Responder *r, i64 partner, const std::vector<store::StoredMessage> &messages) {
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (!it->from_self && it->sender_id == partner) return speaker(r, *it);
+    }
+    return std::to_string(partner);
 }
 
 /// The name of the first tool call in a planner response; empty when none.
@@ -1326,16 +1336,18 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     // MaiBot weighs "how much of the recent chat was me" heavily: once she has
     // said a lot lately, only being called (or answered right after her own
     // message) brings her back, and the planner is not even asked.
-    if (!addressed && !named) {
+    // Whoever she is talking with still gets through; the brake is for
+    // chiming in on everyone else.
+    const bool conversing = partner_in(state.flow, flow_settings(), started, fresh);
+    if (!addressed && !named && !conversing) {
+        // Replies, not messages: one reply goes out as up to three bubbles.
         const usize window = std::min(log_lines.size(), k_self_window);
-        const auto recent_self =
-            std::ranges::count_if(log_lines.end() - static_cast<std::ptrdiff_t>(window), log_lines.end(), &store::StoredMessage::from_self);
-        // Whoever she is talking with (inside the conversation window) still
-        // gets through; the brake is for chiming in on everyone else.
-        const bool answering_her = state.flow.partner != 0 && started - state.flow.last_spoke <= settings.conversation_window_seconds &&
-                                   std::ranges::contains(fresh, state.flow.partner, &store::StoredMessage::sender_id);
-        if (static_cast<usize>(recent_self) >= k_self_limit && !answering_her) {
-            log::info("{} holds back: she wrote {} of the last {} messages", describe(chat), recent_self, window);
+        usize recent_self = 0;
+        for (auto it = log_lines.end() - static_cast<std::ptrdiff_t>(window); it != log_lines.end(); ++it) {
+            if (it->from_self && (it == log_lines.begin() || !std::prev(it)->from_self)) ++recent_self;
+        }
+        if (recent_self >= k_self_limit) {
+            log::info("{} holds back: she replied {} times in the last {} messages", describe(chat), recent_self, window);
             co_return;
         }
     }
@@ -1352,6 +1364,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .recent = log_lines,
         .addressed = addressed.has_value(),
         .named = named.has_value(),
+        .partner = conversing ? partner_name(this, state.flow.partner, fresh) : std::string(),
         .now = started,
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = std::numeric_limits<usize>::max(), // log_window() bounds it
@@ -1442,6 +1455,13 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         auto delivered = co_await deliver(this, chat, plan, log_lines, *target, info, started, remembered, planner_input.self_notes,
                                           planner_input.presence);
         if (delivered.sent && addressed && plan.target == *addressed) answered = true;
+        // A follow-up question is often about the same thing: the next turns
+        // know what she found, not only what she said.
+        if (delivered.sent && !delivered.reference.empty() && !state.decisions.empty()) {
+            auto found = bounded_utf8(delivered.reference, 240);
+            std::ranges::replace(found, '\n', ' ');
+            state.decisions.back() += std::format("（她查到的：{}{}）", found, found.size() < delivered.reference.size() ? "…" : "");
+        }
         co_return delivered;
     };
 

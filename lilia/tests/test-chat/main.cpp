@@ -310,7 +310,8 @@ void test_flow() {
     require(!chat::should_plan(flow, settings, 2031), "others are held back by the backoff");
     flow.unseen.push_back(stored(1, 2031, "b", "你是gpt吗"));
     require(chat::should_plan(flow, settings, 2031), "whom she just answered is not");
-    require(!chat::should_plan(flow, settings, 2400), "only inside the conversation window");
+    require(chat::should_plan(flow, settings, 2400), "even after the conversation window: they are still talking with her");
+    require(!chat::should_plan(flow, settings, 3000), "but not after the partner window");
 
     // Silence counts: after a quiet spell one message can be enough.
     chat::Flow lively;

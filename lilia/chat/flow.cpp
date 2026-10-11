@@ -49,14 +49,17 @@ void note_arrival(Flow &flow, i64 now) {
     flow.last_arrival = now;
 }
 
+bool partner_in(const Flow &flow, const FlowSettings &settings, i64 now, const std::vector<store::StoredMessage> &messages) {
+    if (flow.partner == 0 || flow.last_spoke == 0 || now - flow.last_spoke > settings.partner_seconds) return false;
+    return std::ranges::any_of(messages, [&](const store::StoredMessage &m) { return !m.from_self && m.sender_id == flow.partner; });
+}
+
 bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now) {
     if (flow.unseen.empty()) return false;
     if (flow.addressed || flow.named) return true;
+    // Whom she was talking with is heard out, backoff or not.
+    if (partner_in(flow, settings, now, flow.unseen)) return true;
     const bool in_window = flow.last_spoke > 0 && now - flow.last_spoke <= settings.window_seconds;
-    if (in_window && flow.partner != 0 &&
-        std::ranges::any_of(flow.unseen, [&](const store::StoredMessage &m) { return m.sender_id == flow.partner; })) {
-        return true;
-    }
     if (now < flow.backoff_until && flow.unseen.size() < settings.burst_bypass) return false;
     if (in_window) return true;
     if (settings.talk_value <= 0) return false;

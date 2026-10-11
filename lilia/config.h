@@ -146,6 +146,9 @@ struct ChatConfig {
     double talk_value = 0.3;
     /// After she speaks, every new message is considered for this long.
     i64 conversation_window_seconds = 300;
+    /// Whom she answered counts as still talking with her for this long: their
+    /// messages always reach the planner, which is told the conversation goes on.
+    i64 partner_window_seconds = 900;
     /// Wait for a burst of messages to end before deciding.
     u32 debounce_seconds = 3;
     /// Chance that one reply uses a random alternative style (e.g. one word).

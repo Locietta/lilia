@@ -242,6 +242,35 @@ Task<> test_planner_rests() {
     co_await tasks.join();
 }
 
+Task<> test_conversations_go_on() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
+        return std::vector{test::tool_call("reply", R"({"target":"#1","style":"short","intent":"答一句"})")};
+    };
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("不好说，涨得太猛了，得等需求降下来")};
+    };
+    require(h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 内存会跌吗")}).has_value(), "asked");
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent.size() >= 2, "a reply in a few bubbles");
+
+    // Seven minutes later, no @, no name: he is still talking to her.
+    h.clock += 420;
+    require(h.say(2, 20001, "小明", {onebot::text_segment("那显卡呢")}).has_value(), "the partner is heard out after the window");
+    const auto before = h.planner->requests.size();
+    co_await h.responder->run_turn(k_chat);
+    require(h.planner->requests.size() > before, "the planner is asked (her bubbles are one reply, not a reason to hold back)");
+    const auto tail = text_of(h.planner->requests[before].back());
+    require(tail.contains("小明正在和莉莉娅聊") && !tail.contains("没有人直接叫"), "the planner knows the conversation goes on");
+
+    // Someone else, after the window: no reason to look.
+    h.clock += 400;
+    require(!h.say(3, 20002, "小红", {onebot::text_segment("显卡也贵")}).has_value(), "others are not her conversation");
+    co_await tasks.join();
+}
+
 /// The text of the planner's cached log part in one request.
 std::string log_part(const provider::History &history) {
     for (const auto &item : history) {
@@ -289,8 +318,8 @@ Task<> test_cacheable_prompts() {
 
 int main() {
     try {
-        for (auto *test :
-             {&test_quotes_and_recalls, &test_mutes_and_notices, &test_names_do_not_force, &test_cacheable_prompts, &test_planner_rests}) {
+        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_names_do_not_force, &test_cacheable_prompts,
+                           &test_planner_rests, &test_conversations_go_on}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

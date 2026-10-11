@@ -247,11 +247,18 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
     }
     std::string user;
     if (first_fresh > 0) user += std::format("#{} 起是新消息（她上次看过之后才发的）。\n", first_fresh);
-    user += input.addressed ? std::format("新消息里有人在叫{}，一般应该回应。", input.info.name) :
-            input.named     ? std::format("新消息里有人提到了{0}的名字：可能是在跟她说话，也可能只是在聊她。是在跟她说话就回应；"
-                                          "只是聊到她，就像被人背后提到一样看情况，可以接一句，也可以不出声。",
-                                          input.info.name) :
-                              std::format("没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
+    user += input.addressed ?
+                std::format("新消息里有人在叫{}，一般应该回应。", input.info.name) :
+            !input.partner.empty() ?
+                std::format("{0}正在和{1}聊（{1}刚回过{0}），{0}的新消息多半是接着对她说的：追问、补充、感慨、嫌她不理人都算，"
+                            "就算没 @ 她、没叫她的名字。聊着天突然不回，就像不理人了；除非{0}明显在收尾"
+                            "（\"好\"\"那就好\"\"谢谢\"\"晚安\"之类），一般应该接着回。答不上来就直说不知道，"
+                            "或者用 search 查一下，别因为不知道就不出声。",
+                            input.partner, input.info.name) :
+            input.named ? std::format("新消息里有人提到了{0}的名字：可能是在跟她说话，也可能只是在聊她。是在跟她说话就回应；"
+                                      "只是聊到她，就像被人背后提到一样看情况，可以接一句，也可以不出声。",
+                                      input.info.name) :
+                          std::format("没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
     if (!input.presence.empty()) user += "\n" + input.presence;
     if (!input.people.empty()) {
         // MaiBot's person profiles: background for the planner only.

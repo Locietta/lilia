@@ -58,6 +58,9 @@ struct PlannerInput {
     bool addressed = false;
     /// Someone only named her: maybe to her, maybe about her.
     bool named = false;
+    /// Whom she is talking with, when the new messages include theirs; empty
+    /// otherwise. Their lines are probably meant for her.
+    std::string partner;
     i64 now = 0;
     i32 utc_offset_minutes = 480;
     usize log_bytes = 12'000;
