@@ -23,36 +23,39 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
   - Segments keep their data as `glz::generic_i64`, so ids stay exact and
     unknown segment types survive.
 - **`chat/`**: one turn per decision, modelled on MaiBot's planner/replyer split.
-  - `flow` is the cheap gate. Being addressed (@, a reply to lilia, an
-    allowed private chat) always opens it, and she always answers. Her name
-    alone (ASCII aliases as whole words, never inside a link) opens it too,
-    but the planner may stay silent: it may be talk about her (2026-10-11).
-    For `conversation_window_seconds` after she speaks every new message
-    opens it. Otherwise it opens every `ceil(1/talk_value)` messages, where
-    the silence before them counts as MaiBot's: one virtual message per
-    average interval (at least 30 s), at most one short. Two silent decisions
-    in a row back off (15 s doubling to 5 min) unless a burst of 6 messages
-    arrives.
+  - `flow` decides only when the planner looks, never what it sees (MaiBot's
+    trigger, 2026-10-11). An @, a reply to her, a private message or her name
+    (ASCII aliases as whole words, never inside a link) makes it look at once.
+    Otherwise it looks every `ceil(1/talk_value)` messages (default 1: every
+    batch), the silence before them counting as MaiBot's credit. After two
+    silent cycles it backs off (15 s doubling to 5 min) unless someone calls
+    her or 6 messages pile up; what waits is looked at when the backoff ends.
   - On every connection she reads each allowed group's newest 100 messages
     and stores what she missed (not for a chat she has never seen). Whoever
     called her in the last half hour is answered late; the next turn is told
     she just came back online.
   - The worker waits for the burst to settle (`debounce_seconds`, 2 s when
     addressed, 15 s at most).
-  - The planner (`prompts/planner.md`, `planner_model`, thinking off) sees the
-    numbered log with the new messages marked. Like MaiBot's, it works in
-    rounds (2026-10-10), one tool call each: `reply(target, quote, style,
-search, intent)`, `wait(seconds)`, `search_history(query)` or
-    `stay_silent(reason)`, which ends the turn.
-    - After a reply or a wait, the tool result tells it what she said and
-      numbers the messages that came in meanwhile, so it can answer them,
-      wait again or stop.
+  - The planner (`prompts/planner.md`, `planner_model`, thinking off) keeps
+    one history per chat, as MaiBot's does (`chat/session.*`, 2026-10-11).
+    - It is rendered each round from the stored lines after the window's
+      anchor (`#<row id> [HH:MM] name(qq): text`) with the planner's own
+      rounds among them: its analysis, its tool call and the result. New lines
+      simply follow. Between trims it only grows, so it is a cached prefix.
+    - Each round it writes a short analysis, then calls one tool:
+      `reply(target, quote, style, search, intent)`, `send_sticker`,
+      `repeat`, `wait(seconds)`, `search_history(query)` or
+      `stay_silent(reason)`; no call means silence. Results are short ("她回
+      复了 #n", "等了 N 秒", what a search found); her bubbles show up as her
+      own lines.
+    - Per round only a tail changes: the first new line, facts ("#n 是叫她
+      的"), presence, people notes, self notes, slang, recall, the time.
+    - Past twice `context_messages` / `context_bytes` the anchor moves to
+      keep 1×; rounds about lines no longer shown go, older turns keep their
+      calls but lose their analyses. After a restart the history is the
+      stored lines again.
     - Limits: 8 rounds and 3 replies per turn, 3 waits in a row (MaiBot's),
-      waits of 1–60 s that new messages do not cut short (as in MaiBot's
-      groups).
-    - If someone called her and the turn ends without answering them, she
-      replies anyway. Replay passes waits in simulated time, feeding the
-      lines of that span.
+      waits of 1–60 s. Replay passes waits in simulated time.
   - The writer (`prompts/persona.md` + `prompts/writer.md`) sees the log as
     turns (her lines are assistant turns) plus the planner's style and
     intent; `alt_style_probability` swaps in a one-off style. Web search is

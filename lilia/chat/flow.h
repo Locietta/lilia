@@ -9,17 +9,14 @@
 
 namespace lilia::chat {
 
-// When to ask the planner whether lilia speaks. Deterministic and cheap: the
-// planner (an LLM call) only runs when this says so.
+// When to run the planner, MaiBot's way: this decides only when it looks,
+// never what it sees (every pending message reaches it at the next cycle).
+// Deterministic and cheap: the planner (an LLM call) only runs when this says so.
 
 struct FlowSettings {
-    /// 0..1. Outside a conversation the planner runs every ceil(1/talk_value)
-    /// new messages; 0 means lilia only reacts when addressed.
-    double talk_value = 0.3;
-    /// After lilia speaks, every new message goes to the planner for this long.
-    i64 window_seconds = 300;
-    /// Whom she last answered counts as still talking with her for this long.
-    i64 partner_seconds = 900;
+    /// 0..1. The planner looks every ceil(1/talk_value) new messages (1:
+    /// every batch); 0 means only when someone calls her.
+    double talk_value = 1;
     /// This many pending messages bypass the idle backoff.
     usize burst_bypass = 6;
 };
@@ -28,44 +25,41 @@ struct FlowSettings {
 struct Flow {
     /// Others' messages since the planner last ran, oldest first.
     std::vector<store::StoredMessage> unseen;
-    /// The newest unseen message that calls lilia (an @, a reply to her, a
-    /// private message): she answers it.
+    /// The newest unseen message that @s her, replies to her or is private:
+    /// the planner looks at once (it still decides).
     std::optional<i64> addressed;
-    /// The newest unseen message that only names her: the planner looks, but
-    /// it may be about her rather than to her.
+    /// The newest unseen message that names her: the planner looks at once.
     std::optional<i64> named;
     i64 last_arrival = 0; ///< unix seconds the newest message arrived
     /// Seconds of silence before the first unseen message.
     i64 quiet_before = 0;
     /// Smoothed seconds between messages here (0 until two have arrived).
     double interval = 0;
-    i64 last_spoke = 0;
-    /// Whom she last answered; their messages within `partner_seconds` always
-    /// reach the planner, backoff or not (they are probably talking to her).
-    i64 partner = 0;
     u32 silent_streak = 0;
     i64 backoff_until = 0;
 };
 
-/// MaiBot's silence credit: outside a conversation the planner looks every
-/// ceil(1/talk_value) messages, but the silence before them counts too, one
-/// virtual message per average interval (at least 30 s), at most one short
-/// of the threshold.
+/// Pending messages and either someone calling or naming her, or, outside
+/// the idle backoff, ceil(1/talk_value) of them, the silence before them
+/// counting too (MaiBot's credit: one virtual message per average interval,
+/// at least 30 s, at most one short of the threshold).
 bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now);
 
-/// True when one of `messages` comes from whom she last answered, within
-/// `partner_seconds` of her last line: they are probably still talking to her.
-bool partner_in(const Flow &flow, const FlowSettings &settings, i64 now, const std::vector<store::StoredMessage> &messages);
+/// When pending messages held back only by the idle backoff become due (its
+/// end); nullopt when nothing waits for that.
+std::optional<i64> next_check(const Flow &flow, const FlowSettings &settings, i64 now);
 
 /// A message arrived (before it joins `unseen`): keeps the silence before the
 /// first unseen one and the average interval.
 void note_arrival(Flow &flow, i64 now);
 
-/// The planner chose silence while nobody addressed lilia: back off
-/// (15s, doubling to 5 min) after two such decisions in a row.
+/// A cycle ended without her saying anything: after two in a row the planner
+/// backs off (15 s, doubling to 5 min) unless someone calls her or a burst
+/// arrives.
 void note_silent(Flow &flow, i64 now);
 
-void note_spoke(Flow &flow, i64 now, i64 partner = 0);
+/// She said something: the backoff ends.
+void note_spoke(Flow &flow);
 
 /// Text QQ users would repeat (复读): short, plain text (no media, mention or
 /// command).

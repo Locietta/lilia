@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <deque>
 #include <string>
 #include <variant>
 #include <vector>
@@ -7,6 +8,7 @@
 #include <lilia/chat/delivery.h>
 #include <lilia/chat/flow.h>
 #include <lilia/chat/schedule.h>
+#include <lilia/chat/session.h>
 #include <lilia/chat/trigger.h>
 #include <lilia/chat/typos.h>
 #include <lilia/learn/segment.h>
@@ -109,24 +111,116 @@ provider::ToolCallItem tool_call(std::string name, std::string json) {
     return item;
 }
 
+/// A stored message as the planner's history shows it: row ids number the
+/// lines; QQ's message ids differ from them.
+store::StoredMessage row(i64 id, i64 time, std::string name, std::string text, bool self = false) {
+    auto message = stored(id, time, std::move(name), std::move(text), self);
+    message.message_id = id * 10;
+    message.row_id = id;
+    return message;
+}
+
+const provider::TextPart &text_part(const provider::Part &part) { return std::get<provider::TextPart>(part); }
+
 void test_planner() {
+    using provider::OutputItem;
     const i64 t = 1'791'032'700;
-    const auto request = chat::build_planner_request({
-        .prompt = "PLANNER",
-        .info = group_info(),
-        .recent = {stored(101, t - 300, "a", std::string(60, 'x')), stored(102, t - 240, "b", "second"),
-                   stored(103, t - 180, "闭锁", "我在", true), stored(104, t - 60, "c", "有人看新番吗")},
-        .fresh = {104},
-        .addressed = false,
-        .now = t,
-        .log_bytes = 110,
-    });
-    require(request.history.size() == 2 && text_of(request.history[0]) == "PLANNER", "planner prompt is the system prompt");
-    const auto user = text_of(request.history[1]);
-    require(user.find(std::string(60, 'x')) == std::string::npos, "the oldest line is dropped first when over budget");
-    require(request.ids == std::vector<i64>({102, 103, 104}), "ids map #n to message ids in order");
-    require(user.find("#3 [21:04] c(20104): 有人看新番吗") != std::string::npos, "lines are numbered");
-    require(user.find("#2 [21:02] 闭锁(她自己): 我在") != std::string::npos, "her lines are hers, not the planner's");
+    const auto info = group_info();
+    std::vector<store::StoredMessage> rows{row(101, t - 300, "a", "早"), row(102, t - 180, "闭锁", "我在", true),
+                                           row(103, t - 60, "c", "有人看新番吗")};
+
+    // A first look: the place and the lines, then what is new, the time last.
+    auto history = chat::render_session("PLANNER", info, rows, {},
+                                        {.first_new_row = 103, .facts = {"#103 是叫她的（@ 了她或者回复了她的消息）。"}, .now = t});
+    require(history.size() == 2 && text_of(history[0]) == "PLANNER", "the planner prompt, then one user message");
+    const auto &parts = history[1].parts;
+    require(parts.size() == 2 && text_part(parts[0]).cache && !text_part(parts[1]).cache, "the lines end a cached prefix");
+    const auto log = text_part(parts[0]).text;
+    require(log.starts_with("这是 QQ 群「测试群」") && log.contains("#103 [21:04] c(20103): 有人看新番吗\n") &&
+                log.contains("#102 [21:02] 闭锁(她自己): 我在") && !log.contains("2026-10-03"),
+            "lines are numbered by row; hers are marked; no time in the cached part: " + log);
+    const auto tail = text_part(parts[1]).text;
+    require(tail.starts_with("#103 起是新消息") && tail.contains("#103 是叫她的") && tail.ends_with("现在是 2026-10-03 21:05（UTC+8）。"),
+            "the tail: " + tail);
+
+    // A round stays: its analysis and call, then its result opens the next
+    // user message, followed by the lines that came after it.
+    std::deque<chat::PlannerRecord> records;
+    records.push_back({.after_row = 103,
+                       .cycle = 1,
+                       .output = {OutputItem(provider::AssistantMessageItem{.parts = {{.text = "c 在问新番，她在追，可以接一句"}}}),
+                                  OutputItem(tool_call("reply", R"({"target":"#103","style":"short","intent":"说在追"})"))},
+                       .outcomes = {{.call_id = "toolu_1", .receipt = "她回复了 #103。"}}});
+    rows.push_back(row(104, t, "闭锁", "在追", true));
+    rows.push_back(row(105, t + 10, "c", "哪部"));
+    history = chat::render_session("PLANNER", info, rows, records, {.now = t + 20});
+    using provider::Role;
+    require(history.size() == 5 && history[2].role == Role::ASSISTANT && history[3].role == Role::ASSISTANT,
+            "system, the lines, the analysis, the call, then a user message");
+    require(text_part(history[1].parts[0]).text == log, "the earlier lines are unchanged: the cached prefix holds");
+    require(text_of(history[2]) == "c 在问新番，她在追，可以接一句", "the planner sees what it thought");
+    const auto &next = history[4].parts;
+    require(next.size() == 3 && std::holds_alternative<ToolOutcome>(next[0]) && std::get<ToolOutcome>(next[0]).receipt == "她回复了 #103。",
+            "the result comes first, right after the call");
+    require(text_part(next[1]).text.contains("#105 [21:05] c(20105): 哪部") && text_part(next[1]).cache, "then the lines after it");
+    require(text_part(next[2]).text.starts_with("现在是"), "and the tail");
+
+    // At a trim, rounds about lines no longer shown go; older turns keep their
+    // calls and results but not their analyses.
+    auto trimmed = records;
+    chat::trim_records(trimmed, 103, 6);
+    require(trimmed.empty(), "a round before the anchor goes");
+    for (u64 cycle = 2; cycle <= 4; ++cycle) {
+        auto later = records.front();
+        later.after_row = 105;
+        later.cycle = cycle;
+        records.push_back(later);
+    }
+    chat::trim_records(records, 104, 2);
+    require(records.size() == 3 && records[0].cycle == 2 && records[0].output.size() == 1 && records[2].output.size() == 2,
+            "old analyses are folded, the newest turns keep theirs");
+
+    // Targets are row numbers.
+    const auto repeated = chat::parse_plan({OutputItem(tool_call("repeat", R"({"target":"#103"})"))}, rows);
+    require(repeated.repeat && !repeated.reply && repeated.target == 1030, "repeat a message");
+    const auto reply = chat::parse_plan(
+        {OutputItem(tool_call("reply", R"({"target":"#105 c: 哪部","quote":true,"style":"normal","search":false,"intent":"说是哪部"})"))},
+        rows);
+    require(reply.reply && reply.target == 1050 && reply.quote && reply.style == chat::ReplyStyle::NORMAL && reply.intent == "说是哪部",
+            "reply arguments are read; a target with trailing text still parses");
+    const auto silent = chat::parse_plan({OutputItem(tool_call("stay_silent", R"({"reason":"和她无关"})"))}, rows);
+    require(!silent.reply && silent.reason == "和她无关", "stay_silent carries its reason");
+    require(!chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#3","style":"short","intent":"x"})"))}, rows).reply,
+            "a number that is not shown is no target");
+    require(!chat::parse_plan({OutputItem(provider::AssistantMessageItem{.parts = {{.text = "算了"}}})}, rows).reply,
+            "an analysis without a call is silence");
+    const auto waiting = chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":12,"reason":"他还在打字"})"))}, rows);
+    require(!waiting.reply && waiting.wait == 12 && waiting.reason == "他还在打字", "wait carries seconds and reason");
+    require(chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":"600"})"))}, rows).wait == 60 &&
+                chat::parse_plan({OutputItem(tool_call("wait", R"({})"))}, rows).wait == 30,
+            "waits are capped at a minute; 30 seconds when unsaid");
+    const auto sticker = chat::parse_plan({OutputItem(tool_call("send_sticker", R"({"feeling":"笑死"})"))}, rows);
+    require(sticker.reply && sticker.sticker_only && sticker.sticker == "笑死" && sticker.target == 1050, "a sticker alone, at the newest");
+
+    // The tools never change between rounds; what is offered follows the chat.
+    const auto names = [](const std::vector<provider::ToolDefinition> &tools) {
+        std::vector<std::string> out;
+        for (const auto &tool : tools) out.push_back(tool.name);
+        return out;
+    };
+    require(names(chat::planner_tools(false, false, false)) == std::vector<std::string>{"reply", "repeat", "wait", "stay_silent"},
+            "reply, repeat, wait, stay_silent");
+    require(names(chat::planner_tools(false, true, true)) ==
+                std::vector<std::string>{"reply", "send_sticker", "repeat", "wait", "search_history", "stay_silent"},
+            "with stickers and memory");
+    const auto briefed = chat::planner_tools(true, false, false);
+    require(std::ranges::contains(briefed[0].input_schema.required, std::string("brief")) &&
+                !std::ranges::contains(briefed[0].input_schema.required, std::string("intent")),
+            "the reference handoff asks for brief instead of intent");
+    require(chat::handoff_rule(true).find("brief") != std::string_view::npos &&
+                chat::handoff_rule(false).find("intent") != std::string_view::npos,
+            "the planner rule follows the handoff");
+
     auto notice_line = stored(-5, t, std::string(chat::k_notice_sender), "小明戳了戳闭锁");
     notice_line.sender_id = 0;
     require(chat::is_notice(notice_line) && chat::render_line(notice_line, 480) == "[21:05] （群通知）小明戳了戳闭锁", "notice lines");
@@ -141,21 +235,6 @@ void test_planner() {
             "what the sender wrote");
     const auto hers = stored(8, t, "lilia", "在的", true);
     require(chat::quote_prefix(&hers, "闭锁") == "[回复 闭锁: 在的] ", "her own line under her name here");
-    // The log is a cached prefix; what changes per turn follows it, the time last.
-    const auto &parts = request.history[1].parts;
-    require(parts.size() == 2 && std::get<provider::TextPart>(parts[0]).cache && !std::get<provider::TextPart>(parts[1]).cache,
-            "the log part ends a cached prefix");
-    const auto &log = std::get<provider::TextPart>(parts[0]).text;
-    const auto &tail = std::get<provider::TextPart>(parts[1]).text;
-    require(log.starts_with("这是 QQ 群「测试群」") && log.contains("#3 [21:04]") && !log.contains("2026-10-03"),
-            "the log part holds the place and the lines, never the time");
-    require(tail.starts_with("#3 起是新消息") && tail.ends_with("现在是 2026-10-03 21:05（UTC+8）。"), "the tail: " + tail);
-    require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");
-    require(request.tools.size() == 4 && request.tools[0].name == "reply" && request.tools[1].name == "repeat" &&
-                request.tools[2].name == "wait" && request.tools[3].name == "stay_silent",
-            "reply, repeat, wait, stay_silent");
-    const auto repeated = chat::parse_plan({provider::OutputItem(tool_call("repeat", R"({"target":"#3"})"))}, request.ids);
-    require(repeated.repeat && !repeated.reply && repeated.target == 104, "repeat a message");
 
     // 复读 chains: the same short text from different people in a row.
     std::vector<store::StoredMessage> chain{stored(1, t, "a", "前面的"), stored(2, t, "b", "6"), stored(3, t, "c", "6")};
@@ -171,61 +250,6 @@ void test_planner() {
     require(chat::repeatable("6") && chat::repeatable("我超 原") && !chat::repeatable("[图片]") && !chat::repeatable("@莉莉娅 在吗") &&
                 !chat::repeatable(std::string(30, 'a')) && !chat::repeatable("/status"),
             "what can be repeated");
-
-    using provider::OutputItem;
-    const auto reply = chat::parse_plan(
-        {OutputItem(
-            tool_call("reply", R"({"target":"#3 c: 有人看新番吗","quote":true,"style":"normal","search":false,"intent":"安利一部"})"))},
-        request.ids);
-    require(reply.reply && reply.target == 104 && reply.quote && reply.style == chat::ReplyStyle::NORMAL && reply.intent == "安利一部",
-            "reply arguments are read; a target with trailing text still parses");
-    const auto silent = chat::parse_plan({OutputItem(tool_call("stay_silent", R"({"reason":"和她无关"})"))}, request.ids);
-    require(!silent.reply && silent.reason == "和她无关", "stay_silent carries its reason");
-    require(!chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#9","style":"short","intent":"x"})"))}, request.ids).reply,
-            "an out-of-range target is silence");
-    require(!chat::parse_plan({}, request.ids).reply, "no tool call is silence");
-    const auto waiting = chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":12,"reason":"他还在打字"})"))}, request.ids);
-    require(!waiting.reply && waiting.wait == 12 && waiting.reason == "他还在打字", "wait carries seconds and reason");
-    require(chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":"600"})"))}, request.ids).wait == 60 &&
-                chat::parse_plan({OutputItem(tool_call("wait", R"({})"))}, request.ids).wait == 30,
-            "waits are capped at a minute; 30 seconds when unsaid");
-
-    auto sticker_input = chat::PlannerInput{.prompt = "P", .info = group_info(), .recent = {stored(301, t, "c", "笑死")}, .fresh = {301}};
-    sticker_input.stickers = true;
-    const auto sticker_request = chat::build_planner_request(sticker_input);
-    require(std::ranges::contains(sticker_request.tools, std::string("send_sticker"), &provider::ToolDefinition::name),
-            "a sticker tool when she has stickers");
-    const auto sticker = chat::parse_plan({OutputItem(tool_call("send_sticker", R"({"feeling":"笑死"})"))}, sticker_request.ids);
-    require(sticker.reply && sticker.sticker_only && sticker.sticker == "笑死" && sticker.target == 301, "a sticker alone, at the newest");
-
-    auto ids = request.ids;
-    const auto arrived = chat::number_messages({stored(105, t + 10, "d", "我也在看"), stored(106, t + 12, "e", "哪部")}, ids, 480);
-    require(arrived == "#4 [21:05] d(20105): 我也在看\n#5 [21:05] e(20106): 哪部\n" && ids.size() == 5 && ids[4] == 106,
-            "arrivals are numbered on");
-    require(chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#5","style":"short","intent":"x"})"))}, ids).target == 106,
-            "and can be replied to");
-
-    auto followup_input = chat::PlannerInput{
-        .prompt = "P", .info = group_info(), .recent = {stored(401, t, "c", "a"), stored(402, t, "d", "b")}, .fresh = {401, 402}};
-    followup_input.decisions = {"[21:04] 没说话：别人在私聊", "[21:05] 回复了c的「a」：接一句"};
-    const auto followup = text_of(chat::build_planner_request(followup_input).history[1]);
-    require(followup.find("- [21:05] 回复了c的「a」：接一句") != std::string::npos && followup.find("别重复") != std::string::npos,
-            "recent decisions are listed");
-
-    auto reference_input =
-        chat::PlannerInput{.prompt = "P", .info = group_info(), .recent = {stored(301, t, "c", "看新番吗")}, .fresh = {301}};
-    reference_input.reference_handoff = true;
-    const auto reference_request = chat::build_planner_request(reference_input);
-    const auto &reply_schema = reference_request.tools[0].input_schema;
-    require(std::ranges::contains(reply_schema.required, std::string("brief")) &&
-                !std::ranges::contains(reply_schema.required, std::string("intent")),
-            "the reference handoff asks for brief instead of intent");
-    const auto briefed = chat::parse_plan(
-        {OutputItem(tool_call("reply", R"({"target":"#1","style":"short","brief":"在聊新番，她最近在追"})"))}, reference_request.ids);
-    require(briefed.reply && briefed.brief == "在聊新番，她最近在追", "brief is read");
-    require(chat::handoff_rule(true).find("brief") != std::string_view::npos &&
-                chat::handoff_rule(false).find("intent") != std::string_view::npos,
-            "the planner rule follows the handoff");
 }
 
 void test_writer() {
@@ -275,43 +299,43 @@ void test_writer() {
 }
 
 void test_flow() {
-    chat::FlowSettings settings{.talk_value = 0.25, .window_seconds = 300};
+    chat::FlowSettings settings{.talk_value = 0.25};
     chat::Flow flow;
     require(!chat::should_plan(flow, settings, 1000), "nothing to plan");
     for (i64 i = 1; i <= 3; ++i) flow.unseen.push_back(stored(i, 1000, "a", "x"));
     require(!chat::should_plan(flow, settings, 1000), "below ceil(1/talk_value) messages");
     flow.unseen.push_back(stored(4, 1000, "a", "x"));
     require(chat::should_plan(flow, settings, 1000), "four messages at talk_value 0.25");
-
     flow.unseen.resize(1);
+    require(chat::should_plan(flow, {.talk_value = 1}, 1000), "every batch at talk_value 1 (MaiBot's default)");
     flow.addressed = 1;
-    require(chat::should_plan(flow, settings, 1000), "being addressed always plans");
+    require(chat::should_plan(flow, settings, 1000), "someone calling her always plans");
     flow.addressed.reset();
+    flow.named = 1;
+    require(chat::should_plan(flow, settings, 1000), "so does her name");
+    flow.named.reset();
 
-    chat::note_spoke(flow, 1000);
-    require(chat::should_plan(flow, settings, 1200), "inside the conversation window every message counts");
-    require(!chat::should_plan(flow, settings, 1400), "the window closes");
-
+    // Silent cycles back off, but what waits is looked at when it ends.
+    const chat::FlowSettings every{.talk_value = 1};
     chat::note_silent(flow, 2000);
-    require(flow.backoff_until == 0, "one silent decision does not back off");
+    require(flow.backoff_until == 0, "one silent cycle does not back off");
     chat::note_silent(flow, 2000);
     require(flow.backoff_until == 2015, "two in a row back off 15s");
     chat::note_silent(flow, 2000);
     require(flow.backoff_until == 2030, "the backoff doubles");
-    flow.unseen.assign(5, stored(9, 2000, "a", "x"));
-    require(!chat::should_plan(flow, settings, 2010), "backoff holds below the burst size");
-    flow.unseen.push_back(stored(10, 2000, "a", "x"));
-    require(chat::should_plan(flow, settings, 2010), "a burst bypasses the backoff");
-    chat::note_spoke(flow, 2020, 20001);
+    flow.unseen.assign(1, stored(9, 2000, "a", "x"));
+    require(!chat::should_plan(flow, every, 2010) && chat::next_check(flow, every, 2010) == 2030,
+            "held back, and looked at again when the backoff ends");
+    require(chat::should_plan(flow, every, 2030) && !chat::next_check(flow, every, 2030), "due once it has ended");
+    flow.addressed = 9;
+    require(chat::should_plan(flow, every, 2010), "someone calling her is not held back");
+    flow.addressed.reset();
+    flow.unseen.assign(6, stored(9, 2000, "a", "x"));
+    require(chat::should_plan(flow, every, 2010), "a burst bypasses the backoff");
+    chat::note_spoke(flow);
     require(flow.silent_streak == 0 && flow.backoff_until == 0, "speaking resets the backoff");
-    chat::note_silent(flow, 2030);
-    chat::note_silent(flow, 2030);
-    flow.unseen.assign(1, stored(5, 2031, "a", "x"));
-    require(!chat::should_plan(flow, settings, 2031), "others are held back by the backoff");
-    flow.unseen.push_back(stored(1, 2031, "b", "你是gpt吗"));
-    require(chat::should_plan(flow, settings, 2031), "whom she just answered is not");
-    require(chat::should_plan(flow, settings, 2400), "even after the conversation window: they are still talking with her");
-    require(!chat::should_plan(flow, settings, 3000), "but not after the partner window");
+    flow.unseen.clear();
+    require(!chat::next_check(flow, every, 2010), "nothing waits");
 
     // Silence counts: after a quiet spell one message can be enough.
     chat::Flow lively;
@@ -330,15 +354,10 @@ void test_flow() {
     chat::note_arrival(lively, 1255);
     require(lively.quiet_before == 120, "the quiet is measured before the first unseen message");
 
-    chat::Flow mentioned;
-    mentioned.unseen.push_back(stored(3, 1000, "a", "莉莉娅好像坏了"));
-    mentioned.named = 3;
-    require(chat::should_plan(mentioned, settings, 1000), "being named opens the gate too");
-
     chat::FlowSettings shy{.talk_value = 0};
     chat::Flow quiet;
     quiet.unseen.assign(20, stored(1, 1000, "a", "x"));
-    require(!chat::should_plan(quiet, shy, 1000), "talk_value 0 only reacts when addressed");
+    require(!chat::should_plan(quiet, shy, 1000) && !chat::next_check(quiet, shy, 1000), "talk_value 0 only reacts when called");
 }
 
 std::vector<std::string> texts(const std::vector<chat::Segment> &segments) {

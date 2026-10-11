@@ -49,24 +49,31 @@ void note_arrival(Flow &flow, i64 now) {
     flow.last_arrival = now;
 }
 
-bool partner_in(const Flow &flow, const FlowSettings &settings, i64 now, const std::vector<store::StoredMessage> &messages) {
-    if (flow.partner == 0 || flow.last_spoke == 0 || now - flow.last_spoke > settings.partner_seconds) return false;
-    return std::ranges::any_of(messages, [&](const store::StoredMessage &m) { return !m.from_self && m.sender_id == flow.partner; });
+namespace {
+
+bool backing_off(const Flow &flow, const FlowSettings &settings, i64 now) {
+    return now < flow.backoff_until && flow.unseen.size() < settings.burst_bypass;
 }
+
+} // namespace
 
 bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now) {
     if (flow.unseen.empty()) return false;
     if (flow.addressed || flow.named) return true;
-    // Whom she was talking with is heard out, backoff or not.
-    if (partner_in(flow, settings, now, flow.unseen)) return true;
-    const bool in_window = flow.last_spoke > 0 && now - flow.last_spoke <= settings.window_seconds;
-    if (now < flow.backoff_until && flow.unseen.size() < settings.burst_bypass) return false;
-    if (in_window) return true;
-    if (settings.talk_value <= 0) return false;
+    if (backing_off(flow, settings, now) || settings.talk_value <= 0) return false;
     const auto threshold = static_cast<usize>(std::ceil(1.0 / std::min(settings.talk_value, 1.0)));
     const double pace = std::max(flow.interval, k_min_interval);
     const auto credit = std::min(static_cast<usize>(static_cast<double>(flow.quiet_before) / pace), threshold - 1);
     return flow.unseen.size() + credit >= threshold;
+}
+
+std::optional<i64> next_check(const Flow &flow, const FlowSettings &settings, i64 now) {
+    // Held back by the backoff only: look again when it ends, not when the
+    // next message happens to arrive.
+    if (flow.unseen.empty() || settings.talk_value <= 0 || !backing_off(flow, settings, now)) return std::nullopt;
+    Flow later = flow;
+    later.backoff_until = 0;
+    return should_plan(later, settings, flow.backoff_until) ? std::optional(flow.backoff_until) : std::nullopt;
 }
 
 void note_silent(Flow &flow, i64 now) {
@@ -76,9 +83,7 @@ void note_silent(Flow &flow, i64 now) {
     flow.backoff_until = now + std::min<i64>(i64{15} << doublings, 300);
 }
 
-void note_spoke(Flow &flow, i64 now, i64 partner) {
-    flow.last_spoke = now;
-    flow.partner = partner;
+void note_spoke(Flow &flow) {
     flow.silent_streak = 0;
     flow.backoff_until = 0;
 }

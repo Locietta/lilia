@@ -654,8 +654,8 @@ def test_reply_and_reconnect(tmp_path):
         assert retried["messages"] == calls_in_order[i]["messages"], (
             "the planner fallback gets the same request"
         )
-        assert retried.get("tool_choice") == {"type": "any"}, (
-            "the fallback keeps the planner's tool forcing"
+        assert retried.get("tool_choice") == calls_in_order[i].get("tool_choice"), (
+            "the fallback keeps the planner's tool choice"
         )
     turns = [b for b in calls_in_order if b["model"] != BROKEN_PLANNER]
     assert len(visions) == 1, "the picture is described once; voice is not an image"
@@ -686,17 +686,24 @@ def test_reply_and_reconnect(tmp_path):
         "wait",
         "stay_silent",
     ]
+    # The round, its result, then her own lines: one persistent history.
+    assert (
+        follow_up["messages"][: len(planner["messages"]) - 1]
+        == planner["messages"][:-1]
+    ), "the next round extends the first one"
     receipt = follow_up["messages"][-1]["content"][0]
     assert receipt["type"] == "tool_result" and "回复了" in json.dumps(
         receipt, ensure_ascii=False
-    ), "the next round sees what she said"
-    assert "fake reply" in json.dumps(receipt, ensure_ascii=False)
+    ), "the next round sees what she did"
+    assert "fake reply" in json.dumps(follow_up["messages"][-1], ensure_ascii=False), (
+        "and what she said, as her own line"
+    )
     assert (
         "莉莉娅" in planner["system"]
         and "测试群" in planner["messages"][-1]["content"][0]["text"]
     )
     assert planner.get("thinking") == {"type": "disabled"}, "thinking is off by default"
-    assert planner.get("tool_choice") == {"type": "any"}, "the planner must call a tool"
+    assert "tool_choice" not in planner, "the planner may write its analysis first"
     log = planner["messages"][-1]["content"][0]["text"]
     assert "你好呀" in log and "[图片: 一只橘猫趴在键盘上 睡着了][语音]" in log, (
         "the turn waits for the description and sees it"

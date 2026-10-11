@@ -17,6 +17,7 @@
 #include <lilia/archive/archiver.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/flow.h>
+#include <lilia/chat/session.h>
 #include <lilia/config.h>
 #include <lilia/learn/learner.h>
 #include <lilia/memory/memory.h>
@@ -31,10 +32,11 @@ namespace lilia::chat {
 /// process; sessions come and go as NapCat reconnects.
 ///
 /// A turn: the flow gate decides that the planner should look; after the
-/// burst settles, the planner works in rounds, as MaiBot's does: each round
-/// it replies, waits, looks something up or ends the turn. After a reply or
-/// a wait it sees what she said and the messages that came in meanwhile. A
-/// reply's text comes from the writer and goes out as 1-3 messages.
+/// burst settles, the planner works in rounds, as MaiBot's does. Each round it
+/// sees its whole history in this chat (the recent lines with its own earlier
+/// analyses, tool calls and results among them), writes a short analysis and
+/// replies, waits, looks something up or ends the turn. A reply's text comes
+/// from the writer and goes out as 1-3 messages.
 struct Responder {
     using Spawn = std::move_only_function<void(lighter::Task<>)>;
     using Clock = std::move_only_function<i64()>;
@@ -91,7 +93,8 @@ struct Responder {
     /// Debounce and typing delays; replay turns them off.
     bool realtime = true;
     /// Blind comparisons (replay --continue-at): until she has replied, the
-    /// planner may only reply (or look something up).
+    /// planner may only reply (or look something up); a turn without a reply
+    /// answers the newest message anyway.
     bool must_speak = false;
 
     struct ChatState {
@@ -99,8 +102,11 @@ struct Responder {
         std::string name;
         bool busy = false;
         i64 budget_notice_day = -1;
-        /// Her latest planner decisions, oldest first, shown to the planner.
-        std::deque<std::string> decisions;
+        /// The planner's own rounds since the window's anchor (its analyses,
+        /// tool calls and results), part of its history; see render_session().
+        std::deque<PlannerRecord> records;
+        /// Planner turns run here so far.
+        u64 cycles = 0;
         /// What she said to recent targets (message id, her text), newest last.
         std::deque<std::pair<i64, std::string>> replied;
         /// Why she is only now looking (just woke up, was busy), for the

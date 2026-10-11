@@ -33,9 +33,22 @@ std::string text_of(const provider::Item &item) {
     return out;
 }
 
-/// True once the planner has seen the result of its own call this turn.
+/// True when the planner's last call has its result and nobody else has
+/// said anything since (only her own lines may follow it).
 bool after_tool_result(const provider::History &history) {
-    return !history.empty() && !history.back().parts.empty() && std::holds_alternative<ToolOutcome>(history.back().parts.front());
+    if (history.empty() || history.back().parts.empty() || !std::holds_alternative<ToolOutcome>(history.back().parts.front())) return false;
+    for (const auto &part : history.back().parts) {
+        const auto *text = std::get_if<provider::TextPart>(&part);
+        if (!text) continue;
+        for (usize start = 0; start < text->text.size();) {
+            const auto end = text->text.find('\n', start);
+            const auto line = std::string_view(text->text).substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (line.starts_with('#') && !line.contains("(她自己)") && !line.contains("起是新消息")) return false;
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+    }
+    return true;
 }
 
 /// "#n" of the first line of the planner's log containing `needle`.
@@ -193,25 +206,25 @@ Task<> test_mutes_and_notices() {
     co_await tasks.join();
 }
 
-Task<> test_names_do_not_force() {
+/// The planner's analysis plus a call, as a model answer.
+std::vector<provider::OutputItem> analysed(std::string analysis, provider::OutputItem call) {
+    return {test::text_answer(std::move(analysis)), std::move(call)};
+}
+
+Task<> test_the_planner_decides() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
     h.planner->answer = [](const provider::History &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
-        return std::vector{test::tool_call("stay_silent", R"({"reason":"只是在说她"})")};
+        return analysed("只是在说她，不用接", test::tool_call("stay_silent", R"({"reason":"只是在说她"})"));
     };
-    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
-        return std::vector{test::text_answer("嗯？")};
-    };
-    // Talked about, not to: the planner may let it pass.
+    // Named, or even @-ed: the planner looks at once, and its silence stands.
     require(h.say(1, 20001, "小明", {onebot::text_segment("莉莉娅好像又坏了")}).has_value(), "her name opens the gate");
     co_await h.responder->run_turn(k_chat);
-    require(h.sent.empty() && h.writer->requests.empty(), "and silence stands");
-    require(text_of(h.planner->requests[0].back()).contains("提到了莉莉娅的名字"), "the planner knows it may be about her");
-
-    // Called with an @: silence is not an answer.
+    require(text_of(h.planner->requests[0].back()).contains("提到了她的名字"), "a fact, not an instruction");
     require(h.say(2, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 你坏了吗")}).has_value(), "an @");
     co_await h.responder->run_turn(k_chat);
-    require(h.sent == std::vector<std::string>{"嗯？"}, "she answers anyway");
+    require(text_of(h.planner->requests[1].back()).contains("是叫她的"), "the @ is pointed out");
+    require(h.sent.empty() && h.writer->requests.empty(), "no reply is forced on the planner");
     co_await tasks.join();
 }
 
@@ -222,7 +235,8 @@ Task<> test_planner_rests() {
     auto fallback = std::make_shared<test::FakeProvider::State>();
     fallback->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
         if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
-        return std::vector{test::tool_call("reply", R"({"target":"#1","style":"short","intent":"在"})")};
+        return std::vector{
+            test::tool_call("reply", R"({"target":")" + line_number(history, "小明(") + R"(","style":"short","intent":"在"})")};
     };
     h.responder->planner_fallbacks.push_back({.model = "fallback", .provider = test::fake_provider(fallback)});
     h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
@@ -246,33 +260,52 @@ Task<> test_conversations_go_on() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
     h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
-        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
-        return std::vector{test::tool_call("reply", R"({"target":"#1","style":"short","intent":"答一句"})")};
+        if (after_tool_result(history)) return analysed("答完了，等他接话", test::tool_call("stay_silent", R"({"reason":"说完了"})"));
+        const auto target = line_number(history, "小明(");
+        return analysed("小明在问她内存，接着聊",
+                        test::tool_call("reply", R"({"target":")" + target + R"(","style":"short","intent":"答一句"})"));
     };
     h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
-        return std::vector{test::text_answer("不好说，涨得太猛了，得等需求降下来")};
+        return std::vector{test::text_answer("不好说")};
     };
     require(h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 内存会跌吗")}).has_value(), "asked");
     co_await h.responder->run_turn(k_chat);
-    require(h.sent.size() >= 2, "a reply in a few bubbles");
+    require(h.sent == std::vector<std::string>{"不好说"}, "answered");
 
-    // Seven minutes later, no @, no name: he is still talking to her.
+    // Seven minutes later, no @, no name: every batch reaches the planner, and
+    // it sees what it thought and did before.
     h.clock += 420;
-    require(h.say(2, 20001, "小明", {onebot::text_segment("那显卡呢")}).has_value(), "the partner is heard out after the window");
+    require(h.say(2, 20001, "小明", {onebot::text_segment("那显卡呢")}).has_value(), "a plain follow-up gets a cycle");
     const auto before = h.planner->requests.size();
     co_await h.responder->run_turn(k_chat);
-    require(h.planner->requests.size() > before, "the planner is asked (her bubbles are one reply, not a reason to hold back)");
-    const auto tail = text_of(h.planner->requests[before].back());
-    require(tail.contains("小明正在和莉莉娅聊") && !tail.contains("没有人直接叫"), "the planner knows the conversation goes on");
-
-    // Someone else, after the window: no reason to look.
-    h.clock += 400;
-    require(!h.say(3, 20002, "小红", {onebot::text_segment("显卡也贵")}).has_value(), "others are not her conversation");
+    const auto &request = h.planner->requests[before];
+    std::string seen;
+    for (const auto &item : request) seen += text_of(item) + "\n";
+    require(seen.contains("小明在问她内存，接着聊") && seen.contains("答完了，等他接话") && seen.contains("她回复了 #"),
+            "its earlier analyses and actions are in its history:\n" + seen);
+    require(seen.contains("莉莉娅在这里的名字") || seen.contains("在这里的名字"), "the place leads the history");
+    require(h.sent.size() == 2, "and it answers the follow-up");
     co_await tasks.join();
 }
 
-/// The text of the planner's cached log part in one request.
-std::string log_part(const provider::History &history) {
+/// Every text of a request before its final part (the per-round tail): what
+/// a later request should start with if the cache is to hold.
+std::string stable_text(const provider::History &history) {
+    std::string out;
+    for (usize i = 0; i < history.size(); ++i) {
+        const auto &parts = history[i].parts;
+        const usize count = i + 1 == history.size() ? parts.size() - 1 : parts.size();
+        for (usize k = 0; k < count; ++k) {
+            if (const auto *text = std::get_if<provider::TextPart>(&parts[k])) out += text->text;
+            if (const auto *outcome = std::get_if<ToolOutcome>(&parts[k])) out += outcome->receipt;
+            if (const auto *call = std::get_if<provider::ToolCall>(&parts[k])) out += call->name;
+        }
+    }
+    return out;
+}
+
+/// The cached text part of a writer request.
+std::string cached_part(const provider::History &history) {
     for (const auto &item : history) {
         for (const auto &part : item.parts) {
             if (const auto *text = std::get_if<provider::TextPart>(&part); text && text->cache) return text->text;
@@ -289,7 +322,8 @@ Task<> test_cacheable_prompts() {
         const bool refused = after_tool_result(history) && text_of(history.back()).contains("用 reply");
         if (after_tool_result(history) && !refused) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
         if (!refused) return std::vector{test::tool_call("stay_silent", R"({"reason":"不想说"})")};
-        return std::vector{test::tool_call("reply", R"({"target":"#1","style":"short","intent":"接一句"})")};
+        return std::vector{
+            test::tool_call("reply", R"({"target":")" + line_number(history, "新番") + R"(","style":"short","intent":"接一句"})")};
     };
     h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
         return std::vector{test::text_answer("确实")};
@@ -305,11 +339,12 @@ Task<> test_cacheable_prompts() {
     for (const auto &tools : h.planner->tools) {
         require(tools.size() == h.planner->tools.front().size(), "the same tools every round");
     }
-    const auto first = log_part(requests.front());
-    const auto later = log_part(requests.back());
-    require(!first.empty() && later.starts_with(first), "a later turn's log extends the earlier one:\n" + first + "\n--\n" + later);
-    require(!first.contains("现在是"), "the time is not in the cached part");
-    const auto writer_log = log_part(h.writer->requests.front());
+    for (usize i = 1; i < requests.size(); ++i) {
+        const auto earlier = stable_text(requests[i - 1]);
+        require(stable_text(requests[i]).starts_with(earlier), "each request extends the one before: the cached prefix holds");
+        require(!earlier.contains("现在是"), "the time is never in the stable part");
+    }
+    const auto writer_log = cached_part(h.writer->requests.front());
     require(writer_log == "小明: 新番好看吗", "the writer's log part is cached too: " + writer_log);
     co_await tasks.join();
 }
@@ -318,7 +353,7 @@ Task<> test_cacheable_prompts() {
 
 int main() {
     try {
-        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_names_do_not_force, &test_cacheable_prompts,
+        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
                            &test_planner_rests, &test_conversations_go_on}) {
             lighter::EventLoop loop;
             auto task = test();

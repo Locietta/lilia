@@ -1,10 +1,8 @@
 #include "context.h"
 
 #include <algorithm>
-#include <charconv>
 #include <chrono>
 #include <format>
-#include <unordered_set>
 #include <variant>
 
 #include <lilia/text.h>
@@ -36,19 +34,6 @@ std::string display_name(const store::StoredMessage &message) {
     return message.sender_name.empty() ? std::to_string(message.sender_id) : message.sender_name;
 }
 
-/// Where the chat is, for both calls; stable, so it may lead a cached prefix.
-std::string chat_place(const ChatInfo &info) {
-    std::string facts =
-        info.chat.type == "group" ? std::format("这是 QQ 群「{}」。", info.chat_name) : std::format("这是和「{}」的私聊。", info.chat_name);
-    facts += std::format("{}在这里的名字是「{}」，别人 @ 她时会显示成「@{}」。", info.name, info.self_name, info.self_name);
-    return facts;
-}
-
-/// When it is; changes every call, so it goes last.
-std::string clock_line(i64 now, i32 utc_offset_minutes) {
-    return std::format("现在是 {}（{}）。", format_local_time(now, utc_offset_minutes), offset_label(utc_offset_minutes));
-}
-
 /// Newest-first walk that keeps whole lines within `budget` bytes, returned
 /// oldest first.
 template <typename Render>
@@ -63,52 +48,6 @@ std::vector<usize> fit_lines(const std::vector<store::StoredMessage> &recent, us
     }
     std::ranges::reverse(kept);
     return kept;
-}
-
-glz::generic string_schema() {
-    glz::generic schema;
-    std::ignore = glz::read_json(schema, R"({"type": "string"})");
-    return schema;
-}
-
-provider::SchemaProperty property(std::string type, std::string description) {
-    return {.type = std::move(type), .description = std::move(description)};
-}
-
-provider::SchemaProperty string_array_property(std::string description) {
-    provider::SchemaProperty result{.type = "array", .description = std::move(description)};
-    result.items.emplace(string_schema());
-    return result;
-}
-
-const glz::generic *field(const glz::generic &input, std::string_view key) {
-    if (!input.is_object()) return nullptr;
-    const auto &object = input.get_object();
-    const auto it = object.find(key);
-    return it == object.end() ? nullptr : &it->second;
-}
-
-std::string string_field(const glz::generic &input, std::string_view key) {
-    const auto *value = field(input, key);
-    return value && value->is_string() ? value->get_string() : std::string();
-}
-
-bool bool_field(const glz::generic &input, std::string_view key) {
-    const auto *value = field(input, key);
-    if (!value) return false;
-    if (value->is_boolean()) return value->get_boolean();
-    if (value->is_string()) return value->get_string() == "true";
-    return false;
-}
-
-/// "#12", "12" or "#12 小明: ..." -> 12.
-std::optional<usize> parse_target(std::string_view text) {
-    text = trim(text);
-    if (text.starts_with('#')) text.remove_prefix(1);
-    usize value = 0;
-    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (ec != std::errc{} || end == text.data()) return std::nullopt;
-    return value;
 }
 
 std::string_view style_instruction(ReplyStyle style) {
@@ -205,6 +144,17 @@ std::string render_line(const store::StoredMessage &message, i32 utc_offset_minu
     return line;
 }
 
+std::string chat_place(const ChatInfo &info) {
+    std::string facts =
+        info.chat.type == "group" ? std::format("这是 QQ 群「{}」。", info.chat_name) : std::format("这是和「{}」的私聊。", info.chat_name);
+    facts += std::format("{}在这里的名字是「{}」，别人 @ 她时会显示成「@{}」。", info.name, info.self_name, info.self_name);
+    return facts;
+}
+
+std::string clock_line(i64 now, i32 utc_offset_minutes) {
+    return std::format("现在是 {}（{}）。", format_local_time(now, utc_offset_minutes), offset_label(utc_offset_minutes));
+}
+
 std::string fill_template(std::string_view text, const std::vector<std::pair<std::string_view, std::string_view>> &values) {
     std::string out;
     out.reserve(text.size());
@@ -223,116 +173,6 @@ std::string fill_template(std::string_view text, const std::vector<std::pair<std
         if (!replaced) out.push_back(text[i++]);
     }
     return out;
-}
-
-PlannerRequest build_planner_request(const PlannerInput &input) {
-    PlannerRequest request;
-    provider::append_system(request.history, input.prompt);
-
-    const std::unordered_set<i64> fresh(input.fresh.begin(), input.fresh.end());
-    const auto kept = fit_lines(input.recent, input.log_bytes,
-                                [&input](const store::StoredMessage &message) { return render_line(message, input.utc_offset_minutes); });
-
-    // The log is a prefix that stays the same from turn to turn (the window
-    // is anchored), so it is cached on its own; everything that changes per
-    // turn follows it, the time last.
-    std::string log = chat_place(input.info);
-    log += "\n\n聊天记录（编号在行首）：\n";
-    usize first_fresh = 0;
-    for (const auto index : kept) {
-        const auto &message = input.recent[index];
-        request.ids.push_back(message.message_id);
-        if (first_fresh == 0 && fresh.contains(message.message_id)) first_fresh = request.ids.size();
-        log += std::format("#{} {}\n", request.ids.size(), render_line(message, input.utc_offset_minutes));
-    }
-    std::string user;
-    if (first_fresh > 0) user += std::format("#{} 起是新消息（她上次看过之后才发的）。\n", first_fresh);
-    user += input.addressed ?
-                std::format("新消息里有人在叫{}，一般应该回应。", input.info.name) :
-            !input.partner.empty() ?
-                std::format("{0}正在和{1}聊（{1}刚回过{0}），{0}的新消息多半是接着对她说的：追问、补充、感慨、嫌她不理人都算，"
-                            "就算没 @ 她、没叫她的名字。聊着天突然不回，就像不理人了；除非{0}明显在收尾"
-                            "（\"好\"\"那就好\"\"谢谢\"\"晚安\"之类），一般应该接着回。答不上来就直说不知道，"
-                            "或者用 search 查一下，别因为不知道就不出声。",
-                            input.partner, input.info.name) :
-            input.named ? std::format("新消息里有人提到了{0}的名字：可能是在跟她说话，也可能只是在聊她。是在跟她说话就回应；"
-                                      "只是聊到她，就像被人背后提到一样看情况，可以接一句，也可以不出声。",
-                                      input.info.name) :
-                          std::format("没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
-    if (!input.presence.empty()) user += "\n" + input.presence;
-    if (!input.people.empty()) {
-        // MaiBot's person profiles: background for the planner only.
-        user += "\n\n群友资料（她已经知道这些，别让她再问一遍；内部参考，别逐字复述；和眼前的聊天冲突时以聊天为准）：\n" + input.people;
-    }
-    if (!input.self_notes.empty()) {
-        user += std::format("\n\n{}以前说过的关于她自己的事（她的意图要和这些一致，同一件事以日期新的为准）：\n{}", input.info.name,
-                            input.self_notes);
-    }
-    if (!input.jargon.empty()) user += "\n\n" + input.jargon;
-    if (!input.recall.empty()) {
-        user += "\n\n聊天回想（以前聊过的相关内容，内部参考；自然相关时才用，别生硬复述）：\n" + input.recall;
-    }
-    if (!input.decisions.empty()) {
-        user += std::format("\n\n{}最近几次的判断（旧到新）：\n", input.info.name);
-        for (const auto &decision : input.decisions) user += "- " + decision + "\n";
-        user += "别重复她刚说过的意思。";
-    }
-    user += "\n\n" + clock_line(input.now, input.utc_offset_minutes);
-    request.history.push_back(
-        {.role = provider::Role::USER,
-         .parts = {provider::TextPart{.text = std::move(log), .cache = true}, provider::TextPart{.text = std::move(user)}}});
-
-    request.tools.push_back({
-        .name = "reply",
-        .description = "让她说话，回应其中一条消息",
-        .input_schema = {.properties = {{"target", property("string", "要回应的消息编号，例如 \"#12\"")},
-                                        {"quote", property("boolean", "是否引用那条消息")},
-                                        {"style", property("string", "short | normal | long")},
-                                        {"search", property("boolean", "是否需要联网搜索")},
-                                        {input.reference_handoff ? "brief" : "intent",
-                                         input.reference_handoff ? property("string", "给她的参考信息，不是台词，也不规定她怎么说") :
-                                                                   property("string", "一句话描述她想表达的意思，不是台词")}},
-                         .required = {"target", "style", input.reference_handoff ? "brief" : "intent"}},
-    });
-    if (input.stickers) {
-        auto &reply = request.tools.back().input_schema;
-        reply.properties.emplace("sticker", property("string", "可选：说完话后想配的表情包的感觉，比如\"无语\"；大多数时候不填"));
-        // A tool of its own, like MaiBot's send_emoji: buried in reply, it was never picked.
-        request.tools.push_back({
-            .name = "send_sticker",
-            .description = "只发一张表情包、不说话，用来表达情绪或反应",
-            .input_schema = {.properties = {{"feeling", property("string", "想表达的感觉，比如\"笑死\"\"无语\"\"震惊\"\"好耶\"")},
-                                            {"target", property("string", "可选：在回应哪条消息，例如 \"#12\"")}},
-                             .required = {"feeling"}},
-        });
-    }
-    request.tools.push_back({
-        .name = "repeat",
-        .description = "复读：把一条群友的短消息原样再发一遍（QQ 群里的玩梗习惯）",
-        .input_schema = {.properties = {{"target", property("string", "要复读的消息编号，例如 \"#12\"")}}, .required = {"target"}},
-    });
-    request.tools.push_back({
-        .name = "wait",
-        .description = "先等一会儿再看：等完会告诉你这期间的新消息，再决定下一步",
-        .input_schema = {.properties = {{"seconds", property("integer", "等多少秒，一般 5 到 20")},
-                                        {"reason", property("string", "为什么等，简短")}},
-                         .required = {"seconds"}},
-    });
-    if (input.memory_search) {
-        request.tools.push_back({
-            .name = "search_history",
-            .description = "搜索这个群以前的聊天记录，结果会告诉你，然后你再决定下一步",
-            .input_schema = {.properties = {{"query",
-                                             property("string", "要找的内容，写成一句完整的问题或描述，例如\"谁说过对芒果过敏\"")}},
-                             .required = {"query"}},
-        });
-    }
-    request.tools.push_back({
-        .name = "stay_silent",
-        .description = "她不说话（或者不再说了），这一轮到此为止",
-        .input_schema = {.properties = {{"reason", property("string", "简短的理由")}}, .required = {"reason"}},
-    });
-    return request;
 }
 
 std::string_view sticker_rule(bool enabled) {
@@ -356,70 +196,6 @@ std::string_view handoff_rule(bool reference) {
     }
     return "- intent：用一句短话（十来个字）写她的态度或想说的点，例如\"吐槽这集作画崩了\"或\"问他抽到没有\"。"
            "不要写成台词，也不要写成一套论证或建议（\"认同……但提醒……建议……\"）。";
-}
-
-Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vector<i64> &ids) {
-    for (const auto &item : items) {
-        const auto *tool = std::get_if<provider::ToolCallItem>(&item);
-        if (!tool) continue;
-        const auto &input = tool->call.input;
-        if (tool->call.name == "stay_silent") return {.reason = string_field(input, "reason")};
-        if (tool->call.name == "repeat") {
-            const auto target = parse_target(string_field(input, "target"));
-            if (!target || *target == 0 || *target > ids.size())
-                return {.reason = "invalid repeat target " + string_field(input, "target")};
-            return {.target = ids[*target - 1], .repeat = true};
-        }
-        if (tool->call.name == "send_sticker") {
-            // Aimed at the given message, else the newest one shown.
-            const auto target = parse_target(string_field(input, "target"));
-            const auto id = target && *target > 0 && *target <= ids.size() ? ids[*target - 1] : ids.empty() ? 0 : ids.back();
-            return {.reply = true,
-                    .target = id,
-                    .intent = string_field(input, "feeling"),
-                    .sticker = string_field(input, "feeling"),
-                    .sticker_only = true};
-        }
-        if (tool->call.name == "wait") {
-            // MaiBot waits 30 seconds when the argument is missing or invalid.
-            i64 seconds = 30;
-            if (const auto *value = field(input, "seconds"); value && value->is_number()) {
-                seconds = static_cast<i64>(value->get_number());
-            } else if (value && value->is_string()) {
-                const auto &text = value->get_string();
-                if (i64 parsed = 0; std::from_chars(text.data(), text.data() + text.size(), parsed).ec == std::errc{}) seconds = parsed;
-            }
-            return {.wait = std::clamp<i64>(seconds, 1, 60), .reason = string_field(input, "reason")};
-        }
-        if (tool->call.name != "reply") return {.reason = "unknown tool " + tool->call.name};
-
-        const auto target = parse_target(string_field(input, "target"));
-        if (!target || *target == 0 || *target > ids.size()) return {.reason = "invalid target " + string_field(input, "target")};
-        const auto style = string_field(input, "style");
-        return {
-            .reply = true,
-            .target = ids[*target - 1],
-            .quote = bool_field(input, "quote"),
-            .style = style == "long"   ? ReplyStyle::LONG :
-                     style == "normal" ? ReplyStyle::NORMAL :
-                                         ReplyStyle::SHORT,
-            .search = bool_field(input, "search"),
-            .intent = string_field(input, "intent"),
-            .brief = string_field(input, "brief"),
-            .sticker = string_field(input, "sticker"),
-            .sticker_only = style == "sticker",
-        };
-    }
-    return {.reason = "no tool call"};
-}
-
-std::string number_messages(const std::vector<store::StoredMessage> &messages, std::vector<i64> &ids, i32 utc_offset_minutes) {
-    std::string out;
-    for (const auto &message : messages) {
-        ids.push_back(message.message_id);
-        out += std::format("#{} {}\n", ids.size(), render_line(message, utc_offset_minutes));
-    }
-    return out;
 }
 
 std::string quoted_phrase(std::string_view style) {

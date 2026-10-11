@@ -45,45 +45,16 @@ struct Plan {
     /// The repeat tool: send `target`'s text again as it is (复读).
     bool repeat = false;
     std::string reason; ///< why she stays silent or waits
+    /// What the planner wrote before its tool call (its view of the chat).
+    std::string analysis;
 };
 
-struct PlannerInput {
-    std::string prompt; ///< planner.md with {name} and {persona} filled in
-    ChatInfo info;
-    /// Recent chat log, oldest first; ends with the new messages.
-    std::vector<store::StoredMessage> recent;
-    /// Ids of messages the planner has not seen before.
-    std::vector<i64> fresh;
-    /// Someone called her (an @, a reply to her): she answers.
-    bool addressed = false;
-    /// Someone only named her: maybe to her, maybe about her.
-    bool named = false;
-    /// Whom she is talking with, when the new messages include theirs; empty
-    /// otherwise. Their lines are probably meant for her.
-    std::string partner;
-    i64 now = 0;
-    i32 utc_offset_minutes = 480;
-    usize log_bytes = 12'000;
-    /// The reply tool asks for `brief` (notes) instead of `intent`.
-    bool reference_handoff = false;
-    /// Her latest decisions, oldest first ("[21:05] 没说话：…"), so the planner
-    /// knows what she just did and why.
-    std::vector<std::string> decisions;
-    /// Offer the search_history tool (long-term memory is enabled).
-    bool memory_search = false;
-    /// Offer stickers (the sticker pool is not empty).
-    bool stickers = false;
-    /// "- 名字：事实；事实" lines about the people in the new messages.
-    std::string people;
-    /// What she has said about herself before ("- [MM-DD] 她……").
-    std::string self_notes;
-    /// Why she is only now looking (just woke up, was busy); empty usually.
-    std::string presence;
-    /// A summary of older chat the recent messages bring to mind.
-    std::string recall;
-    /// Meanings of slang others use in the log ("以下黑话来自…").
-    std::string jargon;
-};
+/// Where the chat is ("这是 QQ 群「…」。她在这里的名字是…"); stable, so it
+/// may lead a cached prefix.
+std::string chat_place(const ChatInfo &info);
+
+/// "现在是 2026-10-03 21:05（UTC+8）。": changes every call, so it goes last.
+std::string clock_line(i64 now, i32 utc_offset_minutes);
 
 /// The planner.md rule about search_history; empty when memory is off.
 std::string_view memory_rule(bool enabled);
@@ -93,26 +64,6 @@ std::string_view sticker_rule(bool enabled);
 
 /// The planner.md line describing what it hands the writer.
 std::string_view handoff_rule(bool reference);
-
-struct PlannerRequest {
-    provider::History history;
-    std::vector<provider::ToolDefinition> tools;
-    /// ids[n - 1] is the message id shown as "#n".
-    std::vector<i64> ids;
-};
-
-/// The system prompt; then one user message: the place and the numbered log
-/// (a cached prefix: the Responder anchors the window, so it only grows
-/// between trims), then what changes per turn, the time last.
-PlannerRequest build_planner_request(const PlannerInput &input);
-
-/// Reads the planner's tool call. No call, an unknown tool or an invalid
-/// target means silence; wait is clamped to 1..60 seconds (30 when missing).
-Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vector<i64> &ids);
-
-/// Messages that arrived during a turn, numbered on from the planner's
-/// earlier lines ("#n [HH:MM] 名字(id): 内容"); appends their ids to `ids`.
-std::string number_messages(const std::vector<store::StoredMessage> &messages, std::vector<i64> &ids, i32 utc_offset_minutes);
 
 struct WriterInput {
     std::string persona;

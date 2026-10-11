@@ -57,7 +57,6 @@ constexpr i64 k_max_debounce_seconds = 15;
 constexpr usize k_voice_samples = 8;
 /// Recent targets whose reply she remembers.
 constexpr usize k_replied_memory = 20;
-constexpr usize k_decision_memory = 6;
 /// Expression selection: too few candidates skip the call; the selector sees
 /// this many recent lines.
 constexpr usize k_min_candidates = 5;
@@ -83,9 +82,6 @@ constexpr usize k_repeat_lookback = 8;
 /// After she laughed (草, www), a leading laugh is dropped for this long.
 constexpr i64 k_laugh_gap_seconds = 600;
 constexpr i64 k_poke_back_seconds = 60;
-/// She holds back once she wrote this many of the last `k_self_window` messages.
-constexpr usize k_self_window = 10;
-constexpr usize k_self_limit = 3;
 /// MaiBot's response_splitter: more pieces than this go out as one message;
 /// the rest are packed into at most this many messages.
 constexpr usize k_max_pieces = 8;
@@ -99,6 +95,9 @@ constexpr usize k_max_replies = 3;
 /// whoever called her this recently is still answered.
 constexpr usize k_catch_up_messages = 100;
 constexpr i64 k_late_answer_seconds = 1800;
+/// At a trim of the log window, the planner's analyses of this many latest
+/// turns stay; older turns keep only their tool calls and results.
+constexpr usize k_kept_analyses = 6;
 /// A failing planner model is skipped (fallbacks answer) for this long.
 constexpr i64 k_planner_rest_seconds = 600;
 
@@ -131,11 +130,6 @@ std::string string_input(const glz::generic &input, std::string_view key) {
 
 /// "21:05" in the chat's local time.
 std::string clock_of(i64 unix_seconds, i32 utc_offset_minutes) { return format_local_time(unix_seconds, utc_offset_minutes).substr(11); }
-
-void remember_decision(Responder::ChatState &state, std::string decision) {
-    state.decisions.push_back(std::move(decision));
-    while (state.decisions.size() > k_decision_memory) state.decisions.pop_front();
-}
 
 std::string_view style_name(ReplyStyle style) {
     switch (style) {
@@ -326,8 +320,7 @@ Task<> join_repeat(Responder *r, store::ChatKey chat, std::string text) {
     if (r->realtime) co_await lighter::sleep(std::chrono::seconds(random_seconds(r, 1, 4)));
     if (muted(r, chat) || !co_await send_and_record(r, chat, {onebot::text_segment(text)})) co_return;
     auto &state = r->chats[chat];
-    note_spoke(state.flow, r->now(), 0);
-    remember_decision(state, std::format("[{}] 跟着复读了「{}」", clock_of(r->now(), r->config.chat.utc_offset_minutes), text));
+    note_spoke(state.flow);
     if (r->observer) r->observer(chat, {.reply = true, .intent = "复读"}, {text});
     log::info("{} joins the 复读: {}", describe(chat), text);
 }
@@ -396,7 +389,7 @@ Task<> live_presence(Responder *r, const store::ChatKey &chat) {
     if (!schedule.enabled) co_return;
     // A moment to read before reacting; quicker when someone is talking to her.
     const auto &flow = r->chats[chat].flow;
-    const bool called = flow.addressed || flow.named || partner_in(flow, r->flow_settings(), r->now(), flow.unseen);
+    const bool called = flow.addressed || flow.named;
     co_await lighter::sleep(std::chrono::seconds(called ?
                                                      random_seconds(r, schedule.read_called_min_seconds, schedule.read_called_max_seconds) :
                                                      random_seconds(r, schedule.read_min_seconds, schedule.read_max_seconds)));
@@ -439,6 +432,12 @@ Task<> turn_worker(Responder *r, store::ChatKey chat) {
             state.flow.named.reset();
         }
         if (!should_plan(state.flow, r->flow_settings(), r->now())) {
+            // Held back by the idle backoff: look again when it ends, with
+            // whatever came in meanwhile, instead of leaving them unseen.
+            if (const auto due = next_check(state.flow, r->flow_settings(), r->now()); due && r->realtime) {
+                co_await lighter::sleep(std::chrono::seconds(std::max<i64>(*due - r->now(), 1)));
+                continue;
+            }
             state.busy = false;
             co_return;
         }
@@ -852,6 +851,9 @@ std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &ch
     }
     recent->erase(recent->begin(), recent->end() - static_cast<std::ptrdiff_t>(kept));
     state.log_anchor = recent->front().row_id - 1;
+    // The planner's rounds about lines no longer shown go with them; older
+    // turns keep their calls and results but lose their analyses.
+    trim_records(state.records, state.log_anchor, k_kept_analyses);
     return *std::move(recent);
 }
 
@@ -862,11 +864,7 @@ std::string Responder::self_name(const store::ChatKey &chat) const {
 
 void Responder::detach() noexcept { session.reset(); }
 
-FlowSettings Responder::flow_settings() const {
-    return {.talk_value = config.chat.talk_value,
-            .window_seconds = config.chat.conversation_window_seconds,
-            .partner_seconds = config.chat.partner_window_seconds};
-}
+FlowSettings Responder::flow_settings() const { return {.talk_value = config.chat.talk_value}; }
 
 Result<void> Responder::reload_persona() {
     std::ifstream file(persona_path, std::ios::binary);
@@ -933,7 +931,8 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
             }
         }
     }
-    if (!should_plan(state.flow, flow_settings(), now())) return std::nullopt;
+    // Due now, or once the idle backoff ends (the worker waits for it).
+    if (!should_plan(state.flow, flow_settings(), now()) && !next_check(state.flow, flow_settings(), now())) return std::nullopt;
     return chat;
 }
 
@@ -1117,7 +1116,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         const auto feeling = plan.sticker.empty() ? plan.intent : plan.sticker + "：" + plan.intent;
         if (co_await send_sticker(r, chat, feeling, log_lines)) {
             if (r->observer) r->observer(chat, plan, {"[表情]"});
-            note_spoke(state.flow, r->now(), target.sender_id);
+            note_spoke(state.flow);
             co_return Delivered{.sent = true, .said = "[表情包]"};
         }
         plan.style = ReplyStyle::SHORT; // nothing fitting: say it in words
@@ -1199,7 +1198,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         if (only_laughs(casual) && stickers_ready(r) &&
             co_await send_sticker(r, chat, "笑死：" + (plan.intent.empty() ? std::string("觉得好笑") : plan.intent), log_lines)) {
             if (r->observer) r->observer(chat, plan, {"[表情]"});
-            note_spoke(state.flow, r->now(), target.sender_id);
+            note_spoke(state.flow);
             co_return Delivered{.sent = true, .said = "[表情包]"};
         }
         segments = add_typos(split_segments(casual, r->rng), settings.typos, r->rng);
@@ -1215,7 +1214,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         // Nothing but emoji: the sticker says it.
         if (!plan.sticker.empty() && co_await send_sticker(r, chat, plan.sticker + "：" + plan.intent, log_lines)) {
             if (r->observer) r->observer(chat, plan, {"[表情]"});
-            note_spoke(state.flow, r->now(), target.sender_id);
+            note_spoke(state.flow);
             co_return Delivered{.sent = true, .said = "[表情包]"};
         }
         log::warn("writer returned an empty reply for {}", describe(chat));
@@ -1247,7 +1246,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         if (r->realtime) co_await lighter::sleep(std::chrono::milliseconds(800));
         std::ignore = co_await send_sticker(r, chat, plan.sticker + "：" + plan.intent, log_lines);
     }
-    note_spoke(state.flow, r->now(), target.sender_id);
+    note_spoke(state.flow);
     if (r->memory && r->config.memory.facts && !target.from_self && !is_notice(target)) r->spawn(learn_facts(r, chat, target, log_lines));
 
     std::string said;
@@ -1266,12 +1265,17 @@ std::string first_call_id(const std::vector<provider::OutputItem> &items) {
     return {};
 }
 
-/// How the log names `partner`, from their newest line among `messages`.
-std::string partner_name(Responder *r, i64 partner, const std::vector<store::StoredMessage> &messages) {
-    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-        if (!it->from_self && it->sender_id == partner) return speaker(r, *it);
+/// The planner's analysis: the text it wrote before its tool call.
+std::string analysis_of(const std::vector<provider::OutputItem> &items) {
+    std::string text;
+    for (const auto &item : items) {
+        if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
+            for (const auto &part : message->parts) text += part.text;
+        }
     }
-    return std::to_string(partner);
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    return text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
 }
 
 /// The name of the first tool call in a planner response; empty when none.
@@ -1301,7 +1305,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     auto &state = chats[chat];
     auto fresh = std::exchange(state.flow.unseen, {});
     auto addressed = std::exchange(state.flow.addressed, std::nullopt);
-    const auto named = std::exchange(state.flow.named, std::nullopt);
+    auto named = std::exchange(state.flow.named, std::nullopt);
     if (fresh.empty() || state.muted_until > now()) co_return;
 
     const auto &settings = config.chat;
@@ -1312,7 +1316,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     if (used.has_error()) log::error("cannot read token usage: {}", used.error().message());
     if (used.has_value() && *used >= settings.daily_token_budget) {
         log::warn("daily token budget exhausted ({} >= {})", *used, settings.daily_token_budget);
-        if (addressed && state.budget_notice_day != day) {
+        if ((addressed || named) && state.budget_notice_day != day) {
             state.budget_notice_day = day;
             onebot::Message notice{onebot::text_segment("今天的额度用完了，明天再找我吧")};
             co_await send_and_record(this, chat, std::move(notice));
@@ -1330,113 +1334,81 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     };
     co_await settle_images(fresh);
 
-    auto log_lines = log_window(chat);
-    if (log_lines.empty()) log_lines = fresh;
-
-    // MaiBot weighs "how much of the recent chat was me" heavily: once she has
-    // said a lot lately, only being called (or answered right after her own
-    // message) brings her back, and the planner is not even asked.
-    // Whoever she is talking with still gets through; the brake is for
-    // chiming in on everyone else.
-    const bool conversing = partner_in(state.flow, flow_settings(), started, fresh);
-    if (!addressed && !named && !conversing) {
-        // Replies, not messages: one reply goes out as up to three bubbles.
-        const usize window = std::min(log_lines.size(), k_self_window);
-        usize recent_self = 0;
-        for (auto it = log_lines.end() - static_cast<std::ptrdiff_t>(window); it != log_lines.end(); ++it) {
-            if (it->from_self && (it == log_lines.begin() || !std::prev(it)->from_self)) ++recent_self;
-        }
-        if (recent_self >= k_self_limit) {
-            log::info("{} holds back: she replied {} times in the last {} messages", describe(chat), recent_self, window);
-            co_return;
-        }
-    }
-
+    auto rows = log_window(chat);
+    if (rows.empty()) co_return;
     const ChatInfo info{
         .chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self_name(chat)};
-    PlannerInput planner_input{
-        .prompt = fill_template(embedded(xmake::planner_md), {{"name", settings.name},
-                                                              {"persona", persona},
-                                                              {"handoff", handoff_rule(settings.handoff == "reference")},
-                                                              {"memory_rule", memory_rule(memory != nullptr)},
-                                                              {"sticker_rule", sticker_rule(stickers_ready(this))}}),
-        .info = info,
-        .recent = log_lines,
-        .addressed = addressed.has_value(),
-        .named = named.has_value(),
-        .partner = conversing ? partner_name(this, state.flow.partner, fresh) : std::string(),
-        .now = started,
-        .utc_offset_minutes = settings.utc_offset_minutes,
-        .log_bytes = std::numeric_limits<usize>::max(), // log_window() bounds it
-        .reference_handoff = settings.handoff == "reference",
-        .decisions = {state.decisions.begin(), state.decisions.end()},
-        .memory_search = memory != nullptr,
-        .stickers = stickers_ready(this),
-    };
-    for (const auto &message : fresh) planner_input.fresh.push_back(message.message_id);
+    const auto prompt = fill_template(embedded(xmake::planner_md), {{"name", settings.name},
+                                                                    {"persona", persona},
+                                                                    {"handoff", handoff_rule(settings.handoff == "reference")},
+                                                                    {"memory_rule", memory_rule(memory != nullptr)},
+                                                                    {"sticker_rule", sticker_rule(stickers_ready(this))}});
+    const auto tools = planner_tools(settings.handoff == "reference", memory != nullptr, stickers_ready(this));
+    const u64 cycle = ++state.cycles;
+
+    // Notes for this turn: in the tail of every round, never in the history.
+    PlannerTail notes{.presence = std::exchange(state.presence_note, {}), .utc_offset_minutes = settings.utc_offset_minutes};
     if (memory && config.memory.facts) {
         std::vector<std::pair<i64, std::string>> people;
         for (auto it = fresh.rbegin(); it != fresh.rend() && people.size() < k_people_notes; ++it) {
-            if (it->from_self || std::ranges::contains(people, it->sender_id, &std::pair<i64, std::string>::first)) continue;
+            if (it->from_self || is_notice(*it) || std::ranges::contains(people, it->sender_id, &std::pair<i64, std::string>::first))
+                continue;
             people.emplace_back(it->sender_id, speaker(this, *it));
         }
-        planner_input.people = memory->people_notes(people);
-        if (!planner_input.people.empty()) log::debug("{} notes on people:\n{}", describe(chat), planner_input.people);
+        notes.people = memory->people_notes(people);
     }
-    planner_input.jargon = jargon_notes(this, chat, log_lines);
-    planner_input.presence = std::exchange(state.presence_note, {});
+    notes.jargon = jargon_notes(this, chat, rows);
     if (memory) {
         // A summary the chat brings back, and what she said about herself that
         // bears on the last few lines: two lookups, side by side.
         std::string context;
-        for (auto it = log_lines.end() - static_cast<std::ptrdiff_t>(std::min<usize>(log_lines.size(), k_self_context));
-             it != log_lines.end(); ++it)
+        for (auto it = rows.end() - static_cast<std::ptrdiff_t>(std::min<usize>(rows.size(), k_self_context)); it != rows.end(); ++it)
             context += it->text + "\n";
         auto self_notes = config.memory.facts ? memory->self_notes(self.user_id, std::move(context), k_self_facts) : no_text();
-        auto [recalled, notes] = co_await lighter::when_all(memory->recall(chat, log_lines), std::move(self_notes));
-        planner_input.recall = std::move(recalled);
-        planner_input.self_notes = std::move(notes);
+        auto [recalled, own] = co_await lighter::when_all(memory->recall(chat, rows), std::move(self_notes));
+        notes.recall = std::move(recalled);
+        notes.self_notes = std::move(own);
     }
-    auto request = build_planner_request(planner_input);
-    auto &history = request.history;
-    auto &ids = request.ids;
 
-    // MaiBot's planner loop: each round one tool call; after a reply or a
-    // wait the planner sees what happened and the messages that came in.
-    i64 newest = fresh.back().message_id;
-    bool answered = false; // replied to whoever called her
-    usize searches = 0;
-    usize waits = 0;
-    usize replies = 0;
-    std::string remembered;
-    // Messages that came in since the last look, numbered for the planner;
-    // someone calling her meanwhile must be answered too.
-    const auto arrivals = [&]() -> Task<std::string> {
-        auto arrived = std::exchange(state.flow.unseen, {});
-        if (auto called = std::exchange(state.flow.addressed, std::nullopt)) {
-            addressed = called;
-            answered = false;
-        }
-        state.flow.named.reset(); // the planner sees those lines now
-        if (arrived.empty()) co_return std::string();
-        co_await settle_images(arrived);
-        newest = arrived.back().message_id;
-        if (auto latest = log_window(chat); !latest.empty()) log_lines = std::move(latest);
-        // Their descriptions may have landed since they were queued.
-        for (auto &message : arrived) {
-            if (const auto it = std::ranges::find(log_lines, message.message_id, &store::StoredMessage::message_id); it != log_lines.end())
-                message = *it;
-        }
-        co_return number_messages(arrived, ids, settings.utc_offset_minutes);
+    const auto row_of = [&rows](i64 message_id) -> i64 {
+        const auto it = std::ranges::find(rows, message_id, &store::StoredMessage::message_id);
+        return it == rows.end() ? 0 : it->row_id;
     };
-    const auto reply_to = [&](Plan plan) -> Task<Delivered> {
-        auto target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
-        if (target != log_lines.end() && target->from_self) {
-            // She answers others, not herself; fall back to the newest message.
-            plan.target = addressed.value_or(newest);
-            target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
+    // Facts about the lines new to this round, not instructions: the planner decides.
+    const auto facts = [&](const std::optional<i64> &called, const std::optional<i64> &mentioned) {
+        std::vector<std::string> out;
+        if (chat.type != "group") return out;
+        if (const i64 row = called ? row_of(*called) : 0) out.push_back(std::format("#{} 是叫她的（@ 了她或者回复了她的消息）。", row));
+        if (const i64 row = mentioned ? row_of(*mentioned) : 0) out.push_back(std::format("#{} 提到了她的名字。", row));
+        return out;
+    };
+    i64 first_new_row = 0;
+    for (const auto &row : rows) {
+        if (std::ranges::contains(fresh, row.message_id, &store::StoredMessage::message_id)) {
+            first_new_row = row.row_id;
+            break;
         }
-        if (target == log_lines.end()) {
+    }
+    i64 newest = fresh.back().message_id;
+
+    // New lines during the turn simply join the history the next round shows.
+    const auto refresh = [&]() -> Task<> {
+        auto arrived = std::exchange(state.flow.unseen, {});
+        addressed = std::exchange(state.flow.addressed, std::nullopt);
+        named = std::exchange(state.flow.named, std::nullopt);
+        co_await settle_images(arrived);
+        if (auto latest = log_window(chat); !latest.empty()) rows = std::move(latest);
+        if (!arrived.empty()) newest = arrived.back().message_id;
+    };
+    std::string remembered;
+    const auto reply_to = [&](Plan plan) -> Task<Delivered> {
+        auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
+        if (target != rows.end() && target->from_self) {
+            // She answers others, not herself; fall back to the newest message.
+            plan.target = newest;
+            target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
+        }
+        if (target == rows.end()) {
             log::warn("planner target {} is not in the chat log", plan.target);
             co_return Delivered{};
         }
@@ -1444,96 +1416,113 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (auto current = store.message(chat, plan.target);
             target->text == onebot::k_recalled_text || (current.has_value() && *current && (*current)->text == onebot::k_recalled_text)) {
             log::info("{}: {} was recalled; not answering it", describe(chat), plan.target);
-            if (addressed == plan.target) answered = true;
             co_return Delivered{.refused = "那条消息已经被撤回了，没有回。"};
         }
         log::info("{} replies to {} ({}, quote {}, search {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
                   plan.search, plan.intent.empty() ? plan.brief : plan.intent);
-        remember_decision(state, std::format("[{}] 回复了{}的「{}」：{}", clock_of(now(), settings.utc_offset_minutes),
-                                             target->sender_name.empty() ? std::to_string(target->sender_id) : target->sender_name,
-                                             bounded_utf8(target->text, 60), plan.intent.empty() ? plan.brief : plan.intent));
-        auto delivered = co_await deliver(this, chat, plan, log_lines, *target, info, started, remembered, planner_input.self_notes,
-                                          planner_input.presence);
-        if (delivered.sent && addressed && plan.target == *addressed) answered = true;
-        // A follow-up question is often about the same thing: the next turns
-        // know what she found, not only what she said.
-        if (delivered.sent && !delivered.reference.empty() && !state.decisions.empty()) {
-            auto found = bounded_utf8(delivered.reference, 240);
-            std::ranges::replace(found, '\n', ' ');
-            state.decisions.back() += std::format("（她查到的：{}{}）", found, found.size() < delivered.reference.size() ? "…" : "");
-        }
-        co_return delivered;
+        co_return co_await deliver(this, chat, plan, rows, *target, info, now(), remembered, notes.self_notes, notes.presence);
     };
 
+    // MaiBot's planner loop: each round an analysis and one tool call; the
+    // round, its result and the lines that came in meanwhile stay in the
+    // chat's history for every later round and turn.
+    usize searches = 0;
+    usize waits = 0;
+    usize replies = 0;
+    i64 seen_row = 0;
+    std::string last_analysis;
     std::string ended = "planner call failed";
     for (usize round = 0; round < k_max_rounds; ++round) {
-        // The same tools every round (changing them would void the cached
-        // prompt); one she cannot use right now gets a receipt saying why.
-        const auto planned = co_await call_planner(this, "planner", chat, history, request.tools);
+        PlannerTail tail = notes;
+        tail.first_new_row = round == 0 ? first_new_row : 0;
+        if (round > 0) {
+            for (const auto &row : rows) {
+                if (row.row_id > seen_row && !row.from_self) {
+                    tail.first_new_row = row.row_id;
+                    break;
+                }
+            }
+        }
+        tail.facts = facts(addressed, named);
+        tail.now = now();
+        const i64 shown = rows.back().row_id;
+        const auto planned = co_await call_planner(this, "planner", chat, render_session(prompt, info, rows, state.records, tail), tools);
         if (!planned) break;
-        for (const auto &item : *planned) provider::append_output_item(history, item);
+        seen_row = shown;
+        addressed.reset();
+        named.reset();
+        const auto analysis = analysis_of(*planned);
+        last_analysis = analysis;
+        if (!analysis.empty()) log::info("{} planner: {}", describe(chat), analysis);
         const auto call_id = first_call_id(*planned);
         const auto tool = first_call_name(*planned);
+        // The round stays in the history with its result.
+        const auto keep = [&](std::string receipt) {
+            PlannerRecord record{.after_row = shown, .cycle = cycle, .output = *planned};
+            if (!call_id.empty()) record.outcomes = outcomes(*planned, call_id, std::move(receipt));
+            state.records.push_back(std::move(record));
+        };
+
+        // One she cannot use right now gets a receipt saying why (the tools
+        // never change, which would void the cached prompt).
         std::string unavailable;
         if (tool == "search_history" && searches >= config.memory.max_searches) {
             unavailable = "这一轮已经查过了，不能再查，根据现有的信息决定。";
-        } else if ((tool == "wait" || tool == "stay_silent") && must_speak && replies == 0) {
+        } else if ((tool == "wait" || tool == "stay_silent" || tool.empty()) && must_speak && replies == 0) {
             unavailable = "这次需要她说点什么，用 reply。";
         } else if (tool == "send_sticker" && now() - state.last_sticker < config.stickers.cooldown_seconds) {
             unavailable = "她刚发过表情包，隔一会儿再发；可以用文字回应，或者不说话。";
         }
         if (!unavailable.empty()) {
-            provider::append_tool_outcomes(history, outcomes(*planned, call_id, unavailable));
+            keep(unavailable);
+            co_await refresh();
             continue;
         }
 
         // A look into the history: its result goes back to the planner.
-        const auto search = std::ranges::find_if(*planned, [](const provider::OutputItem &item) {
-            const auto *call = std::get_if<provider::ToolCallItem>(&item);
-            return call && call->call.name == "search_history";
-        });
-        if (memory && search != planned->end()) {
-            const auto &call = std::get<provider::ToolCallItem>(*search).call;
+        if (memory && tool == "search_history") {
+            const auto &call = std::get<provider::ToolCallItem>(*std::ranges::find_if(*planned, [](const provider::OutputItem &item) {
+                                   return std::holds_alternative<provider::ToolCallItem>(item);
+                               })).call;
             const auto hits = co_await memory->search(chat, string_input(call.input, "query"));
             const auto found = memory::render_hits(hits);
             if (!hits.empty()) remembered += found;
-            provider::append_tool_outcomes(history, outcomes(*planned, call.id, found));
+            keep(found);
             ++searches;
             continue;
         }
 
-        auto plan = parse_plan(*planned, ids);
+        auto plan = parse_plan(*planned, rows);
         plan.follow_up = replies > 0;
+        plan.analysis = analysis;
         if (plan.repeat) {
             // 复读: the message again, as it is.
-            const auto target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
-            const auto index = static_cast<usize>(std::ranges::find(ids, plan.target) - ids.begin()) + 1;
+            const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
             std::string receipt;
-            if (target == log_lines.end() || target->from_self || is_notice(*target) || !repeatable(target->text)) {
-                receipt = std::format("#{} 不适合复读（只复读别人的短消息），没有发。", index);
+            if (target == rows.end() || target->from_self || is_notice(*target) || !repeatable(target->text)) {
+                receipt = "这条不适合复读（只复读别人的短消息），没有发。";
             } else if (co_await send_and_record(this, chat, {onebot::text_segment(target->text)})) {
                 ++replies;
                 state.repeated = target->text;
-                note_spoke(state.flow, now(), target->sender_id);
-                remember_decision(state, std::format("[{}] 复读了「{}」", clock_of(now(), settings.utc_offset_minutes), target->text));
+                note_spoke(state.flow);
                 if (observer) observer(chat, plan, {target->text});
                 log::info("{} repeats {}: {}", describe(chat), plan.target, target->text);
-                receipt = std::format("{}复读了 #{}：「{}」", settings.name, index, target->text);
+                receipt = std::format("她复读了 #{}。", target->row_id);
             } else {
                 receipt = "没发出去。";
             }
+            keep(receipt);
             if (replies >= k_max_replies) {
                 ended = "replied enough";
                 break;
             }
-            const auto came = co_await arrivals();
-            provider::append_tool_outcomes(
-                history, outcomes(*planned, call_id, receipt + "\n" + (came.empty() ? "这期间没有新消息。" : "这期间的新消息：\n" + came)));
+            co_await refresh();
             continue;
         }
         if (plan.wait > 0) {
             // MaiBot allows three waits in a row, then the turn rests.
             if (++waits > k_max_waits) {
+                keep("不能再等了，这一轮到此为止。");
                 ended = "waited enough";
                 break;
             }
@@ -1545,56 +1534,57 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             } else if (realtime) {
                 co_await lighter::sleep(std::chrono::seconds(plan.wait));
             }
-            const auto came = co_await arrivals();
-            const auto waited = now() - before;
-            provider::append_tool_outcomes(history, outcomes(*planned, call_id,
-                                                             came.empty() ? std::format("等了 {} 秒，这期间没有新消息。", waited) :
-                                                                            std::format("等了 {} 秒，这期间的新消息：\n{}", waited, came)));
+            keep(std::format("等了 {} 秒。", now() - before));
+            co_await refresh();
             continue;
         }
         waits = 0;
         if (!plan.reply) {
-            ended = plan.reason;
+            if (tool == "reply" || tool == "repeat" || tool == "send_sticker") {
+                // A target that is not in the history: let it look again.
+                keep("没找到这个编号的消息，没有发。");
+                continue;
+            }
+            keep("好。");
+            ended = tool.empty() ? (analysis.empty() ? std::string("no tool call") : analysis) : plan.reason;
             break;
         }
 
         const auto delivered = co_await reply_to(plan);
         if (!delivered.refused.empty()) {
-            provider::append_tool_outcomes(history, outcomes(*planned, call_id, delivered.refused));
+            keep(delivered.refused);
+            co_await refresh();
             continue;
         }
         if (!delivered.sent) {
+            keep("没发出去。");
             ended = "the reply failed";
             break;
         }
         ++replies;
+        // What her search found stays with the round, for follow-up questions.
+        std::string receipt = std::format("她回复了 #{}，说的话在上面的聊天记录里。", row_of(plan.target));
+        if (!delivered.reference.empty()) receipt += "\n她查到的：" + delivered.reference;
+        keep(std::move(receipt));
         if (replies >= k_max_replies) {
             ended = "replied enough";
             break;
         }
-        const auto came = co_await arrivals();
-        const auto index = static_cast<usize>(std::ranges::find(ids, plan.target) - ids.begin()) + 1;
-        provider::append_tool_outcomes(history, outcomes(*planned, call_id,
-                                                         std::format("{}回复了 #{}：「{}」\n{}", settings.name, index, delivered.said,
-                                                                     came.empty() ? "这期间没有新消息。" : "这期间的新消息：\n" + came)));
+        co_await refresh();
     }
 
-    // Ignoring someone who called her reads as broken, not as a choice.
-    // (In blind comparisons she must say something; the planner can still
-    // pick stay_silent, which it sees named in its prompt.)
-    if (((addressed && !answered) || (must_speak && replies == 0)) && ended != "the reply failed") {
-        const auto target = addressed && !answered ? *addressed : newest;
-        log::info("{} turn ended ({}) without answering {}; replying anyway", describe(chat), ended, target);
-        if ((co_await reply_to({.reply = true, .target = target, .follow_up = replies > 0})).sent) ++replies;
+    // Blind comparisons only: she must say something.
+    if (must_speak && replies == 0 && ended != "the reply failed") {
+        log::info("{} turn ended ({}) without a reply; replying anyway", describe(chat), ended);
+        if ((co_await reply_to({.reply = true, .target = newest})).sent) ++replies;
     }
     if (replies == 0) {
         log::info("{} stays silent: {}", describe(chat), ended);
         note_silent(state.flow, now());
-        remember_decision(state, std::format("[{}] 没说话：{}", clock_of(started, settings.utc_offset_minutes), ended));
-        if (observer) observer(chat, {.reason = ended}, {});
+        if (observer) observer(chat, {.reason = ended, .analysis = last_analysis}, {});
     } else {
         log::info("{} ends the turn after {} repl{}: {}", describe(chat), replies, replies == 1 ? "y" : "ies", ended);
-        if (observer) observer(chat, {.follow_up = true, .reason = ended}, {});
+        if (observer) observer(chat, {.follow_up = true, .reason = ended, .analysis = last_analysis}, {});
     }
 }
 

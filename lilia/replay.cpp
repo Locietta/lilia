@@ -282,6 +282,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         co_return ++next_id;
     };
     responder.observer = [](const store::ChatKey &, const chat::Plan &plan, const std::vector<std::string> &) {
+        if (!plan.analysis.empty()) print(std::format("        ~ {}", plan.analysis));
         if (plan.wait > 0) {
             print(std::format("        · 等 {} 秒：{}", plan.wait, plan.reason));
         } else if (plan.repeat || plan.intent == "复读") {
@@ -372,7 +373,9 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         co_return 0;
     }
     while (next_line < lines.size()) {
-        if (const auto chat = feed(lines[next_line++])) {
+        // No timers here: lines held back by the idle backoff wait for the next line.
+        if (const auto chat = feed(lines[next_line++]);
+            chat && chat::should_plan(responder.chats[*chat].flow, responder.flow_settings(), responder.now())) {
             // As turn_worker: look again while messages left from the turn call for it.
             co_await responder.run_turn(*chat);
             auto &state = responder.chats[*chat];

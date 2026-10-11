@@ -28,9 +28,9 @@
     "admins": [],
     "name": "莉莉娅",
     "aliases": ["lilia", "莉莉娅"],
-    // How readily she joins conversations nobody addressed her in (0 = never).
-    "talk_value": 0.3,
-    "conversation_window_seconds": 300,
+    // How often the planner looks: every ceil(1/talk_value) new messages (1 =
+    // every batch, MaiBot's default; 0 = only when called). It decides whether she speaks.
+    "talk_value": 1,
     "debounce_seconds": 3,
     "alt_style_probability": 0.15,
     "typing_speed": 1.0,

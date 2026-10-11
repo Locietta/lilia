@@ -61,10 +61,10 @@ struct ModelConfig {
     std::string planner_api_key; ///< secret
     bool planner_bearer = false;
     std::string planner_thinking_off; ///< like writer_thinking_off
-    /// Force a tool call with tool_choice "any". Some models (e.g.
-    /// claude-sonnet-5-5) reject that; without it the prompt still asks for
-    /// a tool, and an answer without one counts as staying silent.
-    bool planner_force_tool = true;
+    /// Force a tool call with tool_choice "any". Off by default: the planner
+    /// writes a short analysis before its tool call (MaiBot's), which forcing
+    /// would prevent; an answer without a call counts as staying silent.
+    bool planner_force_tool = false;
     /// Tried in order when a planner call fails (outage, rate limit, a used-up
     /// subscription window). They get the planner's tool forcing and limits.
     std::vector<ModelFallback> planner_fallbacks;
@@ -141,14 +141,10 @@ struct ChatConfig {
     usize context_messages = 40;
     /// Byte budget for the rendered chat log; older lines are dropped first.
     usize context_bytes = 12'000;
-    /// 0..1, how readily she joins a conversation nobody addressed her in.
-    /// The planner looks every ceil(1/talk_value) messages; 0 disables.
-    double talk_value = 0.3;
-    /// After she speaks, every new message is considered for this long.
-    i64 conversation_window_seconds = 300;
-    /// Whom she answered counts as still talking with her for this long: their
-    /// messages always reach the planner, which is told the conversation goes on.
-    i64 partner_window_seconds = 900;
+    /// 0..1, how often the planner looks: every ceil(1/talk_value) new
+    /// messages (1, MaiBot's default: every batch); 0 only when called. It
+    /// always sees everything that came in; it decides whether she speaks.
+    double talk_value = 1;
     /// Wait for a burst of messages to end before deciding.
     u32 debounce_seconds = 3;
     /// Chance that one reply uses a random alternative style (e.g. one word).
