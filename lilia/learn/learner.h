@@ -13,11 +13,8 @@
 #include <lilia/onebot/types.h>
 #include <lilia/provider/history.h>
 #include <lilia/provider/provider.h>
+#include <lilia/retrieval/retriever.h>
 #include <lilia/store/store.h>
-
-namespace lilia::memory {
-struct Memory;
-} // namespace lilia::memory
 
 namespace lilia::learn {
 
@@ -128,9 +125,8 @@ std::optional<bool> parse_similar(const std::vector<provider::OutputItem> &items
 /// `b` == 0 (learned before chats were recorded) is shared everywhere.
 bool shares(const std::vector<std::vector<i64>> &groups, i64 a, i64 b);
 
-/// Indices of up to `limit` vectors chosen by maximal marginal relevance
-/// against `query` (lambda weighs relevance against variety).
-std::vector<usize> mmr(const std::vector<std::vector<float>> &vectors, const std::vector<float> &query, usize limit, double lambda);
+/// What a pattern is embedded as (MaiBot's form): "情景：…\n风格：…".
+std::string expression_text(std::string_view situation, std::string_view style);
 
 /// "以下黑话来自…" lines for the slang (is_jargon, with a meaning) that occurs
 /// in others' messages of `log`, at most `limit`; empty when none occurs.
@@ -194,8 +190,8 @@ struct Learner {
     /// Infers `term`'s meaning (context, word alone, comparison) and stores it.
     lighter::Task<> infer(store::Jargon term);
 
-    /// Embeds patterns without a vector of the current model (needs embedder).
-    lighter::Task<> embed_missing();
+    /// Every pattern as embedded (expression_text), for the startup backfill.
+    std::vector<std::string> embedded_texts();
 
     Clock now;
     const LearningConfig &config;
@@ -210,8 +206,8 @@ struct Learner {
     store::Store &store;
     provider::Provider provider;
     Spawn spawn;
-    /// Embeds patterns when set (the memory module's local service).
-    memory::Memory *embedder = nullptr;
+    /// Embeds new patterns when set (memory on).
+    retrieval::Retriever *retriever = nullptr;
     /// Chats whose high-frequency terms are kept: the ones she talks in, the
     /// only place they are used (the jargon reference).
     std::vector<i64> frequency_chats;

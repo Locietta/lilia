@@ -19,7 +19,6 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/log.h>
-#include <lilia/memory/memory.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
 
@@ -113,19 +112,6 @@ std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count
 }
 
 std::string embedding_text(const store::Sticker &sticker) { return std::format("{}：{}", sticker.tags, sticker.description); }
-
-std::vector<store::Sticker> rank(const std::vector<store::Sticker> &pool, const std::vector<float> &query,
-                                 const std::unordered_map<std::string, std::vector<float>> &vectors, usize count) {
-    std::vector<std::pair<double, const store::Sticker *>> scored;
-    for (const auto &sticker : pool) {
-        if (const auto it = vectors.find(sticker.sha1); it != vectors.end())
-            scored.emplace_back(memory::cosine(query, it->second), &sticker);
-    }
-    std::ranges::stable_sort(scored, std::greater<>{}, &std::pair<double, const store::Sticker *>::first);
-    std::vector<store::Sticker> out;
-    for (usize i = 0; i < scored.size() && i < count; ++i) out.push_back(*scored[i].second);
-    return out;
-}
 
 std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng) {
     std::vector<std::string_view> words;

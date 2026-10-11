@@ -1,7 +1,6 @@
 #include <cstdio>
 #include <random>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <lilia/onebot/message.h>
@@ -63,9 +62,7 @@ void test_finding() {
     require(found.size() == 2 && found[0].id == 2 && found[1].id == 3, "more words matched first, then the more popular");
     require(sticker::match(pool, "晚安", 2, rng).size() == 2, "nothing matched: a sample fills up");
 
-    const std::unordered_map<std::string, std::vector<float>> vectors{{"a", {1, 0}}, {"b", {0, 1}}, {"c", {0.6f, 0.8f}}};
-    const auto ranked = sticker::rank(pool, {0, 1}, vectors, 2);
-    require(ranked.size() == 2 && ranked[0].id == 2 && ranked[1].id == 3, "closest by embedding");
+    require(sticker::embedding_text(pool[1]) == "无语、震惊：猫瞪眼，配字\"啊？\"", "embedded as tags and description");
 
     require(sticker::parse_handle("s12") == 12 && sticker::parse_handle("#s3") == 3 && sticker::parse_handle(" 7 ") == 7 &&
                 !sticker::parse_handle("s1x") && !sticker::parse_handle("无语"),

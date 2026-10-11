@@ -6,41 +6,25 @@
 #include <vector>
 
 #include <lighter/async/runtime/task.h>
-#include <lighter/http/client.h>
 
 #include <lilia/config.h>
 #include <lilia/provider/history.h>
 #include <lilia/provider/provider.h>
 #include <lilia/error.h>
+#include <lilia/retrieval/retriever.h>
 #include <lilia/store/store.h>
 
 namespace lilia::memory {
 
 // Long-term memory, part one: searchable history of the allowed chats.
-// Consecutive messages are grouped into small chunks, embedded by a local
-// model (deployment/embedding) and stored with the model's name; a search
-// ranks a chat's chunks by cosine similarity, with a small bonus for literal
-// keyword hits. Chunks of another model are dropped and rebuilt.
+// Consecutive messages are grouped into small chunks; a search ranks a
+// chat's chunks and summaries by meaning and by keywords (retrieval/), the
+// newer a little higher.
 
 struct Hit {
     store::MemoryChunk chunk;
-    double score = 0;
+    double score = 0; ///< similarity to the query
 };
-
-/// Raw little-endian float32, as stored in memory_chunks.vector.
-std::string encode_vector(const std::vector<float> &vector);
-std::vector<float> decode_vector(std::string_view bytes);
-
-/// Cosine similarity; 0 when either side is empty or the sizes differ.
-double cosine(const std::vector<float> &a, const std::vector<float> &b);
-
-/// Words for the literal bonus: runs of CJK (2+ characters) or ASCII letters
-/// and digits (2+), split at spaces and punctuation.
-std::vector<std::string> keywords(std::string_view query);
-
-/// The best `limit` chunks scoring at least `min_score`, best first.
-std::vector<Hit> rank(std::vector<store::MemoryChunk> chunks, const std::vector<float> &query, const std::vector<std::string> &words,
-                      usize limit, double min_score);
 
 /// Splits messages (oldest first) into chunks of at most `size`, starting a
 /// new chunk at gaps of `gap_seconds`. The last group is complete only when
@@ -105,15 +89,15 @@ std::optional<SummaryResult> parse_summary(const std::vector<provider::OutputIte
 /// "[10-05 21:00 至 22:30 的聊天摘要] ..." as a rankable chunk.
 store::MemoryChunk summary_chunk(const store::ChatSummary &summary, i32 utc_offset_minutes);
 
-/// The concatenated cue vectors of a summary, split by `dimensions`.
-std::vector<std::vector<float>> split_vectors(std::string_view bytes, usize dimensions);
+/// What a summary is found by: the summary, then each recall cue.
+std::vector<std::string> summary_texts(const store::ChatSummary &summary);
 
 struct Memory {
-    Memory(const MemoryConfig &config, std::string self_name, i32 utc_offset_minutes, store::Store &store);
+    Memory(const MemoryConfig &config, std::string self_name, i32 utc_offset_minutes, store::Store &store, retrieval::Retriever &retriever);
 
-    /// Embeds `texts` through the OpenAI-compatible embeddings endpoint
-    /// (embedding_url + embedding_path).
-    lighter::Task<Result<std::vector<std::vector<float>>>> embed(std::vector<std::string> texts);
+    /// Everything memory has embedded (chunks, summaries and cues, facts),
+    /// for the startup backfill.
+    std::vector<std::string> embedded_texts();
 
     /// Chunks and embeds the messages of `chat` not covered yet (the whole
     /// history the first time). Calls for a chat while one runs are merged.
@@ -146,7 +130,7 @@ struct Memory {
     std::string self_name;
     i32 utc_offset_minutes;
     store::Store &store;
-    lighter::http::Client http;
+    retrieval::Retriever &retriever;
     /// Writes summaries; null leaves summarizing off.
     std::optional<provider::Provider> summarizer;
     std::string summarizer_model;

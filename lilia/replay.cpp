@@ -18,6 +18,7 @@
 #include <lilia/chat/responder.h>
 #include <lilia/learn/learner.h>
 #include <lilia/memory/memory.h>
+#include <lilia/retrieval/retriever.h>
 #include <lilia/onebot/message.h>
 #include <lilia/onebot/session.h>
 #include <lilia/provider/anthropic.h>
@@ -214,14 +215,14 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             std::fprintf(stderr, "%s\n", rows.error().message().c_str());
             co_return 1;
         }
+        std::vector<std::string> hashes;
         for (const auto &row : *rows) {
-            i64 id = 0;
-            for (i64 i = 0; i < row.count; ++i) {
-                if (auto added = store->learn_expression(row.chat, row.situation, row.style, row.last_active); added.has_value())
-                    id = *added;
-            }
-            if (id != 0 && !row.vector.empty()) std::ignore = store->set_expression_vector(id, row.model, row.vector);
+            for (i64 i = 0; i < row.count; ++i) std::ignore = store->learn_expression(row.chat, row.situation, row.style, row.last_active);
+            hashes.push_back(retrieval::text_hash(learn::expression_text(row.situation, row.style)));
         }
+        // Their vectors too, so a replay does not embed them again.
+        const auto profile = retrieval::profile_of(config.memory);
+        if (auto vectors = source->embeddings(profile, hashes); vectors.has_value()) std::ignore = store->add_embeddings(profile, *vectors);
         print(std::format("(载入 {} 条学来的说法)", rows->size()));
     }
 
@@ -252,10 +253,15 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             std::fprintf(stderr, "%s\n", pool.error().message().c_str());
             co_return 1;
         }
+        std::vector<std::string> hashes;
         for (auto sticker : *pool) {
             sticker.path = (stickers->parent_path() / sticker.path).string(); // absolute: read from the live data dir
             std::ignore = store->add_sticker(sticker);
+            hashes.push_back(retrieval::text_hash(sticker::embedding_text(sticker)));
         }
+        // Their vectors too, so a replay does not embed the pool again.
+        const auto profile = retrieval::profile_of(config.memory);
+        if (auto vectors = source->embeddings(profile, hashes); vectors.has_value()) std::ignore = store->add_embeddings(profile, *vectors);
         responder.stickers = &collector;
         print(std::format("(载入 {} 个表情包)", pool->size()));
     }
@@ -265,7 +271,8 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     const i64 base = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     i64 sim = 0;
     responder.now = [&sim, base] { return base + sim; };
-    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
+    retrieval::Retriever retriever(config.memory, *store);
+    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store, retriever);
     if (config.memory.enabled) {
         memory.now = [&sim, base] { return base + sim; };
         memory.summarizer = make_learner(config.model);
@@ -463,8 +470,8 @@ Task<int> learn_history(Config config, std::vector<i64> groups, usize count, std
     learn::Learner learner(config.learning, config.chat.name, config.chat.aliases, *store, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     learner.frequency_chats = config.chat.groups;
-    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
-    if (config.memory.enabled) learner.embedder = &memory;
+    retrieval::Retriever retriever(config.memory, *store);
+    if (config.memory.enabled) learner.retriever = &retriever;
     const usize batch = std::max<usize>(config.learning.batch_messages, 2);
     const i32 offset = config.chat.utc_offset_minutes;
 

@@ -102,17 +102,18 @@ store::MemoryChunk summary_chunk(const store::ChatSummary &summary, i32 utc_offs
         .end_time = summary.end_time,
         .text = std::format("[{} 至 {} 的聊天摘要] {}\n", local_time(summary.start_time, utc_offset_minutes),
                             local_time(summary.end_time, utc_offset_minutes), summary.summary),
-        .model = summary.model,
-        .vector = summary.vector,
     };
 }
 
-std::vector<std::vector<float>> split_vectors(std::string_view bytes, usize dimensions) {
-    std::vector<std::vector<float>> vectors;
-    const usize size = dimensions * sizeof(float);
-    if (size == 0) return vectors;
-    for (usize offset = 0; offset + size <= bytes.size(); offset += size) vectors.push_back(decode_vector(bytes.substr(offset, size)));
-    return vectors;
+std::vector<std::string> summary_texts(const store::ChatSummary &summary) {
+    if (summary.summary.empty()) return {};
+    std::vector<std::string> texts{summary.summary};
+    for (usize start = 0; start < summary.cues.size();) {
+        const auto end = std::min(summary.cues.find('\n', start), summary.cues.size());
+        if (end > start) texts.push_back(summary.cues.substr(start, end - start));
+        start = end + 1;
+    }
+    return texts;
 }
 
 Task<> Memory::summarize(store::ChatKey chat) {
@@ -166,26 +167,14 @@ Task<> Memory::summarize(store::ChatKey chat) {
             .start_time = messages->front().time,
             .end_time = messages->back().time,
             .summary = result->summary,
-            .model = config.embedding_model,
         };
-        if (!result->summary.empty()) {
-            std::vector<std::string> texts{result->summary};
-            texts.insert(texts.end(), result->cues.begin(), result->cues.end());
-            auto vectors = co_await embed(texts);
-            if (vectors.has_error() || vectors->size() != texts.size()) {
-                log::warn("memory: cannot embed a summary; will retry");
-                co_return;
-            }
-            summary.vector = encode_vector(vectors->front());
-            for (usize i = 1; i < vectors->size(); ++i) {
-                summary.cues += (i > 1 ? "\n" : "") + result->cues[i - 1];
-                summary.cue_vectors += encode_vector((*vectors)[i]);
-            }
-        }
+        for (usize i = 0; i < result->cues.size(); ++i) summary.cues += (i ? "\n" : "") + result->cues[i];
         if (auto added = store.add_summary(summary); added.has_error()) {
             log::error("memory: {}", added.error().message());
             co_return;
         }
+        // Embedded now; one that fails is embedded by the next recall or backfill.
+        std::ignore = co_await retriever.backfill(summary_texts(summary));
         log::info("memory: summary of {}:{} ({} messages): {}", chat.type, chat.id, messages->size(),
                   result->summary.empty() ? "(nothing new)" : result->summary);
     }
@@ -198,31 +187,21 @@ Task<std::string> Memory::recall(store::ChatKey chat, std::vector<store::StoredM
     // Only summaries that have scrolled out of view are worth bringing back.
     const i64 first_visible = log.front().row_id;
     std::erase_if(*summaries, [&](const store::ChatSummary &summary) {
-        return summary.summary.empty() || summary.model != config.embedding_model ||
-               (first_visible > 0 && summary.last_row >= first_visible);
+        return summary.summary.empty() || (first_visible > 0 && summary.last_row >= first_visible);
     });
     if (summaries->empty()) co_return std::string();
 
     const std::vector<store::StoredMessage> recent(log.end() - static_cast<std::ptrdiff_t>(std::min(log.size(), config.recall_messages)),
                                                    log.end());
-    auto vectors = co_await embed({embed_text(recent, self_name)});
-    if (vectors.has_error() || vectors->empty()) co_return std::string();
-    const auto &query = vectors->front();
-
-    const store::ChatSummary *best = nullptr;
-    double best_score = 0;
-    for (const auto &summary : *summaries) {
-        double score = cosine(decode_vector(summary.vector), query);
-        for (const auto &cue : split_vectors(summary.cue_vectors, query.size())) score = std::max(score, cosine(cue, query));
-        if (score > best_score) {
-            best_score = score;
-            best = &summary;
-        }
-    }
-    log::debug("memory: recall best {:.2f} in {}:{}", best_score, chat.type, chat.id);
-    if (!best || best_score < config.recall_score) co_return std::string();
-    log::info("memory: recalled a summary of {}:{} ({:.2f})", chat.type, chat.id, best_score);
-    co_return summary_chunk(*best, utc_offset_minutes).text;
+    std::vector<retrieval::Document> documents;
+    for (const auto &summary : *summaries) documents.push_back({.id = summary.id, .texts = summary_texts(summary)});
+    // MaiBot's mid-term recall: the summary whose best cue matches the chat.
+    const auto matches = co_await retriever.search(retrieval::k_recall_task, embed_text(recent, self_name), documents,
+                                                   {.top_k = 1, .min_similarity = config.recall_score});
+    if (matches.empty()) co_return std::string();
+    const auto &best = (*summaries)[matches.front().index];
+    log::info("memory: recalled a summary of {}:{} ({:.2f})", chat.type, chat.id, matches.front().similarity.value_or(0));
+    co_return summary_chunk(best, utc_offset_minutes).text;
 }
 
 } // namespace lilia::memory

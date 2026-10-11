@@ -137,21 +137,17 @@ Task<bool> Memory::remember(store::PersonFact fact, bool replace) {
         co_return false;
     }
     if (std::ranges::any_of(*existing, [&](const store::PersonFact &known) { return known.fact == fact.fact; })) co_return false;
-    auto vectors = co_await embed({fact.fact});
-    if (vectors.has_error() || vectors->empty()) {
-        log::warn("memory: cannot embed a fact: {}", vectors.has_error() ? vectors.error().message() : "no vector");
-        co_return false;
+    std::vector<std::string> known_texts;
+    for (const auto &known : *existing) known_texts.push_back(known.fact);
+    // Without a vector there is no telling a rephrased duplicate apart.
+    const auto alike = co_await retriever.similarities(fact.fact, std::move(known_texts));
+    if (!alike) co_return false;
+    for (usize i = 0; i < existing->size(); ++i) {
+        if ((*alike)[i] < config.duplicate_fact_score) continue;
+        if (!replace) co_return false;
+        log::info("memory: {} replaces \"{}\"", fact.fact, (*existing)[i].fact);
+        std::ignore = store.delete_fact((*existing)[i].id);
     }
-    const auto &vector = vectors->front();
-    for (const auto &known : *existing) {
-        if (known.model == config.embedding_model && cosine(decode_vector(known.vector), vector) >= config.duplicate_fact_score) {
-            if (!replace) co_return false;
-            log::info("memory: {} replaces \"{}\"", fact.fact, known.fact);
-            std::ignore = store.delete_fact(known.id);
-        }
-    }
-    fact.model = config.embedding_model;
-    fact.vector = encode_vector(vector);
     if (auto added = store.add_fact(fact); added.has_error()) {
         log::error("memory: {}", added.error().message());
         co_return false;
@@ -166,16 +162,11 @@ Task<std::string> Memory::self_notes(i64 self_id, std::string context, usize lim
     std::vector<usize> picked;
     for (usize i = 0; i < facts->size() && i < k_newest_self_facts; ++i) picked.push_back(i);
     if (facts->size() > picked.size()) {
-        if (auto vectors = co_await embed({std::move(context)}); vectors.has_value() && !vectors->empty()) {
-            std::vector<std::pair<double, usize>> scored;
-            for (usize i = 0; i < facts->size(); ++i) {
-                const auto &fact = (*facts)[i];
-                if (fact.model == config.embedding_model) scored.emplace_back(cosine(decode_vector(fact.vector), vectors->front()), i);
-            }
-            std::ranges::sort(scored, std::greater<>{});
-            for (usize k = 0; k < scored.size() && k < limit; ++k) {
-                if (!std::ranges::contains(picked, scored[k].second)) picked.push_back(scored[k].second);
-            }
+        std::vector<retrieval::Document> documents;
+        for (const auto &fact : *facts) documents.push_back({.id = fact.id, .texts = {fact.fact}});
+        const auto matches = co_await retriever.search(retrieval::k_self_task, std::move(context), documents, {.top_k = limit});
+        for (const auto &match : matches) {
+            if (!std::ranges::contains(picked, match.index)) picked.push_back(match.index);
         }
     }
     std::ranges::sort(picked, std::greater<>{}); // oldest first

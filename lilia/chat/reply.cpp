@@ -76,23 +76,15 @@ Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, 
 
     std::vector<store::Expression> candidates;
     if (r->memory) {
-        std::vector<const store::Expression *> embedded;
-        std::vector<std::vector<float>> vectors;
-        for (const auto &row : *rows) {
-            if (row.vector.empty() || row.model != r->memory->config.embedding_model) continue;
-            embedded.push_back(&row);
-            vectors.push_back(memory::decode_vector(row.vector));
-        }
-        if (embedded.size() >= k_min_candidates) {
-            std::string query = std::format("表达选择意图：{}\n要回应的消息：{}\n最近的聊天：\n", intent, target.text);
-            for (usize i = recent.size() > 3 ? recent.size() - 3 : 0; i < recent.size(); ++i) query += recent[i] + "\n";
-            auto embedded_query = co_await r->memory->embed({query});
-            if (embedded_query.has_value() && !embedded_query->empty()) {
-                for (const auto index : learn::mmr(vectors, embedded_query->front(), learning.candidates, k_mmr_lambda)) {
-                    candidates.push_back(*embedded[index]);
-                }
-            }
-        }
+        // MaiBot's expression retrieval: by meaning, MMR for variety.
+        std::vector<retrieval::Document> documents;
+        for (const auto &row : *rows) documents.push_back({.id = row.id, .texts = {learn::expression_text(row.situation, row.style)}});
+        std::string query = std::format("{}\n要回应的消息：{}\n最近的聊天：\n", intent, target.text);
+        for (usize i = recent.size() > 3 ? recent.size() - 3 : 0; i < recent.size(); ++i) query += recent[i] + "\n";
+        const auto matches = co_await r->memory->retriever.search(retrieval::k_expression_task, std::move(query), documents,
+                                                                  {.top_k = learning.candidates, .mmr_lambda = k_mmr_lambda});
+        for (const auto &match : matches) candidates.push_back((*rows)[match.index]);
+        if (candidates.size() < k_min_candidates) candidates.clear();
     }
     if (candidates.empty()) candidates = sample_fallback(*std::move(rows), r->rng);
     if (candidates.empty()) co_return std::vector<std::string>{};

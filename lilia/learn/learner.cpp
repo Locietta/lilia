@@ -27,7 +27,6 @@
 #include <lilia/chat/delivery.h>
 #include <lilia/learn/frequency.h>
 #include <lilia/log.h>
-#include <lilia/memory/memory.h>
 #include <lilia/onebot/message.h>
 
 namespace lilia::learn {
@@ -47,7 +46,6 @@ constexpr usize k_max_jargon_code_points = 12;
 constexpr usize k_evidence_radius = 3;
 constexpr std::array<i64, 4> k_inference_thresholds{4, 8, 25, 100};
 constexpr i64 k_complete_count = 100;
-constexpr usize k_embed_batch = 16;
 constexpr std::chrono::seconds k_call_deadline{90};
 
 std::string_view trim(std::string_view text) {
@@ -453,31 +451,6 @@ bool shares(const std::vector<std::vector<i64>> &groups, i64 a, i64 b) {
     });
 }
 
-std::vector<usize> mmr(const std::vector<std::vector<float>> &vectors, const std::vector<float> &query, usize limit, double lambda) {
-    std::vector<double> relevance;
-    for (const auto &vector : vectors) relevance.push_back(memory::cosine(vector, query));
-    std::vector<usize> chosen;
-    std::vector<bool> taken(vectors.size(), false);
-    while (chosen.size() < std::min(limit, vectors.size())) {
-        usize best = vectors.size();
-        double best_score = -1e9;
-        for (usize i = 0; i < vectors.size(); ++i) {
-            if (taken[i]) continue;
-            double redundancy = 0;
-            for (const auto j : chosen) redundancy = std::max(redundancy, memory::cosine(vectors[i], vectors[j]));
-            const double score = lambda * relevance[i] - (1 - lambda) * redundancy;
-            if (score > best_score) {
-                best_score = score;
-                best = i;
-            }
-        }
-        if (best == vectors.size()) break;
-        taken[best] = true;
-        chosen.push_back(best);
-    }
-    return chosen;
-}
-
 namespace {
 
 /// A meaning up to its first full stop or line break: older inferences ran
@@ -676,11 +649,11 @@ Task<std::optional<std::vector<provider::OutputItem>>> run_call(Learner *learner
     co_return std::move(items);
 }
 
-std::string embedding_text(std::string_view situation, std::string_view style) {
+} // namespace
+
+std::string expression_text(std::string_view situation, std::string_view style) {
     return std::format("情景：{}\n风格：{}", situation, style);
 }
-
-} // namespace
 
 Task<std::optional<std::vector<Rejected>>> Learner::review(i64 group, const std::vector<Learned> &learned) {
     if (learned.empty()) co_return std::vector<Rejected>{};
@@ -727,7 +700,7 @@ Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
             // Nothing is stored unless the review passes it; a failed review keeps nothing.
             const auto rejected = co_await review(group, *extracted);
             if (rejected) {
-                std::vector<std::pair<i64, std::string>> to_embed;
+                std::vector<std::string> to_embed;
                 for (usize i = 0; i < extracted->size(); ++i) {
                     const auto &pattern = (*extracted)[i];
                     const auto verdict = std::ranges::find(*rejected, i, &Rejected::index);
@@ -745,20 +718,10 @@ Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
                         log::error("cannot store expression: {}", id.error().message());
                         continue;
                     }
-                    to_embed.emplace_back(*id, embedding_text(pattern.situation, pattern.style));
+                    to_embed.push_back(expression_text(pattern.situation, pattern.style));
                     stored.push_back(pattern);
                 }
-                if (embedder && !to_embed.empty()) {
-                    std::vector<std::string> texts;
-                    for (const auto &[id, text] : to_embed) texts.push_back(text);
-                    auto vectors = co_await embedder->embed(std::move(texts));
-                    if (vectors.has_value() && vectors->size() == to_embed.size()) {
-                        for (usize i = 0; i < to_embed.size(); ++i) {
-                            std::ignore = store.set_expression_vector(to_embed[i].first, embedder->config.embedding_model,
-                                                                      memory::encode_vector((*vectors)[i]));
-                        }
-                    }
-                }
+                if (retriever && !to_embed.empty()) std::ignore = co_await retriever->backfill(std::move(to_embed));
             }
             log::info("learned {} expression(s) from {} lines ({} extracted, {} rejected by review)", stored.size(), lines.size(),
                       extracted->size(), extracted->size() - stored.size());
@@ -832,28 +795,12 @@ Task<> Learner::infer(store::Jargon term) {
               jargon ? ": " + first->meaning : "");
 }
 
-Task<> Learner::embed_missing() {
-    if (!embedder) co_return;
-    auto rows = store.expressions(0);
-    if (rows.has_error()) co_return;
-    std::vector<store::Expression> missing;
-    for (auto &row : *rows) {
-        if (row.vector.empty() || row.model != embedder->config.embedding_model) missing.push_back(std::move(row));
+std::vector<std::string> Learner::embedded_texts() {
+    std::vector<std::string> texts;
+    if (auto rows = store.expressions(0); rows.has_value()) {
+        for (const auto &row : *rows) texts.push_back(expression_text(row.situation, row.style));
     }
-    usize done = 0;
-    for (usize start = 0; start < missing.size(); start += k_embed_batch) {
-        const usize end = std::min(missing.size(), start + k_embed_batch);
-        std::vector<std::string> texts;
-        for (usize i = start; i < end; ++i) texts.push_back(embedding_text(missing[i].situation, missing[i].style));
-        auto vectors = co_await embedder->embed(std::move(texts));
-        if (vectors.has_error() || vectors->size() != end - start) break;
-        for (usize i = start; i < end; ++i) {
-            std::ignore =
-                store.set_expression_vector(missing[i].id, embedder->config.embedding_model, memory::encode_vector((*vectors)[i - start]));
-            ++done;
-        }
-    }
-    if (done > 0) log::info("learning: embedded {} expression(s)", done);
+    return texts;
 }
 
 } // namespace lilia::learn

@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <lilia/error.h>
@@ -70,8 +71,9 @@ struct MediaRecord {
     std::string description;
 };
 
-/// A few consecutive messages of one chat with their embedding, for memory
-/// search. `vector` is raw little-endian float32, as produced by `model`.
+/// A few consecutive messages of one chat, for memory search. `text` is
+/// shown ("[10-05 21:03] 名字: 内容" lines); `search_text` is embedded and
+/// keyword-indexed (the same lines without times).
 struct MemoryChunk {
     i64 id = 0;
     ChatKey chat;
@@ -80,15 +82,12 @@ struct MemoryChunk {
     i64 start_time = 0;
     i64 end_time = 0;
     std::string text;
-    std::string model;
-    std::string vector;
-    /// 0..1, how recent; set at search time, never stored.
-    double recency = 0;
+    std::string search_text;
 };
 
 /// An incremental summary of a stretch of chat (empty `summary`: nothing
 /// worth keeping, a checkpoint only). `cues` are newline-separated recall
-/// cues; `cue_vectors` their embeddings, concatenated like `vector`.
+/// cues.
 struct ChatSummary {
     i64 id = 0;
     ChatKey chat;
@@ -98,9 +97,6 @@ struct ChatSummary {
     i64 end_time = 0;
     std::string summary;
     std::string cues;
-    std::string model;
-    std::string vector;
-    std::string cue_vectors;
 };
 
 /// A sticker seen in any group. `status`: "pending" (not described yet),
@@ -123,7 +119,7 @@ struct Sticker {
 };
 
 /// A stable fact about a person, quoted from their own message. `fact` is
-/// written about "TA"; `vector` as in MemoryChunk.
+/// written about "TA".
 struct PersonFact {
     i64 id = 0;
     i64 person_id = 0; ///< QQ number
@@ -132,8 +128,6 @@ struct PersonFact {
     ChatKey chat;
     i64 message_id = 0;
     i64 time = 0;
-    std::string model;
-    std::string vector;
 };
 
 /// A learned expression pattern: 当 situation 时，可以 style. `chat` is where
@@ -150,8 +144,6 @@ struct Expression {
     i64 last_active = 0;  ///< learned or selected
     bool checked = false; ///< approved by a person
     std::string modified_by = "AI";
-    std::string model; ///< embedding model of `vector`
-    std::string vector;
 };
 
 /// One verdict of the learning review: "kept", "rejected" or "rescued".
@@ -261,8 +253,6 @@ struct Store {
     /// Returns its id.
     Result<i64> learn_expression(const ChatKey &chat, std::string_view situation, std::string_view style, i64 now);
 
-    Result<void> set_expression_vector(i64 id, std::string_view model, std::string_view vector);
-
     /// Marks patterns as selected now.
     Result<void> touch_expressions(const std::vector<i64> &ids, i64 now);
 
@@ -318,14 +308,14 @@ struct Store {
 
     Result<void> add_chunk(const MemoryChunk &chunk);
 
-    /// The last message row covered by chunks of `model` in `chat` (0: none).
-    Result<i64> last_chunk_row(const ChatKey &chat, std::string_view model);
+    /// The last message row covered by chunks of `chat` (0: none).
+    Result<i64> last_chunk_row(const ChatKey &chat);
 
-    /// All chunks of `chat` made by `model`, oldest first.
-    Result<std::vector<MemoryChunk>> chunks(const ChatKey &chat, std::string_view model);
+    /// All chunks of `chat`, oldest first.
+    Result<std::vector<MemoryChunk>> chunks(const ChatKey &chat);
 
-    /// Drops chunks embedded by any other model (their vectors are not comparable).
-    Result<void> delete_chunks_except(std::string_view model);
+    /// The search text of every chunk of every chat (for the embedding backfill).
+    Result<std::vector<std::string>> search_texts();
 
     Result<void> add_summary(const ChatSummary &summary);
 
@@ -334,6 +324,9 @@ struct Store {
 
     /// Summaries of `chat`, oldest first; `limit` > 0 keeps only the newest.
     Result<std::vector<ChatSummary>> summaries(const ChatKey &chat, usize limit);
+
+    /// Every summary of every chat.
+    Result<std::vector<ChatSummary>> all_summaries();
 
     /// The sticker with this content hash, if known.
     Result<std::optional<Sticker>> sticker_by_hash(std::string_view sha1);
@@ -351,7 +344,20 @@ struct Store {
     /// Facts about `person_id`, newest first; `limit` 0 returns all.
     Result<std::vector<PersonFact>> facts(i64 person_id, usize limit);
 
+    /// Every fact about everyone.
+    Result<std::vector<PersonFact>> all_facts();
+
     Result<void> delete_fact(i64 id);
+
+    /// Stored vectors of `profile` for these text hashes: (hash, raw
+    /// little-endian float32) for each one found.
+    Result<std::vector<std::pair<std::string, std::string>>> embeddings(std::string_view profile, const std::vector<std::string> &hashes);
+
+    /// Stores (hash, vector) rows under `profile`, in one transaction.
+    Result<void> add_embeddings(std::string_view profile, const std::vector<std::pair<std::string, std::string>> &rows);
+
+    /// Drops vectors of every other profile (another model); returns how many.
+    Result<i64> delete_embeddings_except(std::string_view profile);
 
     /// The stretch of `group_id` already learned from; nullopt when none.
     Result<std::optional<LearnedSpan>> learned_span(i64 group_id);

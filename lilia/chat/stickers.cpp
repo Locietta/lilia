@@ -14,16 +14,6 @@ namespace lilia::chat {
 using lighter::Task;
 using namespace detail;
 
-namespace {
-
-/// Stickers embedded per request when the pool is first searched.
-constexpr usize k_embed_batch = 32;
-
-/// How the query is put to an instruction-tuned embedding model.
-constexpr std::string_view k_sticker_instruction = "根据想表达的情绪或反应，找出合适的表情包";
-
-} // namespace
-
 namespace detail {
 
 bool stickers_ready(Responder *r) {
@@ -36,32 +26,17 @@ Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feelin
     auto pool = r->stickers ? r->store.stickers("registered") : Result<std::vector<store::Sticker>>(std::vector<store::Sticker>{});
     if (pool.has_error() || pool->empty()) co_return std::vector<store::Sticker>{};
     const usize count = std::max<usize>(r->config.stickers.candidates, 1);
-    if (r->memory) {
-        // Stickers are embedded once per process (the pool changes slowly).
-        auto &vectors = r->stickers->vectors;
-        std::vector<const store::Sticker *> missing;
-        for (const auto &sticker : *pool) {
-            if (!vectors.contains(sticker.sha1)) missing.push_back(&sticker);
-        }
-        for (usize start = 0; start < missing.size(); start += k_embed_batch) {
-            const usize end = std::min(missing.size(), start + k_embed_batch);
-            std::vector<std::string> texts;
-            for (usize i = start; i < end; ++i) texts.push_back(sticker::embedding_text(*missing[i]));
-            auto embedded = co_await r->memory->embed(std::move(texts));
-            if (embedded.has_error() || embedded->size() != end - start) {
-                log::warn("stickers: embedding failed: {}", embedded.has_error() ? embedded.error().message() : "wrong number of vectors");
-                break;
-            }
-            for (usize i = start; i < end; ++i) vectors[missing[i]->sha1] = std::move((*embedded)[i - start]);
-        }
-        const auto &instruction = r->memory->config.query_instruction;
-        auto query = co_await r->memory->embed(
-            {instruction.empty() ? feeling : std::format("Instruct: {}\nQuery: {}", k_sticker_instruction, feeling)});
-        if (query.has_value() && !query->empty()) {
-            if (auto ranked = sticker::rank(*pool, query->front(), vectors, count); !ranked.empty()) co_return ranked;
-        }
+    if (!r->memory) co_return sticker::match(*std::move(pool), feeling, count, r->rng);
+    std::vector<retrieval::Document> documents;
+    for (const auto &sticker : *pool) {
+        documents.push_back(
+            {.id = sticker.id, .texts = {sticker::embedding_text(sticker)}, .lexical = sticker.tags + " " + sticker.description});
     }
-    co_return sticker::match(*std::move(pool), feeling, count, r->rng);
+    const auto matches =
+        co_await r->memory->retriever.search(retrieval::k_sticker_task, std::move(feeling), documents, {.top_k = count, .lexical = true});
+    std::vector<store::Sticker> found;
+    for (const auto &match : matches) found.push_back((*pool)[match.index]);
+    co_return found;
 }
 
 Task<bool> send_sticker(Responder *r, store::ChatKey chat, store::Sticker sticker) {

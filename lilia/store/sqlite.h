@@ -40,6 +40,9 @@ struct Statement {
     /// Runs to completion, ignoring result rows.
     Result<void> run();
 
+    /// Ready to run again, with fresh bindings.
+    void reset();
+
     i64 column_int(int index) const;
     double column_double(int index) const;
     std::string column_text(int index) const;
@@ -67,6 +70,9 @@ struct Database {
 
     Result<Statement> prepare(std::string_view sql);
     Result<void> execute(std::string_view sql);
+
+    /// Rows changed by the last INSERT, UPDATE or DELETE.
+    i64 changes() const;
 
     Error error(std::string_view action, int code) const;
 

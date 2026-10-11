@@ -3,7 +3,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,6 +29,8 @@
 #include <lilia/log.h>
 #include <lilia/onebot/session.h>
 #include <lilia/replay.h>
+#include <lilia/retrieval/retriever.h>
+#include <lilia/sticker/sticker.h>
 #include <lilia/store/store.h>
 
 namespace {
@@ -105,6 +109,29 @@ Task<> supervise(const Config &config, chat::Responder &responder) {
     }
 }
 
+/// Embeds what memory, learning and the sticker pool hold under the current
+/// profile (everything, after a model change), then drops other profiles.
+Task<> backfill(retrieval::Retriever &retriever, memory::Memory &memory, learn::Learner *learner, store::Store &store, bool stickers) {
+    auto texts = memory.embedded_texts();
+    if (learner) std::ranges::move(learner->embedded_texts(), std::back_inserter(texts));
+    if (auto pool = stickers ? store.stickers("registered") : Result<std::vector<store::Sticker>>(std::vector<store::Sticker>{});
+        pool.has_value()) {
+        for (const auto &sticker : *pool) texts.push_back(sticker::embedding_text(sticker));
+    }
+    const auto started = std::chrono::steady_clock::now();
+    const usize total = texts.size();
+    const auto missing = co_await retriever.backfill(std::move(texts));
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    log::info("retrieval: {} text(s) ready under {} in {} ms{}", total - missing, retriever.profile, took.count(),
+              missing ? std::format(", {} not embedded", missing) : "");
+    if (missing > 0) co_return;
+    if (auto dropped = store.delete_embeddings_except(retriever.profile); dropped.has_error()) {
+        log::error("retrieval: {}", dropped.error().message());
+    } else if (*dropped > 0) {
+        log::info("retrieval: dropped {} vector(s) of other models", *dropped);
+    }
+}
+
 Task<int> run_app(const Config &config) {
     const std::filesystem::path data_dir = config.data_dir;
     auto store = store::Store::open(data_dir / "lilia.db");
@@ -137,17 +164,14 @@ Task<int> run_app(const Config &config) {
         }
         responder.stickers = &collector;
     }
-    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store);
+    retrieval::Retriever retriever(config.memory, *store);
+    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store, retriever);
     if (config.memory.enabled) {
         responder.memory = &memory;
         memory.summarizer = make_learner(config.model);
         memory.summarizer_model = config.model.helper();
-        // Expressions are embedded for retrieval; catch up on older ones.
-        learner.embedder = &memory;
-        if (config.learning.enabled) tasks.spawn(learner.embed_missing());
-        // Vectors of another model are not comparable; drop them and rebuild.
-        if (auto dropped = store->delete_chunks_except(config.memory.embedding_model); dropped.has_error())
-            log::error("memory: {}", dropped.error().message());
+        learner.retriever = &retriever;
+        tasks.spawn(backfill(retriever, memory, config.learning.enabled ? &learner : nullptr, *store, config.stickers.enabled));
         for (const auto group : config.chat.groups) tasks.spawn(memory.index({.type = "group", .id = group}));
         for (const auto user : config.chat.private_users) tasks.spawn(memory.index({.type = "private", .id = user}));
     }

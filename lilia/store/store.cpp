@@ -1,6 +1,7 @@
 #include "store.h"
 
 #include <algorithm>
+#include <array>
 #include <format>
 #include <utility>
 
@@ -12,8 +13,9 @@ namespace {
 
 // 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
 // 6: person_facts. 7: chat_summaries. 8: stickers. 9: expressions per chat
-// (rebuilt), expression_reviews, jargon.
-constexpr int k_schema_version = 11;
+// (rebuilt), expression_reviews, jargon. 12: embeddings in their own table
+// (keyed by profile and text hash), memory_chunks.search_text.
+constexpr int k_schema_version = 12;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -28,8 +30,6 @@ CREATE TABLE expressions (
     last_active INTEGER NOT NULL,
     checked INTEGER NOT NULL DEFAULT 0,
     modified_by TEXT NOT NULL DEFAULT 'AI',
-    model TEXT NOT NULL DEFAULT '',
-    vector BLOB NOT NULL DEFAULT x'',
     UNIQUE (chat_type, chat_id, style)
 );
 )sql";
@@ -158,10 +158,9 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     start_time INTEGER NOT NULL,
     end_time INTEGER NOT NULL,
     text TEXT NOT NULL,
-    model TEXT NOT NULL,
-    vector BLOB NOT NULL
+    search_text TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS memory_chunks_by_chat ON memory_chunks (chat_type, chat_id, model, last_row);
+CREATE INDEX IF NOT EXISTS memory_chunks_by_row ON memory_chunks (chat_type, chat_id, last_row);
 
 CREATE TABLE IF NOT EXISTS person_facts (
     id INTEGER PRIMARY KEY,
@@ -171,9 +170,7 @@ CREATE TABLE IF NOT EXISTS person_facts (
     chat_type TEXT NOT NULL,
     chat_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
-    time INTEGER NOT NULL,
-    model TEXT NOT NULL,
-    vector BLOB NOT NULL
+    time INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS person_facts_by_person ON person_facts (person_id, time);
 
@@ -186,10 +183,7 @@ CREATE TABLE IF NOT EXISTS chat_summaries (
     start_time INTEGER NOT NULL,
     end_time INTEGER NOT NULL,
     summary TEXT NOT NULL,
-    cues TEXT NOT NULL,
-    model TEXT NOT NULL,
-    vector BLOB NOT NULL,
-    cue_vectors BLOB NOT NULL
+    cues TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_summaries_by_chat ON chat_summaries (chat_type, chat_id, last_row);
 
@@ -209,7 +203,28 @@ CREATE TABLE IF NOT EXISTS stickers (
     last_used INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS stickers_by_status ON stickers (status, seen);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+    profile TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    PRIMARY KEY (profile, hash)
+) WITHOUT ROWID;
 )sql";
+
+/// Columns that held vectors before schema 12, when embeddings moved to their
+/// own table.
+constexpr std::array<std::pair<std::string_view, std::string_view>, 9> k_vector_columns{{
+    {"memory_chunks", "model"},
+    {"memory_chunks", "vector"},
+    {"person_facts", "model"},
+    {"person_facts", "vector"},
+    {"chat_summaries", "model"},
+    {"chat_summaries", "vector"},
+    {"chat_summaries", "cue_vectors"},
+    {"expressions", "model"},
+    {"expressions", "vector"},
+}};
 
 Result<Store> initialize(Result<Database> opened, bool file_backed) {
     if (opened.has_error()) return lighter::outcome_error(std::move(opened).error());
@@ -270,6 +285,24 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
     if (leftover.has_error()) return lighter::outcome_error(std::move(leftover).error());
     auto indexed = store.database.execute("CREATE INDEX IF NOT EXISTS expressions_by_chat ON expressions (chat_type, chat_id)");
     if (indexed.has_error()) return lighter::outcome_error(std::move(indexed).error());
+    // Schema 12 moved vectors into `embeddings` (re-embedded by the
+    // backfill). Chunks are rebuilt to gain their search text; summaries,
+    // facts and expressions keep their rows. Decided by the table's shape.
+    auto old_chunks = count_of("SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name = 'vector'");
+    if (old_chunks.has_error()) return lighter::outcome_error(std::move(old_chunks).error());
+    if (*old_chunks > 0) {
+        std::string sql = "BEGIN; DROP INDEX IF EXISTS memory_chunks_by_chat; DELETE FROM memory_chunks;";
+        for (const auto &[table_name, column] : k_vector_columns) {
+            auto present = count_of(std::format("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'", table_name, column));
+            if (present.has_error()) return lighter::outcome_error(std::move(present).error());
+            if (*present > 0) sql += std::format("ALTER TABLE {} DROP COLUMN {};", table_name, column);
+        }
+        sql += "ALTER TABLE memory_chunks ADD COLUMN search_text TEXT NOT NULL DEFAULT ''; COMMIT;";
+        if (auto migrated = store.database.execute(sql); migrated.has_error()) {
+            (void) store.database.execute("ROLLBACK");
+            return lighter::outcome_error(std::move(migrated).error());
+        }
+    }
     // The media table predates its description column in versions 2 and 3.
     if (current == 2 || current == 3) {
         auto added = store.database.execute("ALTER TABLE media ADD COLUMN description TEXT NOT NULL DEFAULT ''");
@@ -367,7 +400,7 @@ Result<std::vector<StoredMessage>> Store::messages_after(const ChatKey &chat, i6
 
 Result<void> Store::add_chunk(const MemoryChunk &chunk) {
     auto statement = database.prepare("INSERT INTO memory_chunks (chat_type, chat_id, first_row, last_row, start_time, end_time, text, "
-                                      "model, vector) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
+                                      "search_text) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, chunk.chat.type);
     statement->bind(2, chunk.chat.id);
@@ -376,30 +409,26 @@ Result<void> Store::add_chunk(const MemoryChunk &chunk) {
     statement->bind(5, chunk.start_time);
     statement->bind(6, chunk.end_time);
     statement->bind(7, chunk.text);
-    statement->bind(8, chunk.model);
-    statement->bind_blob(9, chunk.vector);
+    statement->bind(8, chunk.search_text);
     return statement->run();
 }
 
-Result<i64> Store::last_chunk_row(const ChatKey &chat, std::string_view model) {
-    auto statement =
-        database.prepare("SELECT COALESCE(MAX(last_row), 0) FROM memory_chunks WHERE chat_type = ?1 AND chat_id = ?2 AND model = ?3");
+Result<i64> Store::last_chunk_row(const ChatKey &chat) {
+    auto statement = database.prepare("SELECT COALESCE(MAX(last_row), 0) FROM memory_chunks WHERE chat_type = ?1 AND chat_id = ?2");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, chat.type);
     statement->bind(2, chat.id);
-    statement->bind(3, model);
     auto row = statement->step();
     if (row.has_error()) return lighter::outcome_error(std::move(row).error());
     return *row ? statement->column_int(0) : 0;
 }
 
-Result<std::vector<MemoryChunk>> Store::chunks(const ChatKey &chat, std::string_view model) {
-    auto statement = database.prepare("SELECT id, first_row, last_row, start_time, end_time, text, vector FROM memory_chunks "
-                                      "WHERE chat_type = ?1 AND chat_id = ?2 AND model = ?3 ORDER BY last_row");
+Result<std::vector<MemoryChunk>> Store::chunks(const ChatKey &chat) {
+    auto statement = database.prepare("SELECT id, first_row, last_row, start_time, end_time, text, search_text FROM memory_chunks "
+                                      "WHERE chat_type = ?1 AND chat_id = ?2 ORDER BY last_row");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, chat.type);
     statement->bind(2, chat.id);
-    statement->bind(3, model);
     std::vector<MemoryChunk> chunks;
     for (;;) {
         auto row = statement->step();
@@ -413,23 +442,15 @@ Result<std::vector<MemoryChunk>> Store::chunks(const ChatKey &chat, std::string_
             .start_time = statement->column_int(3),
             .end_time = statement->column_int(4),
             .text = statement->column_text(5),
-            .model = std::string(model),
-            .vector = statement->column_blob(6),
+            .search_text = statement->column_text(6),
         });
     }
     return chunks;
 }
 
-Result<void> Store::delete_chunks_except(std::string_view model) {
-    auto statement = database.prepare("DELETE FROM memory_chunks WHERE model != ?1");
-    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, model);
-    return statement->run();
-}
-
 Result<void> Store::add_summary(const ChatSummary &summary) {
     auto statement = database.prepare("INSERT INTO chat_summaries (chat_type, chat_id, first_row, last_row, start_time, end_time, summary, "
-                                      "cues, model, vector, cue_vectors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)");
+                                      "cues) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, summary.chat.type);
     statement->bind(2, summary.chat.id);
@@ -439,9 +460,6 @@ Result<void> Store::add_summary(const ChatSummary &summary) {
     statement->bind(6, summary.end_time);
     statement->bind(7, summary.summary);
     statement->bind(8, summary.cues);
-    statement->bind(9, summary.model);
-    statement->bind_blob(10, summary.vector);
-    statement->bind_blob(11, summary.cue_vectors);
     return statement->run();
 }
 
@@ -456,8 +474,8 @@ Result<i64> Store::last_summary_row(const ChatKey &chat) {
 }
 
 Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize limit) {
-    auto statement = database.prepare("SELECT * FROM (SELECT id, first_row, last_row, start_time, end_time, summary, cues, model, vector, "
-                                      "cue_vectors FROM chat_summaries "
+    auto statement = database.prepare("SELECT * FROM (SELECT id, first_row, last_row, start_time, end_time, summary, cues "
+                                      "FROM chat_summaries "
                                       "WHERE chat_type = ?1 AND chat_id = ?2 ORDER BY last_row DESC LIMIT ?3) ORDER BY last_row");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, chat.type);
@@ -477,9 +495,6 @@ Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize lim
             .end_time = statement->column_int(4),
             .summary = statement->column_text(5),
             .cues = statement->column_text(6),
-            .model = statement->column_text(7),
-            .vector = statement->column_blob(8),
-            .cue_vectors = statement->column_blob(9),
         });
     }
     return summaries;
@@ -590,9 +605,8 @@ Result<std::vector<Sticker>> Store::stickers(std::string_view status) {
 }
 
 Result<void> Store::add_fact(const PersonFact &fact) {
-    auto statement =
-        database.prepare("INSERT INTO person_facts (person_id, fact, quote, chat_type, chat_id, message_id, time, model, vector) "
-                         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
+    auto statement = database.prepare("INSERT INTO person_facts (person_id, fact, quote, chat_type, chat_id, message_id, time) "
+                                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, fact.person_id);
     statement->bind(2, fact.fact);
@@ -601,8 +615,6 @@ Result<void> Store::add_fact(const PersonFact &fact) {
     statement->bind(5, fact.chat.id);
     statement->bind(6, fact.message_id);
     statement->bind(7, fact.time);
-    statement->bind(8, fact.model);
-    statement->bind_blob(9, fact.vector);
     return statement->run();
 }
 
@@ -634,30 +646,123 @@ Result<void> Store::delete_fact(i64 id) {
     return statement->run();
 }
 
+namespace {
+
+Result<std::vector<PersonFact>> read_facts(Statement &statement) {
+    std::vector<PersonFact> facts;
+    for (;;) {
+        auto row = statement.step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        facts.push_back({
+            .id = statement.column_int(0),
+            .person_id = statement.column_int(7),
+            .fact = statement.column_text(1),
+            .quote = statement.column_text(2),
+            .chat = {.type = statement.column_text(3), .id = statement.column_int(4)},
+            .message_id = statement.column_int(5),
+            .time = statement.column_int(6),
+        });
+    }
+    return facts;
+}
+
+} // namespace
+
 Result<std::vector<PersonFact>> Store::facts(i64 person_id, usize limit) {
-    auto statement = database.prepare("SELECT id, fact, quote, chat_type, chat_id, message_id, time, model, vector FROM person_facts "
+    auto statement = database.prepare("SELECT id, fact, quote, chat_type, chat_id, message_id, time, person_id FROM person_facts "
                                       "WHERE person_id = ?1 ORDER BY time DESC, id DESC LIMIT ?2");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, person_id);
     statement->bind(2, limit == 0 ? i64{-1} : static_cast<i64>(limit));
-    std::vector<PersonFact> facts;
+    return read_facts(*statement);
+}
+
+Result<std::vector<PersonFact>> Store::all_facts() {
+    auto statement =
+        database.prepare("SELECT id, fact, quote, chat_type, chat_id, message_id, time, person_id FROM person_facts ORDER BY id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    return read_facts(*statement);
+}
+
+Result<std::vector<std::string>> Store::search_texts() {
+    auto statement = database.prepare("SELECT search_text FROM memory_chunks ORDER BY id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    std::vector<std::string> texts;
     for (;;) {
         auto row = statement->step();
         if (row.has_error()) return lighter::outcome_error(std::move(row).error());
         if (!*row) break;
-        facts.push_back({
+        texts.push_back(statement->column_text(0));
+    }
+    return texts;
+}
+
+Result<std::vector<ChatSummary>> Store::all_summaries() {
+    auto statement = database.prepare("SELECT id, first_row, last_row, start_time, end_time, summary, cues, chat_type, chat_id "
+                                      "FROM chat_summaries ORDER BY id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    std::vector<ChatSummary> summaries;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        summaries.push_back({
             .id = statement->column_int(0),
-            .person_id = person_id,
-            .fact = statement->column_text(1),
-            .quote = statement->column_text(2),
-            .chat = {.type = statement->column_text(3), .id = statement->column_int(4)},
-            .message_id = statement->column_int(5),
-            .time = statement->column_int(6),
-            .model = statement->column_text(7),
-            .vector = statement->column_blob(8),
+            .chat = {.type = statement->column_text(7), .id = statement->column_int(8)},
+            .first_row = statement->column_int(1),
+            .last_row = statement->column_int(2),
+            .start_time = statement->column_int(3),
+            .end_time = statement->column_int(4),
+            .summary = statement->column_text(5),
+            .cues = statement->column_text(6),
         });
     }
-    return facts;
+    return summaries;
+}
+
+Result<std::vector<std::pair<std::string, std::string>>> Store::embeddings(std::string_view profile,
+                                                                           const std::vector<std::string> &hashes) {
+    auto statement = database.prepare("SELECT vector FROM embeddings WHERE profile = ?1 AND hash = ?2");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    std::vector<std::pair<std::string, std::string>> found;
+    for (const auto &hash : hashes) {
+        statement->reset();
+        statement->bind(1, profile);
+        statement->bind(2, hash);
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (*row) found.emplace_back(hash, statement->column_blob(0));
+    }
+    return found;
+}
+
+Result<void> Store::add_embeddings(std::string_view profile, const std::vector<std::pair<std::string, std::string>> &rows) {
+    if (auto begun = database.execute("BEGIN"); begun.has_error()) return begun;
+    auto statement = database.prepare("INSERT OR REPLACE INTO embeddings (profile, hash, vector) VALUES (?1, ?2, ?3)");
+    if (statement.has_error()) {
+        (void) database.execute("ROLLBACK");
+        return lighter::outcome_error(std::move(statement).error());
+    }
+    for (const auto &[hash, vector] : rows) {
+        statement->reset();
+        statement->bind(1, profile);
+        statement->bind(2, hash);
+        statement->bind_blob(3, vector);
+        if (auto ran = statement->run(); ran.has_error()) {
+            (void) database.execute("ROLLBACK");
+            return ran;
+        }
+    }
+    return database.execute("COMMIT");
+}
+
+Result<i64> Store::delete_embeddings_except(std::string_view profile) {
+    auto statement = database.prepare("DELETE FROM embeddings WHERE profile != ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, profile);
+    if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
+    return database.changes();
 }
 
 Result<std::optional<StoredMessage>> Store::message(const ChatKey &chat, i64 message_id) {
@@ -775,7 +880,7 @@ namespace {
 i64 sql_limit(usize limit) { return limit == 0 ? -1 : static_cast<i64>(limit); }
 
 constexpr std::string_view k_expression_columns =
-    "id, chat_type, chat_id, situation, style, situations, count, first_seen, last_active, checked, modified_by, model, vector";
+    "id, chat_type, chat_id, situation, style, situations, count, first_seen, last_active, checked, modified_by";
 
 Result<std::vector<Expression>> read_expressions(Statement &statement) {
     std::vector<Expression> rows;
@@ -794,8 +899,6 @@ Result<std::vector<Expression>> read_expressions(Statement &statement) {
             .last_active = statement.column_int(8),
             .checked = statement.column_int(9) != 0,
             .modified_by = statement.column_text(10),
-            .model = statement.column_text(11),
-            .vector = statement.column_blob(12),
         });
     }
     return rows;
@@ -825,15 +928,6 @@ Result<i64> Store::learn_expression(const ChatKey &chat, std::string_view situat
         if (more.has_error() || !*more) break;
     }
     return id;
-}
-
-Result<void> Store::set_expression_vector(i64 id, std::string_view model, std::string_view vector) {
-    auto statement = database.prepare("UPDATE expressions SET model = ?2, vector = ?3 WHERE id = ?1");
-    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, id);
-    statement->bind(2, model);
-    statement->bind_blob(3, vector);
-    return statement->run();
 }
 
 Result<void> Store::touch_expressions(const std::vector<i64> &ids, i64 now) {

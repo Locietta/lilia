@@ -1,9 +1,10 @@
-#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 #include <glaze/json.hpp>
+
+#include <lighter/async/io/loop.h>
 
 #include <lilia/memory/memory.h>
 #include <lilia/store/store.h>
@@ -13,6 +14,7 @@ namespace {
 
 using namespace lilia;
 using lilia::test::require;
+using lighter::Task;
 
 store::StoredMessage message(i64 row, i64 time, std::string name, std::string text, bool self = false) {
     return {.chat = {.type = "group", .id = 1},
@@ -23,19 +25,6 @@ store::StoredMessage message(i64 row, i64 time, std::string name, std::string te
             .text = std::move(text),
             .from_self = self,
             .row_id = row};
-}
-
-void test_vectors() {
-    const std::vector<float> v{0.5f, -1.25f, 3.0f};
-    require(memory::decode_vector(memory::encode_vector(v)) == v, "vectors round-trip through bytes");
-    require(memory::encode_vector(v).size() == 12, "float32 bytes");
-    require(std::abs(memory::cosine({1, 0}, {1, 0}) - 1) < 1e-9 && std::abs(memory::cosine({1, 0}, {0, 1})) < 1e-9, "cosine");
-    require(memory::cosine({1, 0}, {1, 0, 0}) == 0 && memory::cosine({}, {}) == 0, "mismatched or empty vectors score 0");
-}
-
-void test_keywords() {
-    require(memory::keywords("谁说过 MC 整合包？") == std::vector<std::string>({"谁说过", "MC", "整合包"}), "CJK runs and ASCII words");
-    require(memory::keywords("a 我 Godot4!") == std::vector<std::string>({"Godot4"}), "single characters are dropped");
 }
 
 void test_chunks() {
@@ -49,25 +38,11 @@ void test_chunks() {
     require(chunks.size() == 3 && chunks[2].front().row_id == 9, "a tail the chat has moved on from is complete");
 }
 
-void test_rank_and_render() {
-    std::vector<store::MemoryChunk> chunks{
-        {.id = 1, .text = "[10-05 21:03] a: 我对芒果过敏\n", .vector = memory::encode_vector({1, 0})},
-        {.id = 2, .text = "[10-06 20:00] b: 周六一起打 MC\n", .vector = memory::encode_vector({0.97f, 0.2431f})},
-        {.id = 3, .text = "[10-07 10:00] c: 早\n", .vector = memory::encode_vector({0, 1})},
-    };
-    auto hits = memory::rank(chunks, {1, 0}, {}, 2, 0.5);
-    require(hits.size() == 2 && hits[0].chunk.id == 1 && hits[1].chunk.id == 2, "best first, limited, below min_score dropped");
-    hits = memory::rank(chunks, {1, 0}, {"MC"}, 1, 0);
-    require(hits.size() == 1 && hits[0].chunk.id == 2 && std::abs(hits[0].score - 1.02) < 1e-3,
-            "a literal keyword hit decides between close candidates");
-    std::vector<store::MemoryChunk> twins{
-        {.id = 7, .text = "old", .vector = memory::encode_vector({1, 0}), .recency = 0.1},
-        {.id = 8, .text = "new", .vector = memory::encode_vector({1, 0}), .recency = 0.9},
-    };
-    hits = memory::rank(twins, {1, 0}, {}, 2, 0);
-    require(hits.front().chunk.id == 8 && hits.front().score > hits.back().score, "of two equal matches the newer wins");
+void test_render() {
+    const std::vector<memory::Hit> hits{{.chunk = {.id = 1, .text = "[10-05 21:03] a: 我对芒果过敏\n"}, .score = 0.8},
+                                        {.chunk = {.id = 2, .text = "[10-06 20:00] b: 周六一起打 MC\n"}, .score = 0.6}};
     require(memory::render_hits({}) == "没找到相关的聊天记录。", "no hits");
-    const auto text = memory::render_hits(memory::rank(chunks, {1, 0}, {}, 2, 0.5));
+    const auto text = memory::render_hits(hits);
     require(text.find("我对芒果过敏") < text.find("---") && text.find("---") < text.find("周六一起打 MC"), "hits are separated");
 
     const std::vector<store::StoredMessage> lines{message(1, 1'791'032'700, "a", "在吗"), message(2, 1'791'032'760, "", "在", true)};
@@ -86,15 +61,14 @@ void test_store() {
     }
     auto after = store->messages_after(chat, 1, 10);
     require(after.has_value() && after->size() == 2 && after->front().row_id == 2, "messages after a row, with row ids");
-    require(store->add_chunk({.chat = chat, .first_row = 1, .last_row = 2, .text = "x", .model = "m1", .vector = "abcd"}).has_value(),
+    require(*store->last_chunk_row(chat) == 0, "nothing covered yet");
+    require(store->add_chunk({.chat = chat, .first_row = 1, .last_row = 2, .text = "[..] a: x", .search_text = "a: x"}).has_value(),
             "add chunk");
-    require(store->add_chunk({.chat = chat, .first_row = 1, .last_row = 3, .text = "y", .model = "m2", .vector = "efgh"}).has_value(),
-            "add chunk");
-    require(*store->last_chunk_row(chat, "m1") == 2 && *store->last_chunk_row(chat, "m3") == 0, "last covered row per model");
-    auto chunks = store->chunks(chat, "m2");
-    require(chunks.has_value() && chunks->size() == 1 && chunks->front().vector == "efgh", "chunks per model, blob intact");
-    require(store->delete_chunks_except("m2").has_value() && store->chunks(chat, "m1")->empty() && store->chunks(chat, "m2")->size() == 1,
-            "other models' chunks are dropped");
+    require(*store->last_chunk_row(chat) == 2 && *store->last_chunk_row({.type = "group", .id = 2}) == 0, "last covered row per chat");
+    auto chunks = store->chunks(chat);
+    require(chunks.has_value() && chunks->size() == 1 && chunks->front().search_text == "a: x" && chunks->front().text == "[..] a: x",
+            "chunks keep both forms");
+    require(*store->search_texts() == std::vector<std::string>{"a: x"}, "every chunk's search text");
 }
 
 void test_facts() {
@@ -129,28 +103,16 @@ void test_facts() {
 
     auto db = store::Store::open_memory();
     require(db.has_value(), "open");
-    require(db->add_fact({.person_id = 7,
-                          .fact = "TA对芒果过敏",
-                          .quote = "芒果",
-                          .chat = {.type = "group", .id = 1},
-                          .time = 10,
-                          .model = "m",
-                          .vector = "abcd"})
-                .has_value(),
-            "add fact");
-    require(db->add_fact({.person_id = 7,
-                          .fact = "TA住在杭州",
-                          .quote = "杭州",
-                          .chat = {.type = "group", .id = 1},
-                          .time = 20,
-                          .model = "m",
-                          .vector = "efgh"})
-                .has_value(),
-            "add fact");
+    require(
+        db->add_fact({.person_id = 7, .fact = "TA对芒果过敏", .quote = "芒果", .chat = {.type = "group", .id = 1}, .time = 10}).has_value(),
+        "add fact");
+    require(
+        db->add_fact({.person_id = 7, .fact = "TA住在杭州", .quote = "杭州", .chat = {.type = "group", .id = 1}, .time = 20}).has_value(),
+        "add fact");
     auto loaded = db->facts(7, 1);
-    require(loaded.has_value() && loaded->size() == 1 && loaded->front().fact == "TA住在杭州" && loaded->front().vector == "efgh",
-            "newest fact first, limited, blob intact");
-    require(db->facts(8, 0)->empty() && db->facts(7, 0)->size() == 2, "per person; 0 lists all");
+    require(loaded.has_value() && loaded->size() == 1 && loaded->front().fact == "TA住在杭州" && loaded->front().person_id == 7,
+            "newest fact first, limited");
+    require(db->facts(8, 0)->empty() && db->facts(7, 0)->size() == 2 && db->all_facts()->size() == 2, "per person; 0 lists all");
 }
 
 void test_summaries() {
@@ -175,39 +137,122 @@ void test_summaries() {
     require(parsed && parsed->summary.empty() && parsed->cues.empty(), "nothing new is a valid answer, without cues");
     require(!memory::parse_summary({}), "no tool call is no answer");
 
-    const auto chunk = memory::summary_chunk(
-        {.id = 3, .start_time = 1'791'032'700, .end_time = 1'791'036'300, .summary = "定了周六去成都", .vector = "v"}, 480);
-    require(chunk.text == "[10-03 21:05 至 10-03 22:05 的聊天摘要] 定了周六去成都\n" && chunk.id == -3 && chunk.vector == "v",
-            "a summary ranks as a chunk");
-    const auto cues = memory::encode_vector({1, 2}) + memory::encode_vector({3, 4});
-    require(memory::split_vectors(cues, 2) == std::vector<std::vector<float>>({{1, 2}, {3, 4}}), "cue vectors split by dimension");
+    const auto chunk =
+        memory::summary_chunk({.id = 3, .start_time = 1'791'032'700, .end_time = 1'791'036'300, .summary = "定了周六去成都"}, 480);
+    require(chunk.text == "[10-03 21:05 至 10-03 22:05 的聊天摘要] 定了周六去成都\n" && chunk.id == -3, "a summary ranks as a chunk");
+    require(memory::summary_texts({.summary = "定了周六去成都", .cues = "聊到成都\n\n周六的安排"}) ==
+                    std::vector<std::string>({"定了周六去成都", "聊到成都", "周六的安排"}) &&
+                memory::summary_texts({.summary = "", .cues = "x"}).empty(),
+            "a summary is found by itself and its cues");
 
     auto db = store::Store::open_memory();
     require(db.has_value(), "open");
     const store::ChatKey chat{.type = "group", .id = 1};
     for (const i64 last : {i64{10}, i64{20}, i64{30}}) {
-        require(db->add_summary({.chat = chat, .first_row = last - 9, .last_row = last, .summary = std::to_string(last), .model = "m"})
-                    .has_value(),
+        require(db->add_summary({.chat = chat, .first_row = last - 9, .last_row = last, .summary = std::to_string(last)}).has_value(),
                 "add summary");
     }
     require(*db->last_summary_row(chat) == 30, "last summarized row");
     auto newest = db->summaries(chat, 2);
     require(newest.has_value() && newest->size() == 2 && newest->front().summary == "20" && newest->back().summary == "30",
             "the newest summaries, oldest first");
-    require(db->summaries(chat, 0)->size() == 3, "0 lists all");
+    require(db->summaries(chat, 0)->size() == 3 && db->all_summaries()->size() == 3, "0 lists all");
+}
+
+/// Memory on a fake embedding service: a direction per topic word.
+retrieval::Retriever::Backend fake_embeddings() {
+    return [](std::vector<std::string> texts) -> Task<Result<std::vector<retrieval::Vector>>> {
+        static const std::vector<std::pair<std::string, retrieval::Vector>> k_topics{
+            {"芒果", {1, 0, 0, 0}}, {"成都", {0, 1, 0, 0}}, {"MC", {0, 0, 1, 0}}};
+        std::vector<retrieval::Vector> out;
+        for (const auto &text : texts) {
+            retrieval::Vector vector{0, 0, 0, 0.1f};
+            for (const auto &[word, direction] : k_topics) {
+                if (text.find(word) == std::string::npos) continue;
+                for (usize i = 0; i < 4; ++i) vector[i] += direction[i];
+            }
+            out.push_back(std::move(vector));
+        }
+        co_return out;
+    };
+}
+
+Task<> test_memory() {
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    const MemoryConfig config{.chunk_messages = 2, .search_results = 2, .min_score = 0.5, .recall_messages = 2, .recall_score = 0.6};
+    retrieval::Retriever retriever(config, *db);
+    retriever.backend = fake_embeddings();
+    memory::Memory memory(config, "莉莉娅", 480, *db, retriever);
+    memory.now = [] { return i64{1'000'000}; };
+    const store::ChatKey chat{.type = "group", .id = 1};
+    const std::vector<std::pair<std::string, std::string>> lines{{"阿紫", "我对芒果过敏"}, {"老王", "记住了"}, {"阿紫", "周六一起打 MC"},
+                                                                 {"老王", "好"},           {"阿紫", "早"},     {"老王", "早"}};
+    for (usize i = 0; i < lines.size(); ++i) {
+        require(db->add_message({.chat = chat,
+                                 .message_id = static_cast<i64>(i + 1),
+                                 .sender_id = 7,
+                                 .sender_name = lines[i].first,
+                                 .time = static_cast<i64>(1000 + i),
+                                 .text = lines[i].second})
+                    .has_value(),
+                "add message");
+    }
+    co_await memory.index(chat);
+    require(db->chunks(chat)->size() == 3 && db->search_texts()->front() == "阿紫: 我对芒果过敏\n老王: 记住了\n", "chunked and indexed");
+    require(memory.embedded_texts().size() == 3, "what memory has embedded");
+
+    auto hits = co_await memory.search(chat, "谁对芒果过敏");
+    require(hits.size() == 1 && hits[0].chunk.text.contains("我对芒果过敏") && hits[0].score > 0.9, "found by meaning, gated");
+    hits = co_await memory.search(chat, "MC");
+    require(hits.size() == 1 && hits[0].chunk.text.contains("打 MC"), "another topic");
+
+    // Summaries compete in search and come back in recall.
+    require(db->add_summary({.chat = chat,
+                             .first_row = 1,
+                             .last_row = 2,
+                             .end_time = 1001,
+                             .summary = "阿紫说周末去成都",
+                             .cues = "聊到成都\n成都的安排"})
+                .has_value(),
+            "add summary");
+    hits = co_await memory.search(chat, "成都");
+    require(hits.size() == 1 && hits[0].chunk.id < 0 && hits[0].chunk.text.contains("聊天摘要"), "a summary is a hit too");
+    std::vector<store::StoredMessage> recent{{.chat = chat, .sender_name = "老王", .text = "成都好玩吗", .row_id = 5},
+                                             {.chat = chat, .sender_name = "阿紫", .text = "还行", .row_id = 6}};
+    require((co_await memory.recall(chat, recent)).contains("阿紫说周末去成都"), "recalled by its cue");
+    recent[0].text = "今天吃什么";
+    require((co_await memory.recall(chat, recent)).empty(), "nothing alike, nothing recalled");
+
+    // Facts: a rephrased duplicate is kept out, or replaces the old one.
+    store::PersonFact fact{.person_id = 7, .fact = "TA对芒果过敏", .quote = "芒果", .chat = chat, .time = 10};
+    require(co_await memory.remember(fact), "a new fact");
+    fact.fact = "TA吃芒果会过敏";
+    require(!co_await memory.remember(fact), "the same meaning again");
+    fact.time = 20;
+    const bool replaced = co_await memory.remember(fact, true);
+    auto known = db->facts(7, 0);
+    require(replaced && known->size() == 1 && known->front().fact == "TA吃芒果会过敏",
+            "or it replaces the old one: " + std::to_string(known->size()));
+    fact.fact = "TA周末去成都";
+    const bool added = co_await memory.remember(fact);
+    require(added && db->facts(7, 0)->size() == 2, "a different fact");
 }
 
 } // namespace
 
 int main() {
     try {
-        test_vectors();
-        test_keywords();
         test_chunks();
-        test_rank_and_render();
+        test_render();
         test_store();
         test_facts();
         test_summaries();
+        lighter::EventLoop loop;
+        auto task = test_memory();
+        loop.schedule(task);
+        loop.run();
+        std::ignore = task.value();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

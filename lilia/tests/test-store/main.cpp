@@ -5,6 +5,7 @@
 #include <string>
 
 #include <lilia/config.h>
+#include <lilia/store/sqlite.h>
 #include <lilia/store/store.h>
 #include <lilia/tests/support/fake_ws_peer.h>
 
@@ -75,7 +76,6 @@ void test_llm_calls() {
             "chats and background are counted apart");
 
     require(db->learn_expression({.type = "group", .id = 1}, "觉得离谱", "用\"笑死\"", 1).has_value(), "an expression");
-    require(db->set_expression_vector(1, "m", std::string(16, 'v')).has_value(), "with a vector");
     require(*db->expression_styles() == std::vector<std::string>{"用\"笑死\""}, "styles alone");
 }
 
@@ -91,6 +91,69 @@ void test_file_store() {
         require(db.has_value(), "reopen");
         auto recent = db->recent_messages({.type = "group", .id = 42}, 10);
         require(recent.has_value() && recent->size() == 1 && (*recent)[0].text == "persisted", "data survives reopening");
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+/// A schema 11 database (vectors in their tables) opened by this build.
+void test_migration() {
+    const auto dir = std::filesystem::temp_directory_path() / ("lilia-test-migrate-" + std::to_string(std::rand()));
+    const auto path = dir / "lilia.db";
+    {
+        std::filesystem::create_directories(dir);
+        auto old = store::Database::open(path);
+        require(old.has_value(), "create");
+        require(old->execute(R"sql(
+CREATE TABLE memory_chunks (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL, chat_id INTEGER NOT NULL, first_row INTEGER NOT NULL,
+    last_row INTEGER NOT NULL, start_time INTEGER NOT NULL, end_time INTEGER NOT NULL, text TEXT NOT NULL, model TEXT NOT NULL,
+    vector BLOB NOT NULL);
+CREATE INDEX memory_chunks_by_chat ON memory_chunks (chat_type, chat_id, model, last_row);
+CREATE TABLE person_facts (id INTEGER PRIMARY KEY, person_id INTEGER NOT NULL, fact TEXT NOT NULL, quote TEXT NOT NULL,
+    chat_type TEXT NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, time INTEGER NOT NULL, model TEXT NOT NULL,
+    vector BLOB NOT NULL);
+CREATE TABLE chat_summaries (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL, chat_id INTEGER NOT NULL, first_row INTEGER NOT NULL,
+    last_row INTEGER NOT NULL, start_time INTEGER NOT NULL, end_time INTEGER NOT NULL, summary TEXT NOT NULL, cues TEXT NOT NULL,
+    model TEXT NOT NULL, vector BLOB NOT NULL, cue_vectors BLOB NOT NULL);
+CREATE TABLE expressions (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL DEFAULT '', chat_id INTEGER NOT NULL DEFAULT 0,
+    situation TEXT NOT NULL, style TEXT NOT NULL, situations TEXT NOT NULL DEFAULT '', count INTEGER NOT NULL DEFAULT 1,
+    first_seen INTEGER NOT NULL, last_active INTEGER NOT NULL, checked INTEGER NOT NULL DEFAULT 0,
+    modified_by TEXT NOT NULL DEFAULT 'AI', model TEXT NOT NULL DEFAULT '', vector BLOB NOT NULL DEFAULT x'',
+    UNIQUE (chat_type, chat_id, style));
+INSERT INTO memory_chunks VALUES (1, 'group', 1, 1, 2, 1, 2, 'x', 'm', x'00');
+INSERT INTO person_facts VALUES (1, 7, 'TA对芒果过敏', '芒果', 'group', 1, 1, 1, 'm', x'00');
+INSERT INTO chat_summaries VALUES (1, 'group', 1, 1, 2, 1, 2, '定了周六去成都', '聊到成都', 'm', x'00', x'00');
+INSERT INTO expressions (situation, style, first_seen, last_active, model, vector) VALUES ('觉得离谱', '用"笑死"', 1, 1, 'm', x'00');
+PRAGMA user_version = 11;
+)sql")
+                    .has_value(),
+                "a schema 11 database");
+    }
+    {
+        auto db = store::Store::open(path);
+        require(db.has_value(), db ? std::string() : db.error().message());
+        const auto count = [&](std::string_view sql) {
+            auto statement = db->database.prepare(sql);
+            require(statement.has_value() && *statement->step(), "query");
+            return statement->column_int(0);
+        };
+        require(count("PRAGMA user_version") == 12, "now schema 12");
+        require(count("SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name IN ('model', 'vector')") == 0 &&
+                    count("SELECT COUNT(*) FROM pragma_table_info('chat_summaries') WHERE name IN ('model', 'vector', 'cue_vectors')") ==
+                        0 &&
+                    count("SELECT COUNT(*) FROM pragma_table_info('person_facts') WHERE name IN ('model', 'vector')") == 0 &&
+                    count("SELECT COUNT(*) FROM pragma_table_info('expressions') WHERE name IN ('model', 'vector')") == 0,
+                "the vector columns are gone");
+        require(db->chunks({.type = "group", .id = 1})->empty() && *db->last_chunk_row({.type = "group", .id = 1}) == 0,
+                "chunks are rebuilt with their search text");
+        require(db->facts(7, 0)->size() == 1 && db->all_summaries()->front().cues == "聊到成都" && db->expressions(0)->size() == 1,
+                "facts, summaries and expressions keep their rows");
+        require(db->add_embeddings("p", {{"h", "vvvv"}}).has_value() && db->embeddings("p", {"h", "x"})->size() == 1,
+                "the embeddings table");
+    }
+    {
+        auto again = store::Store::open(path);
+        require(again.has_value(), "a migrated database opens again");
     }
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -157,6 +220,7 @@ int main() {
         test_messages();
         test_llm_calls();
         test_file_store();
+        test_migration();
         test_config();
         return 0;
     } catch (const std::exception &e) {

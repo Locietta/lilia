@@ -53,6 +53,11 @@ Result<void> Statement::run() {
     }
 }
 
+void Statement::reset() {
+    sqlite3_reset(value);
+    sqlite3_clear_bindings(value);
+}
+
 i64 Statement::column_int(int index) const { return sqlite3_column_int64(value, index); }
 
 double Statement::column_double(int index) const { return sqlite3_column_double(value, index); }
@@ -120,6 +125,8 @@ Result<Statement> Database::prepare(std::string_view sql) {
     if (code != SQLITE_OK) return lighter::outcome_error(error("cannot prepare query", code));
     return statement;
 }
+
+i64 Database::changes() const { return sqlite3_changes64(value); }
 
 Result<void> Database::execute(std::string_view sql) {
     const std::string owned(sql);

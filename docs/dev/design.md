@@ -144,10 +144,23 @@ Model calls (2026-10-11):
 2. **Memory (in progress).** References: MaiBot's A_Memorix and person
    profiles, and AIRI's #2748 trust labels.
    - Searchable history (done 2026-10-08, `memory/`). Allowed chats are cut
-     into chunks of up to 6 messages, embedded by a local model
-     (Qwen3-Embedding-0.6B via llama.cpp on cachy's iGPU) and stored in
-     `memory_chunks`; the planner's `search_history` tool ranks by cosine
-     plus a literal-keyword bonus. Brute force is fine at this size.
+     into chunks of up to 6 messages, stored in `memory_chunks` with their
+     search text; the planner's `search_history` tool ranks them and the
+     summaries (below) with `retrieval/`.
+   - One retrieval layer (2026-10-11, `retrieval/`), after MaiBot, OpenClaw
+     and LangChain, for chunks, summaries, facts, expressions and stickers:
+     - Embeddings (Qwen3-Embedding-0.6B on cachy's iGPU, OpenVINO) live in
+       `embeddings`, keyed by profile (model and input format) and the
+       text's SHA-1, cached in memory. A startup backfill embeds whatever
+       the current profile lacks, then drops other profiles: a model change
+       heals itself.
+     - Queries carry Qwen3's `Instruct:` with one task per corpus; documents
+       are bare; vectors are normalized, so similarity is a dot product.
+     - Dense (brute force) and, for chat search and stickers, BM25 over
+       jieba words and Han pairs in memory (FTS5 cannot segment Chinese).
+       Each leg ranks 4x what is wanted; RRF (k 60, 0.7/0.3) fuses them.
+       The gate looks at the dense similarity; recency is a small boost;
+       expressions use MMR (0.85).
    - Next: incremental facts and per-person profiles. Facts must quote the
      person; never store lilia's own lines, jokes, rumours, or relationships
      inferred from sharing a group. Record who said what.
@@ -182,8 +195,8 @@ Model calls (2026-10-11):
      image (deduplicated by hash), a vision model's description and tags,
      a capped pool of the fit ones; other groups' text is never stored.
    - The planner sends them itself (2026-10-11): `find_sticker(feeling)`
-     shows the closest few of the whole pool (local embeddings of tags and
-     description, cached per process; words without memory), marking ones
+     shows the closest few of the whole pool (`retrieval/` over tags and
+     description; words alone without memory), marking ones
      she sent within a day; `send_sticker(s<id>)` sends the one it picks.
      `repeat` resends someone's sticker (复读) by its URL.
 

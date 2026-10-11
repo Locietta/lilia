@@ -7,7 +7,6 @@
 #include <random>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include <lighter/async/runtime/task.h>
@@ -47,11 +46,6 @@ std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count
 
 /// What a sticker is embedded as: its tags and description.
 std::string embedding_text(const store::Sticker &sticker);
-
-/// The `count` stickers closest to `query` (cosine over `vectors`, keyed by
-/// sha1); stickers without a vector are left out.
-std::vector<store::Sticker> rank(const std::vector<store::Sticker> &pool, const std::vector<float> &query,
-                                 const std::unordered_map<std::string, std::vector<float>> &vectors, usize count);
 
 /// Without embeddings: stickers whose tags or description contain words of
 /// `feeling` ("无语、震惊"), most matched and most popular first, then a
@@ -102,8 +96,6 @@ struct Collector {
     std::optional<provider::Provider> vision;
     std::string vision_model;
     std::map<i64, std::string> last_text; ///< per group, never written anywhere
-    /// Embeddings of registered stickers by sha1 (memory only; see rank()).
-    std::unordered_map<std::string, std::vector<float>> vectors;
     i64 hour = 0;
     usize downloads_this_hour = 0;
     usize descriptions_this_hour = 0;

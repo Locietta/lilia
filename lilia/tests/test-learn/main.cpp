@@ -13,7 +13,6 @@
 #include <lilia/learn/frequency.h>
 #include <lilia/learn/learner.h>
 #include <lilia/learn/segment.h>
-#include <lilia/memory/memory.h>
 #include <lilia/onebot/message.h>
 #include <lilia/store/store.h>
 #include <lilia/tests/support/fake_ws_peer.h>
@@ -167,13 +166,11 @@ void test_jargon() {
             "equal counts: the term seen earlier first");
 }
 
-void test_sharing_and_mmr() {
+void test_sharing() {
     require(learn::shares({}, 1, 2) && learn::shares({{1, 2}}, 1, 2) && !learn::shares({{1, 2}}, 1, 3) && learn::shares({{0}}, 5, 6) &&
                 learn::shares({{1}}, 1, 1) && learn::shares({{1}}, 3, 0),
             "sharing groups; 0 is everyone; legacy (0) patterns are everyone's");
-    const std::vector<std::vector<float>> vectors{{1, 0}, {0.99f, 0.14f}, {0, 1}};
-    const auto picked = learn::mmr(vectors, {1, 0.2f}, 2, 0.5);
-    require(picked.size() == 2 && picked[0] == 1 && picked[1] == 2, "MMR prefers variety over a near-duplicate");
+    require(learn::expression_text("觉得离谱", "用\"笑死\"") == "情景：觉得离谱\n风格：用\"笑死\"", "what a pattern is embedded as");
 }
 
 void test_learnable_text() {
@@ -198,12 +195,10 @@ void test_store() {
     const auto &row = rows->front().chat.id == 1 ? rows->front() : rows->back();
     require(rows->size() == 2 && row.count == 3 && row.situation == "觉得离谱" && row.situations == "觉得离谱\n觉得很好笑",
             "counts up; every situation kept once; the newest leads");
-    require(store->set_expression_vector(*first, "m", "vvvv").has_value() && store->touch_expressions({*first}, 99).has_value() &&
-                store->set_expression_checked(*first, true).has_value(),
-            "vector, touch, check");
+    require(store->touch_expressions({*first}, 99).has_value() && store->set_expression_checked(*first, true).has_value(), "touch, check");
     rows = store->expressions(0);
     const auto checked = std::ranges::find(*rows, *first, &store::Expression::id);
-    require(checked->vector == "vvvv" && checked->last_active == 99 && checked->checked && checked->modified_by == "USER", "stored");
+    require(checked->last_active == 99 && checked->checked && checked->modified_by == "USER", "stored");
 
     require(store->add_expression_review({.time = 1, .chat = a, .situation = "s", .style = "y", .verdict = "rejected", .reason = "r"})
                 .has_value(),
@@ -344,7 +339,7 @@ int main() {
         test_parse();
         test_review();
         test_jargon();
-        test_sharing_and_mmr();
+        test_sharing();
         test_learnable_text();
         test_store();
         test_selection();
