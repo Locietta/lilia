@@ -278,6 +278,11 @@ std::optional<std::variant<std::string, std::vector<wire::SystemBlock>>> encode_
     return prompt;
 }
 
+std::string_view without_trailing_space(std::string_view text) {
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return last == std::string_view::npos ? std::string_view{} : text.substr(0, last + 1);
+}
+
 /// `prompt_cache` keeps the breakpoints text parts ask for; without it they
 /// are dropped.
 Result<WireHistory> to_wire(const provider::History &history, bool prompt_cache) {
@@ -307,8 +312,14 @@ Result<WireHistory> to_wire(const provider::History &history, bool prompt_cache)
 
         for (const auto &part : item.parts) {
             if (const auto *text = std::get_if<provider::TextPart>(&part)) {
+                // Trailing whitespace is dropped from a message's last block on
+                // the way to the model; sent as is, the same block would differ
+                // once later blocks follow it, and a cached prefix ending there
+                // would never be read again. (Empty text blocks are refused.)
+                const auto trimmed = without_trailing_space(text->text);
+                if (trimmed.empty()) continue;
                 message.content.push_back(wire::TextBlock{
-                    .text = text->text,
+                    .text = std::string(trimmed),
                     .cache_control = prompt_cache && text->cache ? std::optional(wire::CacheControl{}) : std::nullopt,
                 });
             } else if (const auto *call = std::get_if<provider::ToolCall>(&part)) {
@@ -316,7 +327,7 @@ Result<WireHistory> to_wire(const provider::History &history, bool prompt_cache)
             } else if (const auto *result = std::get_if<ToolOutcome>(&part)) {
                 message.content.push_back(wire::ToolResultBlock{
                     .tool_use_id = result->call_id,
-                    .content = render_tool_outcome(*result),
+                    .content = std::string(without_trailing_space(render_tool_outcome(*result))),
                     .is_error = tool_outcome_is_error(result->kind),
                 });
             } else if (const auto *image = std::get_if<provider::ImagePart>(&part)) {

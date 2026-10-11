@@ -668,10 +668,10 @@ def test_reply_and_reconnect(tmp_path):
     reviewed = reviews[0]["messages"][-1]["content"][0]["text"]
     assert (
         reviewed
-        == '1. 当觉得离谱时，可以用"笑死 这也行"\n2. 当不想理人时，可以用"别理我"\n'
+        == '1. 当觉得离谱时，可以用"笑死 这也行"\n2. 当不想理人时，可以用"别理我"'
     ), reviewed
     learned_from = learners[0]["messages"][-1]["content"][0]["text"]
-    assert learned_from == "1. 群友1: 别理我\n2. 群友1: 笑死 这也行\n", learned_from
+    assert learned_from == "1. 群友1: 别理我\n2. 群友1: 笑死 这也行", learned_from
     assert len(turns) == 4, (
         "a planner round, the broken writer, its fallback, and the round after the reply"
     )

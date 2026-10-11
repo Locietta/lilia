@@ -85,6 +85,15 @@ void test_part_cache() {
     const auto json = encode(history, true);
     const auto &content = field(field(json, "messages")->get_array()[0], "content")->get_array();
     require(content.size() == 2 && cached(content[0]) && !cached(content[1]), "a breakpoint after the log part only");
+
+    // A block's bytes must not depend on whether it ends its message: trailing
+    // whitespace would be dropped there and the cached prefix would differ.
+    provider::History trailing;
+    trailing.push_back({.role = provider::Role::USER,
+                        .parts = {provider::TextPart{.text = "#1 line\n", .cache = true}, provider::TextPart{.text = "  \n"},
+                                  provider::TextPart{.text = "tail"}}});
+    const auto sent = field(field(encode(trailing, true), "messages")->get_array()[0], "content")->get_array();
+    require(sent.size() == 2 && field(sent[0], "text")->get_string() == "#1 line", "no trailing whitespace, no empty blocks");
     const auto plain = encode(history, false);
     for (const auto &block : field(field(plain, "messages")->get_array()[0], "content")->get_array()) {
         require(!cached(block), "no part markers without caching");
