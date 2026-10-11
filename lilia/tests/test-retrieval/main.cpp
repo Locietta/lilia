@@ -174,6 +174,44 @@ Task<> test_search() {
     require(alike && (*alike)[0] > 0.9 && (*alike)[1] < 0.2, "document to document likeness");
 }
 
+/// A wider pool goes to the reranker, whose order wins; its failure leaves the fused order.
+Task<> test_rerank() {
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    FakeService service;
+    const MemoryConfig config{.embedding_model = "fake"};
+    retrieval::Retriever retriever(config, *db);
+    retriever.backend = service.backend();
+    require(!retriever.can_rerank(), "no reranker without rerank_url");
+
+    bool down = false;
+    std::vector<retrieval::RerankInput> seen;
+    std::string seen_task;
+    retriever.reranker = [&](std::string query, std::vector<retrieval::RerankInput> documents,
+                             std::string task) -> Task<Result<std::vector<double>>> {
+        if (down) co_return lighter::outcome_error(Error::protocol("down"));
+        seen = documents;
+        seen_task = std::move(task);
+        // Prefers the document that also has a picture.
+        std::vector<double> scores;
+        for (const auto &document : documents) scores.push_back(document.image.empty() ? 0.1 : 0.9);
+        co_return scores;
+    };
+    const std::vector<retrieval::Document> documents{
+        {.id = 1, .texts = {"芒果过敏"}},
+        {.id = 2, .texts = {"芒果冰淇淋", retrieval::image_input("/s/2.png")}},
+        {.id = 3, .texts = {"打 MC"}},
+    };
+    auto matches = co_await retriever.search("task", "芒果", documents, {.top_k = 1, .rerank = 3, .rerank_task = "judge"});
+    require(seen.size() == 3 && seen_task == "judge", "the reranker sees the wider pool and the task");
+    require(seen[1].text == "芒果冰淇淋" && seen[1].image == "/s/2.png", "text and picture of a document");
+    require(matches.size() == 1 && documents[matches[0].index].id == 2 && matches[0].relevance == 0.9, "the reranker's best is kept");
+
+    down = true;
+    matches = co_await retriever.search("task", "芒果", documents, {.top_k = 2, .rerank = 3});
+    require(matches.size() == 2 && !matches[0].relevance && documents[matches[0].index].id != 3, "down, the fused order stands");
+}
+
 /// "field" mode sends the task beside the query; pictures travel as tagged paths.
 Task<> test_instruction_field_and_images() {
     auto db = store::Store::open_memory();
@@ -201,7 +239,7 @@ int main() {
         test_vectors_and_text();
         test_lexical();
         test_fusion();
-        for (auto *test : {&test_cache, &test_search, &test_instruction_field_and_images}) {
+        for (auto *test : {&test_cache, &test_search, &test_rerank, &test_instruction_field_and_images}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

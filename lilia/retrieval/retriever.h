@@ -36,6 +36,9 @@ namespace lilia::retrieval {
 //   `k_leg_factor` x top_k; reciprocal rank fusion (k 60, weights 0.7/0.3)
 //   merges them. The relevance gate looks at the dense similarity only.
 // - Optional MMR among the fused candidates, for variety (expressions).
+// - Optional reranking (memory.rerank_url, Cohere-style /v3/rerank): a wider
+//   fused pool is scored by a cross-encoder (Qwen3-VL-Reranker through qvl)
+//   and the best of it kept; if the reranker fails, the fused order stands.
 //
 // The callers choose the candidates (a chat, a person, a status); the
 // retriever only ranks them.
@@ -51,6 +54,10 @@ inline constexpr std::string_view k_self_task =
 inline constexpr std::string_view k_expression_task = "Given a chat situation and what to say, retrieve ways of speaking that would fit it";
 inline constexpr std::string_view k_sticker_task =
     "Given a feeling or reaction, retrieve stickers whose picture, tags or description express it";
+
+/// The reranker's task for sticker searches.
+inline constexpr std::string_view k_sticker_rerank_task = "Given a feeling or reaction someone wants to express in a group chat, judge "
+                                                          "whether this sticker's picture, tags and description express it";
 
 /// Marks an input that names a picture file instead of text.
 inline constexpr std::string_view k_image_tag = "\x1b"
@@ -98,13 +105,28 @@ struct Options {
     bool lexical = false;
     /// MMR's weight on relevance against variety; 0 turns MMR off.
     double mmr_lambda = 0;
+    /// With a reranker configured: fuse this many candidates, then keep the
+    /// top_k the reranker scores highest (0: no reranking).
+    usize rerank = 0;
+    /// The reranker's task for this corpus (empty: the service's default).
+    std::string_view rerank_task;
 };
 
 struct Match {
     usize index = 0;                  ///< into the documents searched
     std::optional<double> similarity; ///< dense; nullopt without a vector
     double score = 0;                 ///< fused
+    std::optional<double> relevance;  ///< the reranker's score, when it ran
 };
+
+/// What the reranker reads of a document: its first text and its first
+/// picture (image_input()), either may be empty.
+struct RerankInput {
+    std::string text;
+    std::string image;
+};
+
+RerankInput rerank_input(const Document &document);
 
 /// What both legs found, fused: `dense[i]` and `lexical[i]` score document
 /// i (nullopt / 0: not found by that leg). Ranks and gates as described
@@ -122,6 +144,10 @@ struct Retriever {
     /// One request to the embedding service: a vector per input, in order;
     /// `instruction` is the query task in "field" mode, empty otherwise.
     using Backend = std::move_only_function<lighter::Task<Result<std::vector<Vector>>>(std::vector<std::string>, std::string)>;
+
+    /// One request to the reranker: a relevance score per document, in order.
+    using Reranker =
+        std::move_only_function<lighter::Task<Result<std::vector<double>>>(std::string query, std::vector<RerankInput>, std::string task)>;
 
     /// Embeds through memory.embedding_url + embedding_path.
     Retriever(const MemoryConfig &config, store::Store &store);
@@ -149,9 +175,15 @@ struct Retriever {
     /// Index terms of `text` (lexical.h), cached.
     const std::vector<std::string> &terms_of(const std::string &text);
 
+    /// Whether search() may rerank (memory.rerank_url is set).
+    bool can_rerank() const noexcept { return static_cast<bool>(reranker); }
+
     const MemoryConfig &config;
     store::Store &store;
     Backend backend;
+    /// Empty without memory.rerank_url.
+    Reranker reranker;
+    bool rerank_failing = false; ///< the last rerank failed (logged once)
     /// The cache's profile: the model and the input format version.
     std::string profile;
     lighter::http::Client http;

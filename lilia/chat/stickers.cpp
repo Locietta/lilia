@@ -33,8 +33,9 @@ Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feelin
                              .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images),
                              .lexical = sticker.tags + " " + sticker.description});
     }
-    const auto matches =
-        co_await r->memory->retriever.search(retrieval::k_sticker_task, std::move(feeling), documents, {.top_k = count, .lexical = true});
+    const auto matches = co_await r->memory->retriever.search(
+        retrieval::k_sticker_task, std::move(feeling), documents,
+        {.top_k = count, .lexical = true, .rerank = r->config.memory.rerank_stickers, .rerank_task = retrieval::k_sticker_rerank_task});
     std::vector<store::Sticker> found;
     for (const auto &match : matches) found.push_back((*pool)[match.index]);
     co_return found;

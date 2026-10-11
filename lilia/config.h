@@ -240,6 +240,14 @@ struct MemoryConfig {
     /// Also embed each sticker's picture (by its file path), for a multimodal
     /// service such as qvl that may read lilia's sticker files.
     bool embed_images = false;
+    /// A Cohere-style reranker (qvl's /v3/rerank); empty url: none.
+    std::string rerank_url;
+    std::string rerank_path = "/v3/rerank";
+    /// Sent as the request's model; empty lets the service choose.
+    std::string rerank_model;
+    /// Sticker searches rerank this many fused candidates down to
+    /// stickers.candidates (0: no reranking).
+    usize rerank_stickers = 0;
     /// Messages per chunk, and the pause that starts a new chunk.
     usize chunk_messages = 6;
     i64 chunk_gap_seconds = 1800;

@@ -181,6 +181,18 @@ Task<int> run_retrieval(const Config &config, std::filesystem::path database, st
                 std::printf("  s%lld %.3f [%s]\n", static_cast<long long>(sticker.id), match.similarity.value_or(0), sticker.tags.c_str());
             }
         }
+        if (retriever.can_rerank() && config.memory.rerank_stickers > 0) {
+            const auto started = std::chrono::steady_clock::now();
+            const auto matches = co_await retriever.search(
+                retrieval::k_sticker_task, query, stickers,
+                {.top_k = 8, .lexical = true, .rerank = config.memory.rerank_stickers, .rerank_task = retrieval::k_sticker_rerank_task});
+            std::printf("stickers reranked from %zu: %.1f ms\n", config.memory.rerank_stickers, time(started));
+            for (const auto &match : matches) {
+                const auto &sticker = (*pool)[match.index];
+                std::printf("  s%lld %.3f (dense %.3f) [%s]\n", static_cast<long long>(sticker.id), match.relevance.value_or(0),
+                            match.similarity.value_or(0), sticker.tags.c_str());
+            }
+        }
         for (const auto group : config.chat.groups) {
             const auto started = std::chrono::steady_clock::now();
             const auto hits = co_await memory.search({.type = "group", .id = group}, query);

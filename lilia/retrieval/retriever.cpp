@@ -54,6 +54,28 @@ struct EmbeddingRequest {
     std::optional<std::string> instruction;
 };
 
+struct RerankDocument {
+    std::optional<std::string> text;
+    std::optional<ImagePath> image;
+};
+
+struct RerankRequest {
+    std::optional<std::string> model;
+    std::string query;
+    std::vector<RerankDocument> documents;
+    std::optional<std::string> instruction;
+    std::string priority = "interactive";
+};
+
+struct RerankItem {
+    usize index = 0;
+    double relevance_score = 0;
+};
+
+struct RerankResponse {
+    std::vector<RerankItem> results;
+};
+
 /// The query's cache key: its text with the task it was embedded for.
 std::string query_key(const MemoryConfig &config, std::string_view task, std::string_view text) {
     return config.instruction_mode == "field" ? std::format("{}\x1f{}", task, text) : query_text(task, text);
@@ -62,6 +84,18 @@ std::string query_key(const MemoryConfig &config, std::string_view task, std::st
 } // namespace
 
 std::string image_input(const std::filesystem::path &file) { return std::string(k_image_tag) + file.string(); }
+
+RerankInput rerank_input(const Document &document) {
+    RerankInput out;
+    for (const auto &input : document.texts) {
+        if (input.starts_with(k_image_tag)) {
+            if (out.image.empty()) out.image = input.substr(k_image_tag.size());
+        } else if (out.text.empty()) {
+            out.text = input;
+        }
+    }
+    return out;
+}
 
 std::string encode(const Vector &vector) {
     static_assert(std::endian::native == std::endian::little, "vectors are stored little-endian");
@@ -213,6 +247,38 @@ Retriever::Retriever(const MemoryConfig &config, store::Store &store) : config(c
         for (auto &item : parsed.data) vectors.push_back(std::move(item.embedding));
         co_return vectors;
     };
+    if (config.rerank_url.empty()) return;
+    reranker = [this](std::string query, std::vector<RerankInput> documents, std::string task) -> Task<Result<std::vector<double>>> {
+        RerankRequest payload{.query = std::move(query)};
+        if (!this->config.rerank_model.empty()) payload.model = this->config.rerank_model;
+        if (!task.empty()) payload.instruction = std::move(task);
+        for (auto &document : documents) {
+            RerankDocument item;
+            if (!document.text.empty()) item.text = std::move(document.text);
+            if (!document.image.empty()) item.image = ImagePath{.path = std::move(document.image)};
+            payload.documents.push_back(std::move(item));
+        }
+        auto body = glz::write_json(payload);
+        if (!body) co_return lighter::outcome_error(Error::protocol("cannot encode the rerank request"));
+        auto request = http.on().post(this->config.rerank_url + this->config.rerank_path);
+        request.json_text(*std::move(body));
+        request.timeout(std::chrono::seconds(30));
+        auto response = co_await std::move(request).send();
+        if (response.has_error()) co_return lighter::outcome_error(Error::protocol("rerank request failed: " + response.error().message()));
+        if (!response->ok())
+            co_return lighter::outcome_error(Error::protocol("reranker returned HTTP " + std::to_string(response->status)));
+        RerankResponse parsed;
+        if (glz::read<glz::opts{.null_terminated = false, .error_on_unknown_keys = false}>(parsed, response->text())) {
+            co_return lighter::outcome_error(Error::protocol("cannot read the rerank response"));
+        }
+        std::vector<double> scores(payload.documents.size(), 0.0);
+        for (const auto &item : parsed.results) {
+            if (item.index >= scores.size()) co_return lighter::outcome_error(Error::protocol("rerank result index out of range"));
+            scores[item.index] = item.relevance_score;
+        }
+        if (parsed.results.size() != scores.size()) co_return lighter::outcome_error(Error::protocol("the reranker skipped documents"));
+        co_return scores;
+    };
 }
 
 Task<std::vector<const Vector *>> Retriever::vectors(std::vector<std::string> texts) {
@@ -339,7 +405,29 @@ Task<std::vector<Match>> Retriever::search(std::string_view task, std::string qu
     }
     std::vector<double> boosts;
     for (const auto &document : documents) boosts.push_back(document.boost);
-    co_return fuse(dense, boosts, lexical, options, firsts);
+    if (options.rerank == 0 || !reranker) co_return fuse(dense, boosts, lexical, options, firsts);
+
+    // A wider fused pool, scored by the reranker; the fused order stands if it fails.
+    const usize keep = options.top_k;
+    options.top_k = std::max(options.rerank, keep);
+    auto pool = fuse(dense, boosts, lexical, options, firsts);
+    if (pool.size() > 1) {
+        std::vector<RerankInput> inputs;
+        for (const auto &match : pool) inputs.push_back(rerank_input(documents[match.index]));
+        auto scores = co_await reranker(std::move(query), std::move(inputs), std::string(options.rerank_task));
+        if (scores.has_value() && scores->size() == pool.size()) {
+            if (rerank_failing) log::info("retrieval: the reranker answers again");
+            rerank_failing = false;
+            for (usize i = 0; i < pool.size(); ++i) pool[i].relevance = (*scores)[i];
+            std::ranges::stable_sort(pool, [](const Match &a, const Match &b) { return *a.relevance > *b.relevance; });
+        } else {
+            if (!rerank_failing)
+                log::warn("retrieval: rerank failed: {}", scores.has_error() ? scores.error().message() : "wrong number of scores");
+            rerank_failing = true;
+        }
+    }
+    if (pool.size() > keep) pool.resize(keep);
+    co_return pool;
 }
 
 Task<std::optional<std::vector<double>>> Retriever::similarities(std::string text, std::vector<std::string> others) {
