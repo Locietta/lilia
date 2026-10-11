@@ -31,6 +31,9 @@ GROUP = 555
 IGNORED_GROUP = 999
 TRIGGER_ID = -12345
 MEDIA_ID = 4242
+PLAIN_ID = 4300
+QUOTE_ID = 4301
+SELF_CARD = "莉莉娅酱"
 TOKEN = "onebot-test-token"
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
 VOICE_BYTES = b"#!AMR\n" + bytes(range(32))
@@ -390,6 +393,7 @@ class FakeNapCat:
         self.media_port = media_port
         self.port = None
         self.file_requests = []
+        self.member_requests = []
         self.connections = 0
         self.errors = []
         self.sent = []
@@ -468,6 +472,37 @@ class FakeNapCat:
                     ],
                 )
             )
+            # A line someone takes back, and a reply quoting it before that.
+            await ws.send(
+                group_event(
+                    GROUP, PLAIN_ID, "", [{"type": "text", "data": {"text": "早"}}]
+                )
+            )
+            await ws.send(
+                group_event(
+                    GROUP,
+                    QUOTE_ID,
+                    "",
+                    [
+                        {"type": "reply", "data": {"id": str(PLAIN_ID)}},
+                        {"type": "text", "data": {"text": "早啊"}},
+                    ],
+                )
+            )
+            await ws.send(
+                json.dumps(
+                    {
+                        "time": int(time.time()),
+                        "self_id": SELF_ID,
+                        "post_type": "notice",
+                        "notice_type": "group_recall",
+                        "group_id": GROUP,
+                        "user_id": 20002,
+                        "operator_id": 20002,
+                        "message_id": PLAIN_ID,
+                    }
+                )
+            )
             await ws.send(group_event(GROUP, TRIGGER_ID, " 你好呀"))
 
             # Answer requests in whatever order lilia sends them.
@@ -476,6 +511,13 @@ class FakeNapCat:
                 if request["action"] == "send_group_msg":
                     self.sent.append(request)
                     data = {"message_id": 777}
+                elif request["action"] == "get_group_member_info":
+                    self.member_requests.append(request)
+                    data = {
+                        "card": SELF_CARD,
+                        "nickname": "lilia",
+                        "shut_up_timestamp": 0,
+                    }
                 elif request["action"] == "get_file":
                     self.file_requests.append(request)
                     data = {
@@ -552,7 +594,8 @@ def test_reply_and_reconnect(tmp_path):
                     "api_key": "$LILIA_TEST_KEY",
                 },
                 "chat": {"groups": [GROUP], "debounce_seconds": 0, "typing_speed": 0},
-                "learning": {"batch_messages": 2},
+                # The answered group's own lines would make a second batch.
+                "learning": {"batch_messages": 2, "exclude_groups": [GROUP]},
                 "archive": {
                     "container_qq_dir": "/app/.config/QQ",
                     "host_qq_dir": str(qq_dir),
@@ -659,6 +702,13 @@ def test_reply_and_reconnect(tmp_path):
         "the turn waits for the description and sees it"
     )
     assert "别理我" not in log
+    assert "[回复 魔王: 早] 早啊" in log, "a quote is shown with what it quotes"
+    assert "魔王(20002): [已撤回]" in log, "a recalled line is shown as recalled"
+    assert napcat.member_requests[0]["params"] == {
+        "group_id": GROUP,
+        "user_id": SELF_ID,
+        "no_cache": True,
+    }, "she asks for her own card"
     assert "tools" not in writer, "no search unless the planner asks for it"
     assert "莉莉娅" in writer["system"] and "测试群" in writer["system"]
     last = writer["messages"][-1]
@@ -673,12 +723,14 @@ def test_reply_and_reconnect(tmp_path):
 
     db = sqlite3.connect(data_dir / "lilia.db")
     rows = db.execute(
-        "SELECT chat_id, message_id, from_self, text FROM messages ORDER BY id"
+        "SELECT chat_id, message_id, from_self, sender_name, text FROM messages ORDER BY id"
     ).fetchall()
     assert rows == [
-        (GROUP, MEDIA_ID, 0, "[图片: 一只橘猫趴在键盘上 睡着了][语音]"),
-        (GROUP, TRIGGER_ID, 0, "@lilia 你好呀"),
-        (GROUP, 777, 1, "fake reply"),
+        (GROUP, MEDIA_ID, 0, "魔王", "[图片: 一只橘猫趴在键盘上 睡着了][语音]"),
+        (GROUP, PLAIN_ID, 0, "魔王", "[已撤回]"),
+        (GROUP, QUOTE_ID, 0, "魔王", "[回复 魔王: 早] 早啊"),
+        (GROUP, TRIGGER_ID, 0, "魔王", "@lilia 你好呀"),
+        (GROUP, 777, 1, SELF_CARD, "fake reply"),
     ], rows
     learned = db.execute(
         "SELECT chat_id, situation, style, count FROM expressions"

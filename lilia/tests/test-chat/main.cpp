@@ -119,6 +119,20 @@ void test_planner() {
     require(request.ids == std::vector<i64>({102, 103, 104}), "ids map #n to message ids in order");
     require(user.find("#3 [21:04] c(20104): 有人看新番吗") != std::string::npos, "lines are numbered");
     require(user.find("#2 [21:02] 闭锁(她自己): 我在") != std::string::npos, "her lines are hers, not the planner's");
+    auto notice_line = stored(-5, t, std::string(chat::k_notice_sender), "小明戳了戳闭锁");
+    notice_line.sender_id = 0;
+    require(chat::is_notice(notice_line) && chat::render_line(notice_line, 480) == "[21:05] （群通知）小明戳了戳闭锁", "notice lines");
+
+    // Quotes become part of the text.
+    const auto quoted = stored(7, t, "小明", "[回复 小红: 早] 今晚打不打 apex 啊大家都来吗来的扣1");
+    require(chat::quote_prefix(&quoted, "闭锁") == "[回复 小明: 今晚打不打 apex 啊大家都来吗来的扣…] ",
+            chat::quote_prefix(&quoted, "闭锁"));
+    require(chat::quote_prefix(nullptr, "闭锁") == "[回复] ", "an unknown quote");
+    require(chat::without_quote(quoted.text) == "今晚打不打 apex 啊大家都来吗来的扣1" && chat::without_quote("[回复] ?") == "?" &&
+                chat::without_quote("没引用") == "没引用",
+            "what the sender wrote");
+    const auto hers = stored(8, t, "lilia", "在的", true);
+    require(chat::quote_prefix(&hers, "闭锁") == "[回复 闭锁: 在的] ", "her own line under her name here");
     require(user.find("以下是新消息") < user.find("#3 "), "the new messages are marked");
     require(user.find("以下是新消息") > user.find("#2 "), "old lines come before the marker");
     require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");

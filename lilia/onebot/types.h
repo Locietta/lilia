@@ -62,8 +62,14 @@ struct MetaEvent {
     std::optional<i64> interval;
 };
 
-/// A notice, e.g. a poke: notice_type "notify", sub_type "poke", `user_id`
-/// poked `target_id`.
+/// A notice. Those lilia reads:
+/// - notify/poke: `user_id` poked `target_id`;
+/// - group_recall: `operator_id` recalled `user_id`'s `message_id`;
+/// - group_ban ban/lift_ban: `operator_id` muted `user_id` (0: everyone)
+///   for `duration` seconds;
+/// - group_msg_emoji_like: `user_id` reacted to `message_id` with `likes`;
+/// - essence add/delete: `operator_id` marked `sender_id`'s `message_id`;
+/// - group_increase / group_decrease: `user_id` joined or left.
 struct NoticeEvent {
     i64 time = 0;
     i64 self_id = 0;
@@ -72,6 +78,13 @@ struct NoticeEvent {
     std::optional<i64> group_id;
     i64 user_id = 0;
     std::optional<i64> target_id;
+    std::optional<i64> message_id;
+    std::optional<i64> operator_id;
+    std::optional<i64> sender_id;
+    std::optional<i64> duration;
+    /// [{"emoji_id": "76", "count": 1}, ...]; kept generic, NapCat varies the id type.
+    std::optional<glz::generic_i64> likes;
+    std::optional<bool> is_add;
 };
 
 /// Requests and anything else lilia does not handle yet.

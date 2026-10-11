@@ -55,6 +55,18 @@ struct Responder {
     /// Turns run as spawned tasks, at most one per chat at a time.
     void on_event(onebot::Event event);
 
+    /// A notice of an allowed group: a recall marks the message recalled, a
+    /// mute of her (or everyone) holds her turns, a poke may be returned;
+    /// pokes, reactions, essence and joins become notice lines in the log
+    /// (context only: they never start a turn).
+    void notice(const onebot::NoticeEvent &notice);
+
+    /// The message is stored as recalled and is never answered.
+    void recall(const store::ChatKey &chat, i64 message_id);
+
+    /// Her name in `chat`: the group card when she has one, else the QQ nickname.
+    std::string self_name(const store::ChatKey &chat) const;
+
     /// Stores an allowed message and updates its chat's flow. Returns the
     /// chat when the planner should look at it now. Spawns admin commands
     /// and media archiving.
@@ -102,6 +114,10 @@ struct Responder {
         std::map<i64, i64> poked_back;
         /// When she last sent a sticker here (unix seconds).
         i64 last_sticker = 0;
+        /// Muted here until then (unix seconds): no turns, no model calls.
+        i64 muted_until = 0;
+        /// Her group card here; empty when she has none (or it is unknown).
+        std::string self_card;
     };
 
     const Config &config;
@@ -136,6 +152,9 @@ struct Responder {
     std::shared_ptr<onebot::Session> session;
     onebot::LoginInfo self;
     std::map<store::ChatKey, ChatState> chats;
+    /// Message ids for stored notice lines: negative, so they never collide
+    /// with QQ's; counts down from the start time in milliseconds.
+    i64 next_notice_id = 0;
 };
 
 /// Built-in persona used until the data directory has a persona.md.

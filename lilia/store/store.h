@@ -226,6 +226,13 @@ struct Store {
     /// True when lilia itself sent `message_id` in `chat`.
     Result<bool> is_own_message(const ChatKey &chat, i64 message_id);
 
+    /// One stored message by its QQ id (row_id set); nullopt when not stored.
+    Result<std::optional<StoredMessage>> message(const ChatKey &chat, i64 message_id);
+
+    /// The name `user_id` had on their newest stored message in `chat`;
+    /// empty when they have none.
+    Result<std::string> sender_name(const ChatKey &chat, i64 user_id);
+
     Result<void> add_llm_call(const LlmCall &call);
 
     /// Input plus output tokens of every call at or after `since` (unix seconds).

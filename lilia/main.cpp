@@ -123,7 +123,8 @@ Task<int> run_app(const Config &config) {
         archiver.vision = make_vision(config.model);
         archiver.vision_model = config.model.vision_model;
     }
-    if (config.archive.enabled) responder.archiver = &archiver;
+    // Also with archiving off: forwards sent by id are still fetched.
+    responder.archiver = &archiver;
     learn::Learner learner(config.learning, config.chat.name, config.chat.aliases, *store, make_learner(config.model),
                            [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (config.learning.enabled) responder.learner = &learner;

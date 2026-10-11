@@ -56,6 +56,15 @@ search, intent)`, `wait(seconds)`, `search_history(query)` or
     - Only later messages wait for typing: 0.3 s per Han character.
     - A deliberate long reply goes out whole and untouched.
     - The first message quotes only when the planner asks.
+  - What the models see (2026-10-11). A quote is stored as part of the text
+    ("[回复 小明: 前二十字…] 内容"). QQ faces render by name, cards by their
+    prompt and title, forwards as a preview of their first nodes (inline, or
+    fetched with `get_forward_msg` like an image description). Notices of
+    allowed groups become lines from "群通知" (sender 0, negative ids) that
+    never start a turn: pokes, reactions, essence, joins and leaves, mutes. A
+    recalled message is stored as "[已撤回]" (its segments stay) and is never
+    answered. Muted, she stores messages but makes no model calls. Her group
+    card, from `get_group_member_info` on connect, is her name in each group.
   - `lilia replay <chat.jsonl>` runs the same ingest and turn code on a
     recorded or synthetic log without NapCat and prints every decision;
     `scripts/replay-remote.sh` runs it on cachy with the live keys.- **`archive/`**: copies the media of allowed chats (pictures, stickers,

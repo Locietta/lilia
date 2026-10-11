@@ -49,6 +49,10 @@ void test_codecs() {
     require(base64_encode("fo") == "Zm8=", "base64 two bytes");
     require(base64_encode("foo") == "Zm9v", "base64 three bytes");
     require(base64_encode("foobar") == "Zm9vYmFy", "base64 six bytes");
+    require(base64_decode("Zm9vYmFy") == "foobar" && base64_decode("Zg==") == "f" && base64_decode("Zm8") == "fo",
+            "base64 decodes, padding optional");
+    require(base64_decode("Zm9v\nYmFy") == "foobar" && !base64_decode("Zm9v!"), "whitespace skipped, junk refused");
+    require(base64_decode(base64_encode("群公告：周六开黑")) == "群公告：周六开黑", "round trip");
 
     const auto digest = sha1("abc");
     constexpr std::array<u8, 20> expected{0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,

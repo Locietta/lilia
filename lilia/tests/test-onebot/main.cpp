@@ -80,11 +80,75 @@ void test_decode_and_render() {
     require(notice.sub_type == "poke" && notice.group_id == 7 && notice.user_id == 20001 && notice.target_id == 10001, "a poke");
     auto other_notice = decode_event(R"({"post_type":"notice","notice_type":"group_increase","user_id":3})", "notice");
     require(other_notice.has_value() && std::get<NoticeEvent>(*other_notice).notice_type == "group_increase", "other notices too");
+    auto recall = decode_event(
+        R"({"post_type":"notice","notice_type":"group_recall","group_id":7,"user_id":3,"operator_id":3,"message_id":-21,"time":1})",
+        "notice");
+    require(recall.has_value() && std::get<NoticeEvent>(*recall).message_id == -21 && std::get<NoticeEvent>(*recall).operator_id == 3,
+            "a recall names the message");
+    auto ban = decode_event(
+        R"({"post_type":"notice","notice_type":"group_ban","sub_type":"ban","group_id":7,"user_id":10001,"operator_id":4,"duration":600})",
+        "notice");
+    require(ban.has_value() && std::get<NoticeEvent>(*ban).duration == 600, "a mute has a duration");
+    auto like = decode_event(R"({"post_type":"notice","notice_type":"group_msg_emoji_like","group_id":7,"user_id":3,"message_id":9,)"
+                             R"("likes":[{"emoji_id":"76","count":1}],"is_add":true})",
+                             "notice");
+    require(like.has_value() && std::get<NoticeEvent>(*like).likes && std::get<NoticeEvent>(*like).likes->is_array() &&
+                std::get<NoticeEvent>(*like).is_add == true,
+            "a reaction keeps its likes");
 
     const Message outgoing{reply_segment(-5), at_segment(k_self_id), text_segment("hi")};
     const auto encoded = glz::write_json(outgoing).value_or("");
     require(encoded == R"([{"type":"reply","data":{"id":"-5"}},{"type":"at","data":{"qq":"10001"}},{"type":"text","data":{"text":"hi"}}])",
             "outgoing segments encode as OneBot arrays: " + encoded);
+}
+
+Message parse_message(std::string_view json) {
+    Message message;
+    require(!glz::read<k_read_opts>(message, json), "test message must parse");
+    return message;
+}
+
+void test_rich_segments() {
+    require(face_name(14) == "微笑" && face_name(179) == "doge" && face_name(9999).empty(), "QQ faces by id");
+    require(render_plain(parse_message(R"([{"type":"face","data":{"id":"14"}},{"type":"face","data":{"id":9999}}])")) ==
+                "[表情: 微笑][表情]",
+            "faces render by name, unknown ones bare");
+
+    // A mini-program share: the prompt and the title say the same thing once.
+    const auto app = render_card(R"({"app":"com.tencent.miniapp_01","prompt":"[QQ小程序]哔哩哔哩",)"
+                                 R"("meta":{"detail_1":{"title":"哔哩哔哩","desc":"【4K】这集作画太顶了"}}})");
+    require(app == "[卡片: [QQ小程序]哔哩哔哩｜【4K】这集作画太顶了]", "card: " + app);
+    // Group announcements carry base64 text when encode is 1.
+    const auto announce = render_card(R"({"app":"com.tencent.mannounce","prompt":"[群公告]",)"
+                                      R"("meta":{"mannounce":{"encode":1,"title":"576k5YWs5ZGK","text":"5ZGo5YWt5byA6buR"}}})");
+    require(announce == "[卡片: [群公告]｜周六开黑]", "announcement: " + announce);
+    require(render_card("not json") == "[卡片]" && render_card("{}") == "[卡片]", "unreadable cards stay bare");
+    require(render_plain(parse_message(R"([{"type":"json","data":{"data":"{\"prompt\":\"[分享]某链接\"}"}}])")) == "[卡片: [分享]某链接]",
+            "json segments render their card");
+
+    // NapCat sends forward nodes inline with parseMultMsg.
+    const auto inline_forward = parse_message(R"([{"type":"forward","data":{"id":"7","content":[
+        {"sender":{"nickname":"小明","card":"明"},"message":[{"type":"text","data":{"text":"今晚打吗"}}]},
+        {"sender":{"nickname":"小红","card":""},"message":[{"type":"face","data":{"id":"14"}},{"type":"text","data":{"text":"打"}}]}
+    ]}}])");
+    require(forward_nodes(inline_forward[0]) != nullptr, "inline nodes are found");
+    require(render_plain(inline_forward) == "[聊天记录: 明: 今晚打吗 / 小红: [表情: 微笑]打（共2条）]", render_plain(inline_forward));
+    const auto by_id = parse_message(R"([{"type":"forward","data":{"id":"7"}}])");
+    require(!forward_nodes(by_id[0]) && render_plain(by_id) == "[聊天记录]", "a forward by id waits for get_forward_msg");
+    require(render_plain(by_id, {{0, "A: x（共1条）"}}) == "[聊天记录: A: x（共1条）]", "and renders its fetched preview");
+
+    // get_forward_msg answers {"messages": [...]}; go-cqhttp-style nodes use nickname + content.
+    glz::generic_i64 fetched;
+    require(!glz::read_json(fetched, R"({"messages":[{"nickname":"A","content":[{"type":"text","data":{"text":"x"}}]},)"
+                                     R"({"nickname":"B","content":"纯文本"},{"nickname":"C","content":[]}]})"),
+            "fetched nodes parse");
+    require(render_forward(fetched) == "A: x / B: 纯文本（共3条）", render_forward(fetched));
+    glz::generic_i64 many;
+    std::string nodes = "[";
+    for (int i = 0; i < 10; ++i) nodes += std::string(i ? "," : "") + R"({"nickname":"N","content":"第)" + std::to_string(i) + R"(条"})";
+    require(!glz::read_json(many, nodes + "]"), "many nodes parse");
+    const auto preview = render_forward(many);
+    require(preview.contains("第5条") && !preview.contains("第6条") && preview.ends_with("（共10条）"), "only the first few: " + preview);
 }
 
 struct Request {
@@ -199,6 +263,7 @@ void test_session() {
 int main() {
     try {
         test_decode_and_render();
+        test_rich_segments();
         test_session();
         return 0;
     } catch (const std::exception &e) {

@@ -1,5 +1,6 @@
 #include "archiver.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -276,6 +277,25 @@ struct SlotGuard {
     lighter::Semaphore *slots;
 };
 
+/// The nodes of a forward NapCat sent by id only, through get_forward_msg,
+/// rendered as a preview; empty when they cannot be had.
+Task<std::string> fetch_forward(const std::shared_ptr<onebot::Session> &session, const onebot::Segment &segment) {
+    const auto id = onebot::data_string(segment, "id");
+    if (!id || id->empty() || !session || !session->is_open()) co_return std::string();
+    const auto quoted = glz::write_json(*id).value_or("\"\"");
+    auto data = co_await session->call("get_forward_msg", std::format(R"({{"message_id":{0},"id":{0}}})", quoted));
+    if (data.has_error()) {
+        log::warn("get_forward_msg failed: {}", data.error().message());
+        co_return std::string();
+    }
+    glz::generic_i64 nodes;
+    if (glz::read<onebot::k_read_opts>(nodes, *data)) {
+        log::warn("get_forward_msg returned undecodable data");
+        co_return std::string();
+    }
+    co_return onebot::render_forward(nodes);
+}
+
 std::string extension_of(std::string_view name) {
     const auto dot = name.rfind('.');
     if (dot == std::string_view::npos || dot + 1 >= name.size() || name.size() - dot > 9) return {};
@@ -375,7 +395,14 @@ void Archiver::track(const store::ChatKey &chat, i64 message_id) {
     pending.try_emplace({chat.type, chat.id, message_id}, std::make_shared<lighter::Event>());
 }
 
-Task<> Archiver::archive(std::shared_ptr<onebot::Session> session, store::StoredMessage message, onebot::Message segments) {
+bool needs_enrichment(const onebot::Message &message, bool media) {
+    if (media && !collect_media(message).empty()) return true;
+    return std::ranges::any_of(message,
+                               [](const onebot::Segment &segment) { return segment.type == "forward" && !onebot::forward_nodes(segment); });
+}
+
+Task<> Archiver::archive(std::shared_ptr<onebot::Session> session, store::StoredMessage message, onebot::Message segments,
+                         std::string prefix) {
     // Wake waiting turns however this ends.
     struct Done {
         Archiver *archiver;
@@ -389,17 +416,26 @@ Task<> Archiver::archive(std::shared_ptr<onebot::Session> session, store::Stored
         }
     } done{this, {message.chat.type, message.chat.id, message.message_id}};
 
-    const auto refs = collect_media(segments);
-    if (refs.empty()) co_return;
-    co_await slots.acquire();
-    SlotGuard guard(slots);
     std::map<usize, std::string> descriptions;
-    for (const auto &ref : refs) {
-        auto description = co_await archive_one(*this, session, message, ref);
-        if (!description.empty()) descriptions.emplace(ref.segment_index, std::move(description));
+    for (usize index = 0; index < segments.size(); ++index) {
+        if (segments[index].type != "forward" || onebot::forward_nodes(segments[index])) continue;
+        if (auto preview = co_await fetch_forward(session, segments[index]); !preview.empty())
+            descriptions.emplace(index, std::move(preview));
+    }
+    const auto refs = config.enabled ? collect_media(segments) : std::vector<MediaRef>{};
+    if (!refs.empty()) {
+        co_await slots.acquire();
+        SlotGuard guard(slots);
+        for (const auto &ref : refs) {
+            auto description = co_await archive_one(*this, session, message, ref);
+            if (!description.empty()) descriptions.emplace(ref.segment_index, std::move(description));
+        }
     }
     if (descriptions.empty()) co_return;
-    const auto text = onebot::render_plain(segments, descriptions);
+    if (auto current = store.message(message.chat, message.message_id);
+        current.has_value() && *current && (*current)->text == onebot::k_recalled_text)
+        co_return;
+    const auto text = prefix + onebot::render_plain(segments, descriptions);
     if (auto updated = store.update_message_text(message.chat, message.message_id, text); updated.has_error()) {
         log::error("cannot update message text: {}", updated.error().message());
     }

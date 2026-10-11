@@ -151,8 +151,21 @@ provider::History build_search_history(const ChatInfo &info, const store::Stored
 provider::History build_writer_history(const WriterInput &input);
 
 /// "[HH:MM] name(qq): text", with "(她自己)" marking lilia's own lines (the
-/// planner is told it is not her).
+/// planner is told it is not her); group notices as "[HH:MM] （群通知）text".
 std::string render_line(const store::StoredMessage &message, i32 utc_offset_minutes);
+
+/// Sender name of the group notice lines lilia stores (sender_id 0).
+inline constexpr std::string_view k_notice_sender = "群通知";
+
+/// A stored group notice ("小明戳了戳莉莉娅"), not someone's message.
+inline bool is_notice(const store::StoredMessage &message) { return !message.from_self && message.sender_id == 0; }
+
+/// "[回复 小明: 前二十个字…] " for a message quoting `quoted`, which is named
+/// `self_name` when it is hers; "[回复] " when the quoted message is unknown.
+std::string quote_prefix(const store::StoredMessage *quoted, std::string_view self_name);
+
+/// A stored text without its quote prefix: only what the sender wrote.
+std::string_view without_quote(std::string_view text);
 
 /// "YYYY-MM-DD HH:MM" in the given offset.
 std::string format_local_time(i64 unix_seconds, i32 utc_offset_minutes);

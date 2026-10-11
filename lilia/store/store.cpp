@@ -670,6 +670,41 @@ Result<bool> Store::is_own_message(const ChatKey &chat, i64 message_id) {
     return statement->step();
 }
 
+Result<std::optional<StoredMessage>> Store::message(const ChatKey &chat, i64 message_id) {
+    auto statement = database.prepare("SELECT message_id, sender_id, sender_name, time, segments, text, from_self, id FROM messages "
+                                      "WHERE chat_type = ?1 AND chat_id = ?2 AND message_id = ?3");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, message_id);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    if (!*row) return std::optional<StoredMessage>{};
+    return std::optional<StoredMessage>(StoredMessage{
+        .chat = chat,
+        .message_id = statement->column_int(0),
+        .sender_id = statement->column_int(1),
+        .sender_name = statement->column_text(2),
+        .time = statement->column_int(3),
+        .segments_json = statement->column_text(4),
+        .text = statement->column_text(5),
+        .from_self = statement->column_int(6) != 0,
+        .row_id = statement->column_int(7),
+    });
+}
+
+Result<std::string> Store::sender_name(const ChatKey &chat, i64 user_id) {
+    auto statement = database.prepare("SELECT sender_name FROM messages WHERE chat_type = ?1 AND chat_id = ?2 AND sender_id = ?3 "
+                                      "ORDER BY id DESC LIMIT 1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, user_id);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    return *row ? statement->column_text(0) : std::string();
+}
+
 Result<void> Store::add_llm_call(const LlmCall &call) {
     auto statement = database.prepare("INSERT INTO llm_calls (time, chat_type, chat_id, model, input_tokens, output_tokens, "
                                       "cache_read_tokens, cache_write_tokens, stop, request_id, error) "

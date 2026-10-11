@@ -166,8 +166,37 @@ i64 local_day_start(i64 unix_seconds, i32 utc_offset_minutes) {
     return day * 86'400 - offset;
 }
 
+std::string_view without_quote(std::string_view text) {
+    text = trim(text);
+    if (text.starts_with("[回复")) {
+        if (const auto close = text.find("] "); close != std::string_view::npos) return trim(text.substr(close + 2));
+        if (text == "[回复]") return {};
+    }
+    return text;
+}
+
+std::string quote_prefix(const store::StoredMessage *quoted, std::string_view self_name) {
+    constexpr usize k_excerpt_code_points = 20;
+    if (!quoted) return "[回复] ";
+    // Only the quoted line itself, not what it quoted in turn.
+    const auto text = without_quote(quoted->text);
+    std::string excerpt;
+    usize kept = 0;
+    for (usize i = 0; i < text.size() && kept < k_excerpt_code_points; ++kept) {
+        usize next = i + 1;
+        while (next < text.size() && (static_cast<unsigned char>(text[next]) & 0xC0) == 0x80) ++next;
+        excerpt.append(text.substr(i, next - i));
+        i = next;
+    }
+    if (excerpt.size() < text.size()) excerpt += "…";
+    std::ranges::replace(excerpt, '\n', ' ');
+    const auto name = quoted->from_self ? std::string(self_name) : display_name(*quoted);
+    return std::format("[回复 {}: {}] ", name, excerpt);
+}
+
 std::string render_line(const store::StoredMessage &message, i32 utc_offset_minutes) {
     std::string line = std::format("[{:%H:%M}] ", local_seconds(message.time, utc_offset_minutes));
+    if (is_notice(message)) return line + "（群通知）" + message.text;
     line += display_name(message);
     line += message.from_self ? std::string("(她自己)") : "(" + std::to_string(message.sender_id) + ")";
     line += ": ";
@@ -401,6 +430,7 @@ provider::History build_writer_history(const WriterInput &input) {
     provider::append_developer(history, std::move(developer));
 
     const auto turn_text = [](const store::StoredMessage &message) {
+        if (is_notice(message)) return "（群通知）" + message.text;
         return message.from_self ? message.text : display_name(message) + ": " + message.text;
     };
     const auto kept = fit_lines(input.recent, input.log_bytes, turn_text);

@@ -49,6 +49,10 @@ struct MediaRef {
 
 std::vector<MediaRef> collect_media(const onebot::Message &message);
 
+/// The message has something to fetch after it arrives: media (when
+/// archiving `media`) or a forward that came without its nodes.
+bool needs_enrichment(const onebot::Message &message, bool media);
+
 /// Extension (with the dot) from magic bytes, falling back to the original
 /// name and then to a per-kind default.
 std::string detect_extension(std::string_view bytes, MediaKind kind, std::string_view name);
@@ -68,11 +72,15 @@ struct Archiver {
     /// for its image descriptions. Call before spawning archive().
     void track(const store::ChatKey &chat, i64 message_id);
 
-    /// Archives every media segment of one stored message. Never fails: each
-    /// outcome, including errors, becomes a row in the media table. With a
-    /// vision model, images and stickers are described (cached by content)
-    /// and the stored message text is re-rendered with the descriptions.
-    lighter::Task<> archive(std::shared_ptr<onebot::Session> session, store::StoredMessage message, onebot::Message segments);
+    /// Archives every media segment of one stored message (when archiving is
+    /// enabled). Never fails: each outcome, including errors, becomes a row in
+    /// the media table. With a vision model, images and stickers are
+    /// described (cached by content); forwards sent without their nodes are
+    /// fetched with get_forward_msg. The stored text is then re-rendered with
+    /// the descriptions after `prefix` (the quote it was stored with); a
+    /// message recalled meanwhile stays recalled.
+    lighter::Task<> archive(std::shared_ptr<onebot::Session> session, store::StoredMessage message, onebot::Message segments,
+                            std::string prefix = {});
 
     /// Waits, at most `budget` in total, until the tracked messages among
     /// `message_ids` are archived and described.

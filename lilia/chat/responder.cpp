@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <fstream>
 #include <limits>
@@ -166,7 +167,7 @@ Task<std::optional<i64>> send_and_record(Responder *r, const store::ChatKey &cha
         .chat = chat,
         .message_id = *id,
         .sender_id = r->self.user_id,
-        .sender_name = r->self.nickname,
+        .sender_name = r->self_name(chat),
         .time = r->now(),
         .segments_json = std::move(segments_json),
         .text = std::move(text),
@@ -291,9 +292,11 @@ Task<bool> call_action(Responder *r, std::string action, std::string params) {
 }
 
 /// Joins a 复读 chain: the same text again after a moment.
+bool muted(Responder *r, const store::ChatKey &chat) { return r->chats[chat].muted_until > r->now(); }
+
 Task<> join_repeat(Responder *r, store::ChatKey chat, std::string text) {
     if (r->realtime) co_await lighter::sleep(std::chrono::seconds(random_seconds(r, 1, 4)));
-    if (!co_await send_and_record(r, chat, {onebot::text_segment(text)})) co_return;
+    if (muted(r, chat) || !co_await send_and_record(r, chat, {onebot::text_segment(text)})) co_return;
     auto &state = r->chats[chat];
     note_spoke(state.flow, r->now(), 0);
     remember_decision(state, std::format("[{}] 跟着复读了「{}」", clock_of(r->now(), r->config.chat.utc_offset_minutes), text));
@@ -307,7 +310,7 @@ Task<> poke_back(Responder *r, i64 group, i64 user) {
     const store::ChatKey chat{.type = "group", .id = group};
     auto &state = r->chats[chat];
     const i64 now = r->now();
-    if (now - state.poked_back[user] < k_poke_back_seconds) co_return;
+    if (now - state.poked_back[user] < k_poke_back_seconds || muted(r, chat)) co_return;
     if (presence_at(r->config.chat.schedule, now, r->config.chat.utc_offset_minutes).presence == Presence::ASLEEP) co_return;
     if (!std::bernoulli_distribution(k_poke_back_chance)(r->rng)) co_return;
     state.poked_back[user] = now;
@@ -370,11 +373,41 @@ Task<> live_presence(Responder *r, const store::ChatKey &chat) {
                                                      random_seconds(r, schedule.read_min_seconds, schedule.read_max_seconds)));
 }
 
+/// What get_group_member_info says about her in one group.
+struct MemberInfo {
+    std::string card;
+    i64 shut_up_timestamp = 0; ///< muted until then (unix seconds); 0: not muted
+};
+
+/// Her group card and whether she is muted in an allowed group, asked once
+/// per connection.
+Task<> learn_self(Responder *r, i64 group) {
+    auto session = r->session;
+    if (!session || !session->is_open()) co_return;
+    auto data = co_await session->call("get_group_member_info",
+                                       std::format(R"({{"group_id":{},"user_id":{},"no_cache":true}})", group, r->self.user_id));
+    if (data.has_error()) {
+        log::warn("get_group_member_info for group {} failed: {}", group, data.error().message());
+        co_return;
+    }
+    MemberInfo info;
+    if (glz::read<onebot::k_read_opts>(info, *data)) co_return;
+    auto &state = r->chats[{.type = "group", .id = group}];
+    state.self_card = info.card;
+    state.muted_until = info.shut_up_timestamp > r->now() ? info.shut_up_timestamp : 0;
+    log::info("group {}: her card is \"{}\"{}", group, info.card, state.muted_until ? ", muted" : "");
+}
+
 Task<> turn_worker(Responder *r, store::ChatKey chat) {
     // Leave the reader loop's call stack before doing any work.
     co_await lighter::yield();
     for (;;) {
         auto &state = r->chats[chat];
+        if (muted(r, chat)) {
+            // What came in while she could not speak is stale once she can.
+            state.flow.unseen.clear();
+            state.flow.addressed.reset();
+        }
         if (!should_plan(state.flow, r->flow_settings(), r->now())) {
             state.busy = false;
             co_return;
@@ -594,7 +627,7 @@ Task<bool> send_sticker(Responder *r, store::ChatKey chat, std::string feeling, 
         .chat = chat,
         .message_id = *id,
         .sender_id = r->self.user_id,
-        .sender_name = r->self.nickname,
+        .sender_name = r->self_name(chat),
         .time = r->now(),
         .segments_json = std::format(R"([{{"type":"image","data":{{"file":"sticker:{}","sub_type":1}}}}])", chosen.sha1),
         .text = std::format("[表情: {}]", chosen.description),
@@ -619,7 +652,10 @@ std::string known_about(Responder *r, const store::StoredMessage &target) {
 Task<> learn_facts(Responder *r, store::ChatKey chat, store::StoredMessage target, std::vector<store::StoredMessage> log) {
     std::vector<store::StoredMessage> own;
     for (auto it = log.rbegin(); it != log.rend() && own.size() < k_fact_own_messages; ++it) {
-        if (!it->from_self && it->sender_id == target.sender_id) own.push_back(*it);
+        if (it->from_self || it->sender_id != target.sender_id) continue;
+        // Facts quote the person, never the line they quoted.
+        own.push_back(*it);
+        own.back().text = std::string(without_quote(it->text));
     }
     std::ranges::reverse(own);
     usize evidence = 0;
@@ -684,6 +720,13 @@ Responder::Responder(const Config &config, store::Store &store, provider::Provid
 void Responder::attach(std::shared_ptr<onebot::Session> live, onebot::LoginInfo login) {
     session = std::move(live);
     self = std::move(login);
+    if (next_notice_id == 0) next_notice_id = -now() * 1000;
+    for (const auto group : config.chat.groups) spawn(learn_self(this, group));
+}
+
+std::string Responder::self_name(const store::ChatKey &chat) const {
+    const auto it = chats.find(chat);
+    return it != chats.end() && !it->second.self_card.empty() ? it->second.self_card : self.nickname;
 }
 
 void Responder::detach() noexcept { session.reset(); }
@@ -714,14 +757,24 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
     if (message.user_id == self.user_id || !chat_allowed(message, config.chat)) return std::nullopt;
 
     auto stored = to_stored(message);
+    // A quote is part of what was said: "[回复 小明: …] 内容".
+    std::string quote;
+    bool replies_to_self = false;
+    if (const auto target = onebot::reply_target(message.message)) {
+        auto quoted = store.message(stored.chat, *target);
+        const auto *found = quoted.has_value() && *quoted ? &**quoted : nullptr;
+        replies_to_self = found && found->from_self;
+        quote = quote_prefix(found, self_name(stored.chat));
+        stored.text = quote + stored.text;
+    }
     if (auto added = store.add_message(stored); added.has_error()) {
         log::error("cannot store message: {}", added.error().message());
     } else if (memory) {
         spawn(memory->index(stored.chat));
     }
-    if (archiver && session && !archive::collect_media(message.message).empty()) {
+    if (archiver && session && archive::needs_enrichment(message.message, archiver->config.enabled)) {
         archiver->track(stored.chat, stored.message_id);
-        spawn(archiver->archive(session, stored, message.message));
+        spawn(archiver->archive(session, stored, message.message, quote));
     }
     auto &state = chats[stored.chat];
     if (message.is_group()) {
@@ -736,10 +789,11 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
         return std::nullopt;
     }
 
-    bool replies_to_self = false;
-    if (const auto target = onebot::reply_target(message.message)) {
-        auto own = store.is_own_message(stored.chat, *target);
-        replies_to_self = own.has_value() && *own;
+    if (state.muted_until > now()) {
+        // Stored, but she cannot speak; what came in is stale once she can.
+        state.flow.unseen.clear();
+        state.flow.addressed.reset();
+        return std::nullopt;
     }
     const auto reason = classify(message, self.user_id, replies_to_self, config.chat);
     if (reason != TriggerReason::NONE) {
@@ -766,17 +820,131 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
     return chat;
 }
 
+namespace {
+
+/// A person in a notice line: her name in the chat, the name on their newest
+/// message, or their QQ number.
+std::string person(Responder *r, const store::ChatKey &chat, i64 user) {
+    if (user == r->self.user_id) return r->self_name(chat);
+    auto name = r->store.sender_name(chat, user);
+    return name.has_value() && !name->empty() ? *name : std::to_string(user);
+}
+
+/// "小明的「前十五个字…」", the message a notice is about; "一条消息" when
+/// it is not stored.
+std::string message_ref(Responder *r, const store::ChatKey &chat, i64 message_id) {
+    auto found = r->store.message(chat, message_id);
+    if (!found.has_value() || !*found) return "一条消息";
+    const auto &message = **found;
+    auto text = bounded_utf8(message.text, 45);
+    if (text.size() < message.text.size()) text += "…";
+    return std::format("{}的「{}」", message.from_self ? r->self_name(chat) : person(r, chat, message.sender_id), text);
+}
+
+/// Stores a notice line: context for her, never a turn of its own.
+void record_notice(Responder *r, const store::ChatKey &chat, i64 time, std::string text) {
+    auto added = r->store.add_message({
+        .chat = chat,
+        .message_id = r->next_notice_id--,
+        .sender_id = 0,
+        .sender_name = std::string(k_notice_sender),
+        .time = time > 0 ? time : r->now(),
+        .segments_json = "[]",
+        .text = std::move(text),
+    });
+    if (added.has_error()) log::error("cannot store a notice: {}", added.error().message());
+}
+
+/// "15分钟" / "2小时" / "3天" for a mute duration in seconds.
+std::string duration_text(i64 seconds) {
+    if (seconds >= 86'400) return std::format("{}天", seconds / 86'400);
+    if (seconds >= 3'600) return std::format("{}小时", seconds / 3'600);
+    return std::format("{}分钟", std::max<i64>(seconds / 60, 1));
+}
+
+/// "[赞]" etc. for the faces of an emoji reaction; "表情" when none is known.
+std::string reaction_faces(const std::optional<glz::generic_i64> &likes) {
+    std::string out;
+    if (likes && likes->is_array()) {
+        for (const auto &like : likes->get_array()) {
+            if (!like.is_object()) continue;
+            const auto &object = like.get_object();
+            const auto it = object.find("emoji_id");
+            if (it == object.end()) continue;
+            i64 id = -1;
+            if (it->second.is_int64()) {
+                id = it->second.get<i64>();
+            } else if (it->second.is_string()) {
+                const auto &text = it->second.get_string();
+                std::from_chars(text.data(), text.data() + text.size(), id);
+            }
+            if (const auto name = onebot::face_name(id); !name.empty()) out += std::format("[{}]", name);
+        }
+    }
+    return out.empty() ? std::string("表情") : out;
+}
+
+} // namespace
+
+void Responder::recall(const store::ChatKey &chat, i64 message_id) {
+    if (auto updated = store.update_message_text(chat, message_id, onebot::k_recalled_text); updated.has_error()) {
+        log::error("cannot mark a recalled message: {}", updated.error().message());
+    }
+    auto &flow = chats[chat].flow;
+    std::erase_if(flow.unseen, [&](const store::StoredMessage &message) { return message.message_id == message_id; });
+    if (flow.addressed == message_id) flow.addressed.reset();
+    log::info("{}: message {} was recalled", describe(chat), message_id);
+}
+
+void Responder::notice(const onebot::NoticeEvent &notice) {
+    if (!notice.group_id || !std::ranges::contains(config.chat.groups, *notice.group_id)) return;
+    const store::ChatKey chat{.type = "group", .id = *notice.group_id};
+    auto &state = chats[chat];
+    const auto &type = notice.notice_type;
+    const auto &sub = notice.sub_type;
+    const auto operator_name = [&] { return person(this, chat, notice.operator_id.value_or(0)); };
+    if (type == "notify" && sub == "poke" && notice.target_id) {
+        record_notice(this, chat, notice.time,
+                      std::format("{}戳了戳{}", person(this, chat, notice.user_id), person(this, chat, *notice.target_id)));
+        if (notice.target_id == self.user_id && notice.user_id != self.user_id) spawn(poke_back(this, *notice.group_id, notice.user_id));
+    } else if (type == "group_recall" && notice.message_id) {
+        recall(chat, *notice.message_id);
+    } else if (type == "group_ban") {
+        const bool everyone = notice.user_id == 0;
+        const bool lifted = sub == "lift_ban";
+        if (everyone || notice.user_id == self.user_id) {
+            // A whole-group mute has no duration; a day bounds a missed lift.
+            const i64 seconds = everyone ? 86'400 : notice.duration.value_or(0);
+            state.muted_until = lifted ? 0 : now() + seconds;
+            log::info("{}: {}", describe(chat), lifted ? "she can speak again" : "she is muted");
+        }
+        record_notice(this, chat, notice.time,
+                      everyone ? std::format("{}{}了全员禁言", operator_name(), lifted ? "解除" : "开启") :
+                      lifted   ? std::format("{}解除了{}的禁言", operator_name(), person(this, chat, notice.user_id)) :
+                                 std::format("{}把{}禁言了{}", operator_name(), person(this, chat, notice.user_id),
+                                             duration_text(notice.duration.value_or(0))));
+    } else if (type == "group_msg_emoji_like" && notice.message_id && notice.is_add.value_or(true)) {
+        record_notice(this, chat, notice.time,
+                      std::format("{}给{}贴了{}", person(this, chat, notice.user_id), message_ref(this, chat, *notice.message_id),
+                                  reaction_faces(notice.likes)));
+    } else if (type == "essence" && sub == "add" && notice.message_id) {
+        record_notice(this, chat, notice.time,
+                      std::format("{}把{}设为了精华消息", operator_name(), message_ref(this, chat, *notice.message_id)));
+    } else if (type == "group_increase") {
+        record_notice(this, chat, notice.time, std::format("{}加入了群聊", person(this, chat, notice.user_id)));
+    } else if (type == "group_decrease" && sub != "kick_me") {
+        record_notice(this, chat, notice.time,
+                      std::format("{}{}了群聊", person(this, chat, notice.user_id), sub == "kick" ? "被移出" : "退出"));
+    }
+}
+
 void Responder::on_event(onebot::Event event) {
     if (const auto *meta = std::get_if<onebot::MetaEvent>(&event)) {
         if (meta->meta_event_type == "lifecycle") log::info("onebot lifecycle: {}", meta->sub_type);
         return;
     }
     if (const auto *notice = std::get_if<onebot::NoticeEvent>(&event)) {
-        // Someone poked her in an allowed group.
-        if (session && notice->notice_type == "notify" && notice->sub_type == "poke" && notice->group_id &&
-            notice->target_id == self.user_id && notice->user_id != self.user_id &&
-            std::ranges::contains(config.chat.groups, *notice->group_id))
-            spawn(poke_back(this, *notice->group_id, notice->user_id));
+        if (session) this->notice(*notice);
         return;
     }
     // Until get_login_info answers, lilia does not know its own id.
@@ -799,6 +967,8 @@ namespace {
 struct Delivered {
     bool sent = false;
     std::string said; ///< her messages, joined
+    /// Why nothing was attempted (the target was recalled), for the planner.
+    std::string refused;
 };
 
 /// One reply as the planner asked for it: a sticker alone, or the writer's
@@ -936,7 +1106,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         // Only later messages wait for "typing"; the first goes out at once.
         if (r->realtime && i > 0) co_await lighter::sleep(typing_delay(segments[i].text, settings.typing_speed));
         onebot::Message message;
-        if (i == 0 && plan.quote && chat.type == "group") {
+        if (i == 0 && plan.quote && chat.type == "group" && plan.target > 0) {
             message.push_back(onebot::reply_segment(plan.target));
         } else if (segments[i].quote_previous && sent_id) {
             message.push_back(onebot::reply_segment(*sent_id));
@@ -954,7 +1124,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         std::ignore = co_await send_sticker(r, chat, plan.sticker + "：" + plan.intent, log_lines);
     }
     note_spoke(state.flow, r->now(), target.sender_id);
-    if (r->memory && r->config.memory.facts && !target.from_self) r->spawn(learn_facts(r, chat, target, log_lines));
+    if (r->memory && r->config.memory.facts && !target.from_self && !is_notice(target)) r->spawn(learn_facts(r, chat, target, log_lines));
 
     std::string said;
     for (usize i = 0; i < sent; ++i) said += (said.empty() ? "" : " ") + bubbles[i];
@@ -991,7 +1161,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     auto &state = chats[chat];
     auto fresh = std::exchange(state.flow.unseen, {});
     auto addressed = std::exchange(state.flow.addressed, std::nullopt);
-    if (fresh.empty()) co_return;
+    if (fresh.empty() || state.muted_until > now()) co_return;
 
     const auto &settings = config.chat;
     const i64 started = now();
@@ -1039,7 +1209,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         }
     }
 
-    const ChatInfo info{.chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self.nickname};
+    const ChatInfo info{
+        .chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self_name(chat)};
     PlannerInput planner_input{
         .prompt = fill_template(embedded(xmake::planner_md), {{"name", settings.name},
                                                               {"persona", persona},
@@ -1120,6 +1291,13 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             log::warn("planner target {} is not in the chat log", plan.target);
             co_return Delivered{};
         }
+        // Taken back, maybe after the log was read: not something to answer.
+        if (auto current = store.message(chat, plan.target);
+            target->text == onebot::k_recalled_text || (current.has_value() && *current && (*current)->text == onebot::k_recalled_text)) {
+            log::info("{}: {} was recalled; not answering it", describe(chat), plan.target);
+            if (addressed == plan.target) answered = true;
+            co_return Delivered{.refused = "那条消息已经被撤回了，没有回。"};
+        }
         log::info("{} replies to {} ({}, quote {}, search {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
                   plan.search, plan.intent.empty() ? plan.brief : plan.intent);
         remember_decision(state, std::format("[{}] 回复了{}的「{}」：{}", clock_of(now(), settings.utc_offset_minutes),
@@ -1168,7 +1346,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             const auto target = std::ranges::find(log_lines, plan.target, &store::StoredMessage::message_id);
             const auto index = static_cast<usize>(std::ranges::find(ids, plan.target) - ids.begin()) + 1;
             std::string receipt;
-            if (target == log_lines.end() || target->from_self || !repeatable(target->text)) {
+            if (target == log_lines.end() || target->from_self || is_notice(*target) || !repeatable(target->text)) {
                 receipt = std::format("#{} 不适合复读（只复读别人的短消息），没有发。", index);
             } else if (co_await send_and_record(this, chat, {onebot::text_segment(target->text)})) {
                 ++replies;
@@ -1218,6 +1396,10 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         }
 
         const auto delivered = co_await reply_to(plan);
+        if (!delivered.refused.empty()) {
+            provider::append_tool_outcomes(history, outcomes(*planned, call_id, delivered.refused));
+            continue;
+        }
         if (!delivered.sent) {
             ended = "the reply failed";
             break;
