@@ -248,6 +248,8 @@ struct MemoryConfig {
     /// Sticker searches rerank this many fused candidates down to
     /// stickers.candidates (0: no reranking).
     usize rerank_stickers = 0;
+    /// Show the reranker pictures too, not only text (about 2.4x the time).
+    bool rerank_images = true;
     /// Messages per chunk, and the pause that starts a new chunk.
     usize chunk_messages = 6;
     i64 chunk_gap_seconds = 1800;

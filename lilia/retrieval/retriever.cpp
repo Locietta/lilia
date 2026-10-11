@@ -413,7 +413,10 @@ Task<std::vector<Match>> Retriever::search(std::string_view task, std::string qu
     auto pool = fuse(dense, boosts, lexical, options, firsts);
     if (pool.size() > 1) {
         std::vector<RerankInput> inputs;
-        for (const auto &match : pool) inputs.push_back(rerank_input(documents[match.index]));
+        for (const auto &match : pool) {
+            inputs.push_back(rerank_input(documents[match.index]));
+            if (!config.rerank_images) inputs.back().image.clear();
+        }
         auto scores = co_await reranker(std::move(query), std::move(inputs), std::string(options.rerank_task));
         if (scores.has_value() && scores->size() == pool.size()) {
             if (rerank_failing) log::info("retrieval: the reranker answers again");
