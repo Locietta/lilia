@@ -287,6 +287,10 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             print(std::format("        · 等 {} 秒：{}", plan.wait, plan.reason));
         } else if (plan.repeat || plan.intent == "复读") {
             print("        · 复读");
+        } else if (!plan.sticker.empty()) {
+            print(std::format("        · 表情包 {}", plan.sticker));
+        } else if (plan.poke) {
+            print("        · 戳一戳");
         } else if (!plan.reply) {
             print(std::format("        · {}：{}", plan.follow_up ? "到此为止" : "不说话", plan.reason));
         } else {
