@@ -655,6 +655,14 @@ std::string expression_text(std::string_view situation, std::string_view style) 
     return std::format("情景：{}\n风格：{}", situation, style);
 }
 
+std::vector<std::string> embedded_texts(store::Store &store) {
+    std::vector<std::string> texts;
+    if (auto rows = store.expressions(0); rows.has_value()) {
+        for (const auto &row : *rows) texts.push_back(expression_text(row.situation, row.style));
+    }
+    return texts;
+}
+
 Task<std::optional<std::vector<Rejected>>> Learner::review(i64 group, const std::vector<Learned> &learned) {
     if (learned.empty()) co_return std::vector<Rejected>{};
     const auto items = co_await run_call(this, group, build_review_request(review_prompt, learned), "review");
@@ -793,14 +801,6 @@ Task<> Learner::infer(store::Jargon term) {
     std::ignore = store.set_jargon_inference(term.id, jargon ? first->meaning : term.meaning, jargon ? 1 : 0, term.count, complete);
     log::info("jargon: \"{}\" is {} ({} sightings){}", term.content, jargon ? "slang" : "an ordinary word", term.count,
               jargon ? ": " + first->meaning : "");
-}
-
-std::vector<std::string> Learner::embedded_texts() {
-    std::vector<std::string> texts;
-    if (auto rows = store.expressions(0); rows.has_value()) {
-        for (const auto &row : *rows) texts.push_back(expression_text(row.situation, row.style));
-    }
-    return texts;
 }
 
 } // namespace lilia::learn

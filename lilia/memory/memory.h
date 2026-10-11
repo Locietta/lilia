@@ -92,12 +92,12 @@ store::MemoryChunk summary_chunk(const store::ChatSummary &summary, i32 utc_offs
 /// What a summary is found by: the summary, then each recall cue.
 std::vector<std::string> summary_texts(const store::ChatSummary &summary);
 
+/// Everything memory embeds (chunks, summaries and their cues, facts), for
+/// the startup backfill.
+std::vector<std::string> embedded_texts(store::Store &store);
+
 struct Memory {
     Memory(const MemoryConfig &config, std::string self_name, i32 utc_offset_minutes, store::Store &store, retrieval::Retriever &retriever);
-
-    /// Everything memory has embedded (chunks, summaries and cues, facts),
-    /// for the startup backfill.
-    std::vector<std::string> embedded_texts();
 
     /// Chunks and embeds the messages of `chat` not covered yet (the whole
     /// history the first time). Calls for a chat while one runs are merged.

@@ -128,6 +128,9 @@ bool shares(const std::vector<std::vector<i64>> &groups, i64 a, i64 b);
 /// What a pattern is embedded as (MaiBot's form): "情景：…\n风格：…".
 std::string expression_text(std::string_view situation, std::string_view style);
 
+/// Every pattern as embedded, for the startup backfill.
+std::vector<std::string> embedded_texts(store::Store &store);
+
 /// "以下黑话来自…" lines for the slang (is_jargon, with a meaning) that occurs
 /// in others' messages of `log`, at most `limit`; empty when none occurs.
 /// Ranked as MaiBot does: by count, but slang that is also one of the chat's
@@ -189,9 +192,6 @@ struct Learner {
 
     /// Infers `term`'s meaning (context, word alone, comparison) and stores it.
     lighter::Task<> infer(store::Jargon term);
-
-    /// Every pattern as embedded (expression_text), for the startup backfill.
-    std::vector<std::string> embedded_texts();
 
     Clock now;
     const LearningConfig &config;

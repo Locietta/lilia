@@ -49,6 +49,7 @@ void print_usage(FILE *output) {
                "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
                "       lilia expressions --rejected | --rescue <review id> | --check <id> | --uncheck <id>\n"
                "       lilia jargon [--limit <n>] | --set <term> <meaning> | --delete <term>\n"
+               "       lilia retrieval [--query <text>]... [--db <lilia.db>] [--config <path>]\n"
                "       lilia segment [--terms | --count <n> | --bench | --pieces | --homophones] < lines.txt\n"
                "       lilia --version | --help\n",
                output);
@@ -109,27 +110,85 @@ Task<> supervise(const Config &config, chat::Responder &responder) {
     }
 }
 
-/// Embeds what memory, learning and the sticker pool hold under the current
-/// profile (everything, after a model change), then drops other profiles.
-Task<> backfill(retrieval::Retriever &retriever, memory::Memory &memory, learn::Learner *learner, store::Store &store, bool stickers) {
-    auto texts = memory.embedded_texts();
-    if (learner) std::ranges::move(learner->embedded_texts(), std::back_inserter(texts));
-    if (auto pool = stickers ? store.stickers("registered") : Result<std::vector<store::Sticker>>(std::vector<store::Sticker>{});
-        pool.has_value()) {
-        for (const auto &sticker : *pool) texts.push_back(sticker::embedding_text(sticker));
+/// Everything the current configuration embeds: memory, learned patterns and
+/// the sticker pool.
+std::vector<std::string> embedded_texts(const Config &config, store::Store &store) {
+    auto texts = memory::embedded_texts(store);
+    if (config.learning.enabled) std::ranges::move(learn::embedded_texts(store), std::back_inserter(texts));
+    if (config.stickers.enabled) {
+        if (auto pool = store.stickers("registered"); pool.has_value()) {
+            for (const auto &sticker : *pool) texts.push_back(sticker::embedding_text(sticker));
+        }
     }
+    return texts;
+}
+
+/// Embeds `texts` under the current profile (everything, after a model
+/// change), then drops other profiles. Returns how many have no vector.
+Task<usize> backfill(retrieval::Retriever &retriever, store::Store &store, std::vector<std::string> texts) {
     const auto started = std::chrono::steady_clock::now();
     const usize total = texts.size();
     const auto missing = co_await retriever.backfill(std::move(texts));
     const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
     log::info("retrieval: {} text(s) ready under {} in {} ms{}", total - missing, retriever.profile, took.count(),
               missing ? std::format(", {} not embedded", missing) : "");
-    if (missing > 0) co_return;
+    if (missing > 0) co_return missing;
     if (auto dropped = store.delete_embeddings_except(retriever.profile); dropped.has_error()) {
         log::error("retrieval: {}", dropped.error().message());
     } else if (*dropped > 0) {
         log::info("retrieval: dropped {} vector(s) of other models", *dropped);
     }
+    co_return 0;
+}
+
+/// `lilia retrieval`: opens (and migrates) the database, backfills like a
+/// start, then times a sticker search, a search of each allowed chat and an
+/// expression search for each query. Prints scores and sticker tags only,
+/// never chat text.
+Task<int> run_retrieval(const Config &config, std::filesystem::path database, std::vector<std::string> queries) {
+    auto store = store::Store::open(database);
+    if (store.has_error()) {
+        log::error("{}", store.error().message());
+        co_return 1;
+    }
+    retrieval::Retriever retriever(config.memory, *store);
+    memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store, retriever);
+    if (co_await backfill(retriever, *store, embedded_texts(config, *store)) > 0) co_return 1;
+    const auto time = [](std::chrono::steady_clock::time_point started) {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    };
+    auto pool = store->stickers("registered");
+    std::vector<retrieval::Document> stickers;
+    for (const auto &sticker : pool.has_value() ? *pool : std::vector<store::Sticker>{}) {
+        stickers.push_back(
+            {.id = sticker.id, .texts = {sticker::embedding_text(sticker)}, .lexical = sticker.tags + " " + sticker.description});
+    }
+    std::vector<retrieval::Document> expressions;
+    for (auto &text : learn::embedded_texts(*store)) expressions.push_back({.texts = {std::move(text)}});
+    for (const auto &query : queries) {
+        std::printf("== %s\n", query.c_str());
+        for (int round = 0; round < 2; ++round) {
+            const auto started = std::chrono::steady_clock::now();
+            const auto matches = co_await retriever.search(retrieval::k_sticker_task, query, stickers, {.top_k = 8, .lexical = true});
+            std::printf("stickers (%s): %.1f ms\n", round == 0 ? "new query" : "same query again", time(started));
+            if (round == 1) continue;
+            for (const auto &match : matches) {
+                const auto &sticker = (*pool)[match.index];
+                std::printf("  s%lld %.3f [%s]\n", static_cast<long long>(sticker.id), match.similarity.value_or(0), sticker.tags.c_str());
+            }
+        }
+        for (const auto group : config.chat.groups) {
+            const auto started = std::chrono::steady_clock::now();
+            const auto hits = co_await memory.search({.type = "group", .id = group}, query);
+            std::printf("chat %lld: %zu hit(s)%s, %.1f ms\n", static_cast<long long>(group), hits.size(),
+                        hits.empty() ? "" : std::format(", best {:.3f}", hits.front().score).c_str(), time(started));
+        }
+        const auto started = std::chrono::steady_clock::now();
+        const auto picked = co_await retriever.search(retrieval::k_expression_task, query, expressions, {.top_k = 30, .mmr_lambda = 0.85});
+        std::printf("expressions: %zu of %zu, best %.3f, %.1f ms\n", picked.size(), expressions.size(),
+                    picked.empty() ? 0.0 : picked.front().similarity.value_or(0), time(started));
+    }
+    co_return 0;
 }
 
 Task<int> run_app(const Config &config) {
@@ -171,7 +230,9 @@ Task<int> run_app(const Config &config) {
         memory.summarizer = make_learner(config.model);
         memory.summarizer_model = config.model.helper();
         learner.retriever = &retriever;
-        tasks.spawn(backfill(retriever, memory, config.learning.enabled ? &learner : nullptr, *store, config.stickers.enabled));
+        tasks.spawn([](retrieval::Retriever &retriever, store::Store &store, std::vector<std::string> texts) -> Task<> {
+            std::ignore = co_await backfill(retriever, store, std::move(texts));
+        }(retriever, *store, embedded_texts(config, *store)));
         for (const auto group : config.chat.groups) tasks.spawn(memory.index({.type = "group", .id = group}));
         for (const auto user : config.chat.private_users) tasks.spawn(memory.index({.type = "private", .id = user}));
     }
@@ -209,6 +270,9 @@ int main(int argc, char **argv) {
     std::vector<std::string> keep;
     usize limit = 100;
     bool check_only = false;
+    bool retrieval_check = false;
+    std::vector<std::string> queries;
+    std::optional<std::filesystem::path> database_path;
     if (argc >= 2 && std::string_view(argv[1]) == "segment") {
         // Debugging aids, one stdin line per message: jieba words of each
         // line joined by "/"; --terms: its meaningful terms; --count <n>: the
@@ -305,6 +369,9 @@ int main(int argc, char **argv) {
     } else if (argc > 1 && std::string_view(argv[1]) == "expressions") {
         list_expressions = true;
         first = 2;
+    } else if (argc > 1 && std::string_view(argv[1]) == "retrieval") {
+        retrieval_check = true;
+        first = 2;
     } else if (argc > 1 && std::string_view(argv[1]) == "jargon") {
         jargon = true;
         manage.action = "list";
@@ -334,6 +401,10 @@ int main(int argc, char **argv) {
             stickers_db = argv[++i];
         } else if (arg == "--continue-at" && replay_log && i + 1 < argc) {
             continue_at = static_cast<usize>(std::max(0, std::atoi(argv[++i])));
+        } else if (arg == "--query" && retrieval_check && i + 1 < argc) {
+            queries.emplace_back(argv[++i]);
+        } else if (arg == "--db" && retrieval_check && i + 1 < argc) {
+            database_path = argv[++i];
         } else if (arg == "--group" && learn_history && i + 1 < argc) {
             history_groups.push_back(std::atoll(argv[++i]));
         } else if (arg == "--count" && learn_history && i + 1 < argc) {
@@ -390,10 +461,11 @@ int main(int argc, char **argv) {
     }
     auto app = lighter::with_token(replay_log ?
                                        run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at) :
-                                   learn_log     ? run_learn(*config, *learn_log) :
-                                   learn_history ? run_learn_history(*config, history_groups, history_count) :
-                                   review        ? review_expressions(*config, apply, keep) :
-                                                   run_app(*config),
+                                   learn_log       ? run_learn(*config, *learn_log) :
+                                   learn_history   ? run_learn_history(*config, history_groups, history_count) :
+                                   review          ? review_expressions(*config, apply, keep) :
+                                   retrieval_check ? run_retrieval(*config, database_path.value_or(database), queries) :
+                                                     run_app(*config),
                                    interrupts->token());
     loop.schedule(app);
     loop.run();

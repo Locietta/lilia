@@ -200,7 +200,7 @@ Task<> test_memory() {
     }
     co_await memory.index(chat);
     require(db->chunks(chat)->size() == 3 && db->search_texts()->front() == "阿紫: 我对芒果过敏\n老王: 记住了\n", "chunked and indexed");
-    require(memory.embedded_texts().size() == 3, "what memory has embedded");
+    require(memory::embedded_texts(*db).size() == 3, "what memory has embedded");
 
     auto hits = co_await memory.search(chat, "谁对芒果过敏");
     require(hits.size() == 1 && hits[0].chunk.text.contains("我对芒果过敏") && hits[0].score > 0.9, "found by meaning, gated");

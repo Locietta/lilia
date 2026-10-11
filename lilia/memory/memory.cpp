@@ -69,7 +69,7 @@ Memory::Memory(const MemoryConfig &config, std::string self_name, i32 utc_offset
     : now([] { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }),
       config(config), self_name(std::move(self_name)), utc_offset_minutes(utc_offset_minutes), store(store), retriever(retriever) {}
 
-std::vector<std::string> Memory::embedded_texts() {
+std::vector<std::string> embedded_texts(store::Store &store) {
     std::vector<std::string> texts;
     if (auto chunks = store.search_texts(); chunks.has_value()) texts = *std::move(chunks);
     if (auto summaries = store.all_summaries(); summaries.has_value()) {
