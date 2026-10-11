@@ -94,6 +94,10 @@ constexpr usize k_max_messages = 3;
 constexpr usize k_max_rounds = 8;
 constexpr usize k_max_waits = 3;
 constexpr usize k_max_replies = 3;
+/// After a reconnect: this many of each group's newest messages are read, and
+/// whoever called her this recently is still answered.
+constexpr usize k_catch_up_messages = 100;
+constexpr i64 k_late_answer_seconds = 1800;
 
 store::ChatKey chat_key(const onebot::MessageEvent &event) {
     if (event.is_group()) return {.type = "group", .id = *event.group_id};
@@ -267,7 +271,8 @@ Task<> debounce(Responder *r, const store::ChatKey &chat) {
     const i64 started = r->now();
     for (;;) {
         const auto &flow = r->chats[chat].flow;
-        const i64 quiet = flow.addressed ? std::min<i64>(r->config.chat.debounce_seconds, 2) : r->config.chat.debounce_seconds;
+        const i64 quiet =
+            flow.addressed || flow.named ? std::min<i64>(r->config.chat.debounce_seconds, 2) : r->config.chat.debounce_seconds;
         const i64 wait = flow.last_arrival + quiet - r->now();
         if (wait <= 0 || r->now() - started >= k_max_debounce_seconds) co_return;
         co_await lighter::sleep(std::chrono::seconds(wait));
@@ -366,8 +371,11 @@ Task<> live_presence(Responder *r, const store::ChatKey &chat) {
         break;
     }
     if (!schedule.enabled) co_return;
-    // A moment to read before reacting.
-    const bool called = r->chats[chat].flow.addressed.has_value();
+    // A moment to read before reacting; quicker when someone is talking to her.
+    const auto &flow = r->chats[chat].flow;
+    const bool in_conversation = flow.partner != 0 && r->now() - flow.last_spoke <= r->config.chat.conversation_window_seconds &&
+                                 std::ranges::contains(flow.unseen, flow.partner, &store::StoredMessage::sender_id);
+    const bool called = flow.addressed || flow.named || in_conversation;
     co_await lighter::sleep(std::chrono::seconds(called ?
                                                      random_seconds(r, schedule.read_called_min_seconds, schedule.read_called_max_seconds) :
                                                      random_seconds(r, schedule.read_min_seconds, schedule.read_max_seconds)));
@@ -407,6 +415,7 @@ Task<> turn_worker(Responder *r, store::ChatKey chat) {
             // What came in while she could not speak is stale once she can.
             state.flow.unseen.clear();
             state.flow.addressed.reset();
+            state.flow.named.reset();
         }
         if (!should_plan(state.flow, r->flow_settings(), r->now())) {
             state.busy = false;
@@ -418,6 +427,77 @@ Task<> turn_worker(Responder *r, store::ChatKey chat) {
         }
         co_await r->run_turn(chat);
     }
+}
+
+/// Stores a message of an allowed chat with its quote, indexes it and starts
+/// its enrichment; `replies_to_self` tells whether it quotes her.
+store::StoredMessage record_event(Responder *r, const onebot::MessageEvent &message, bool &replies_to_self) {
+    auto stored = to_stored(message);
+    // A quote is part of what was said: "[回复 小明: …] 内容".
+    std::string quote;
+    replies_to_self = false;
+    if (const auto target = onebot::reply_target(message.message)) {
+        auto quoted = r->store.message(stored.chat, *target);
+        const auto *found = quoted.has_value() && *quoted ? &**quoted : nullptr;
+        replies_to_self = found && found->from_self;
+        quote = quote_prefix(found, r->self_name(stored.chat));
+        stored.text = quote + stored.text;
+    }
+    if (auto added = r->store.add_message(stored); added.has_error()) {
+        log::error("cannot store message: {}", added.error().message());
+    } else if (r->memory) {
+        r->spawn(r->memory->index(stored.chat));
+    }
+    if (r->archiver && r->session && archive::needs_enrichment(message.message, r->archiver->config.enabled)) {
+        r->archiver->track(stored.chat, stored.message_id);
+        r->spawn(r->archiver->archive(r->session, stored, message.message, quote));
+    }
+    return stored;
+}
+
+/// What came in while she was away (a restart, a lost connection) since
+/// `since` is stored as history; whoever called her in the last half hour is
+/// answered late.
+Task<> catch_up(Responder *r, i64 group, i64 since) {
+    auto session = r->session;
+    const store::ChatKey chat{.type = "group", .id = group};
+    if (!session || !session->is_open()) co_return;
+    const auto history = co_await onebot::group_history(session, group, k_catch_up_messages);
+    usize added = 0;
+    i64 first = 0;
+    for (const auto &message : history) {
+        if (message.time < since || message.user_id == r->self.user_id || !chat_allowed(message, r->config.chat)) continue;
+        if (auto known = r->store.message(chat, message.message_id); !known.has_value() || *known) continue;
+        bool replies_to_self = false;
+        auto stored = record_event(r, message, replies_to_self);
+        if (first == 0) first = message.time;
+        ++added;
+        const auto reason = classify(message, r->self.user_id, replies_to_self, r->config.chat);
+        auto &state = r->chats[chat];
+        if ((reason == TriggerReason::MENTION || reason == TriggerReason::REPLY) && r->now() - message.time <= k_late_answer_seconds &&
+            !muted(r, chat)) {
+            state.flow.addressed = message.message_id;
+            state.flow.unseen.push_back(std::move(stored));
+        }
+    }
+    if (added == 0) co_return;
+    log::info("{}: caught up on {} message(s) from while she was away", describe(chat), added);
+    auto &state = r->chats[chat];
+    state.presence_note = std::format("她刚上线：{} 以后有些消息是她不在线时发的，已经过去的事不用回；有人叫过她的话现在回，可以说刚看到。",
+                                      clock_of(first, r->config.chat.utc_offset_minutes));
+    if (!state.flow.unseen.empty() && !state.busy) {
+        state.busy = true;
+        r->spawn(turn_worker(r, chat));
+    }
+}
+
+/// On every connection: her card and mute state in the group, then what she missed.
+Task<> rejoin(Responder *r, i64 group) {
+    // Read before anything new is stored. A chat she has never seen starts
+    // from now, not from its history.
+    auto newest = r->store.recent_messages({.type = "group", .id = group}, 1);
+    co_await learn_self(r, group);
+    if (newest.has_value() && !newest->empty()) co_await catch_up(r, group, newest->back().time);
 }
 
 Task<> handle_admin(Responder *r, store::StoredMessage command, std::string arguments) {
@@ -721,7 +801,7 @@ void Responder::attach(std::shared_ptr<onebot::Session> live, onebot::LoginInfo 
     session = std::move(live);
     self = std::move(login);
     if (next_notice_id == 0) next_notice_id = -now() * 1000;
-    for (const auto group : config.chat.groups) spawn(learn_self(this, group));
+    for (const auto group : config.chat.groups) spawn(rejoin(this, group));
 }
 
 std::string Responder::self_name(const store::ChatKey &chat) const {
@@ -756,26 +836,8 @@ Result<void> Responder::reload_persona() {
 std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &message) {
     if (message.user_id == self.user_id || !chat_allowed(message, config.chat)) return std::nullopt;
 
-    auto stored = to_stored(message);
-    // A quote is part of what was said: "[回复 小明: …] 内容".
-    std::string quote;
     bool replies_to_self = false;
-    if (const auto target = onebot::reply_target(message.message)) {
-        auto quoted = store.message(stored.chat, *target);
-        const auto *found = quoted.has_value() && *quoted ? &**quoted : nullptr;
-        replies_to_self = found && found->from_self;
-        quote = quote_prefix(found, self_name(stored.chat));
-        stored.text = quote + stored.text;
-    }
-    if (auto added = store.add_message(stored); added.has_error()) {
-        log::error("cannot store message: {}", added.error().message());
-    } else if (memory) {
-        spawn(memory->index(stored.chat));
-    }
-    if (archiver && session && archive::needs_enrichment(message.message, archiver->config.enabled)) {
-        archiver->track(stored.chat, stored.message_id);
-        spawn(archiver->archive(session, stored, message.message, quote));
-    }
+    auto stored = record_event(this, message, replies_to_self);
     auto &state = chats[stored.chat];
     if (message.is_group()) {
         if (message.group_name && !message.group_name->empty()) state.name = *message.group_name;
@@ -793,16 +855,18 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
         // Stored, but she cannot speak; what came in is stale once she can.
         state.flow.unseen.clear();
         state.flow.addressed.reset();
+        state.flow.named.reset();
         return std::nullopt;
     }
     const auto reason = classify(message, self.user_id, replies_to_self, config.chat);
     if (reason != TriggerReason::NONE) {
         log::info("{} from {} in {}", to_string(reason), stored.sender_id, describe(stored.chat));
-        state.flow.addressed = stored.message_id;
+        // Her name alone may be talk about her; the planner decides.
+        (reason == TriggerReason::ALIAS ? state.flow.named : state.flow.addressed) = stored.message_id;
     }
     const auto chat = stored.chat;
+    note_arrival(state.flow, now());
     state.flow.unseen.push_back(std::move(stored));
-    state.flow.last_arrival = now();
     // QQ's 复读: people sending the same short line in a row; she may join.
     if (message.is_group()) {
         if (auto recent = store.recent_messages(chat, k_repeat_lookback); recent.has_value()) {
@@ -893,6 +957,7 @@ void Responder::recall(const store::ChatKey &chat, i64 message_id) {
     auto &flow = chats[chat].flow;
     std::erase_if(flow.unseen, [&](const store::StoredMessage &message) { return message.message_id == message_id; });
     if (flow.addressed == message_id) flow.addressed.reset();
+    if (flow.named == message_id) flow.named.reset();
     log::info("{}: message {} was recalled", describe(chat), message_id);
 }
 
@@ -1161,6 +1226,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     auto &state = chats[chat];
     auto fresh = std::exchange(state.flow.unseen, {});
     auto addressed = std::exchange(state.flow.addressed, std::nullopt);
+    const auto named = std::exchange(state.flow.named, std::nullopt);
     if (fresh.empty() || state.muted_until > now()) co_return;
 
     const auto &settings = config.chat;
@@ -1195,7 +1261,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     // MaiBot weighs "how much of the recent chat was me" heavily: once she has
     // said a lot lately, only being called (or answered right after her own
     // message) brings her back, and the planner is not even asked.
-    if (!addressed) {
+    if (!addressed && !named) {
         const usize window = std::min(log_lines.size(), k_self_window);
         const auto recent_self =
             std::ranges::count_if(log_lines.end() - static_cast<std::ptrdiff_t>(window), log_lines.end(), &store::StoredMessage::from_self);
@@ -1220,6 +1286,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .info = info,
         .recent = log_lines,
         .addressed = addressed.has_value(),
+        .named = named.has_value(),
         .now = started,
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = settings.context_bytes,
@@ -1269,6 +1336,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             addressed = called;
             answered = false;
         }
+        state.flow.named.reset(); // the planner sees those lines now
         if (arrived.empty()) co_return std::string();
         co_await settle_images(arrived);
         newest = arrived.back().message_id;

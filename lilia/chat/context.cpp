@@ -245,6 +245,9 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         user += std::format("#{} {}\n", request.ids.size(), render_line(message, input.utc_offset_minutes));
     }
     user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
+            input.named     ? std::format("\n新消息里有人提到了{0}的名字：可能是在跟她说话，也可能只是在聊她。是在跟她说话就回应；"
+                                          "只是聊到她，就像被人背后提到一样看情况，可以接一句，也可以不出声。",
+                                          input.info.name) :
                               std::format("\n没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
     if (!input.presence.empty()) user += "\n" + input.presence;
     if (!input.people.empty()) {

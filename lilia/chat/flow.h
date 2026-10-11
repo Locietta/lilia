@@ -26,9 +26,17 @@ struct FlowSettings {
 struct Flow {
     /// Others' messages since the planner last ran, oldest first.
     std::vector<store::StoredMessage> unseen;
-    /// The newest unseen message that addresses lilia (mention, reply, name).
+    /// The newest unseen message that calls lilia (an @, a reply to her, a
+    /// private message): she answers it.
     std::optional<i64> addressed;
-    i64 last_arrival = 0; ///< unix seconds the newest unseen message arrived
+    /// The newest unseen message that only names her: the planner looks, but
+    /// it may be about her rather than to her.
+    std::optional<i64> named;
+    i64 last_arrival = 0; ///< unix seconds the newest message arrived
+    /// Seconds of silence before the first unseen message.
+    i64 quiet_before = 0;
+    /// Smoothed seconds between messages here (0 until two have arrived).
+    double interval = 0;
     i64 last_spoke = 0;
     /// Whom she last answered; their messages inside the window always reach
     /// the planner, backoff or not (they are probably talking to her).
@@ -37,7 +45,15 @@ struct Flow {
     i64 backoff_until = 0;
 };
 
+/// MaiBot's silence credit: outside a conversation the planner looks every
+/// ceil(1/talk_value) messages, but the silence before them counts too, one
+/// virtual message per average interval (at least 30 s), at most one short
+/// of the threshold.
 bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now);
+
+/// A message arrived (before it joins `unseen`): keeps the silence before the
+/// first unseen one and the average interval.
+void note_arrival(Flow &flow, i64 now);
 
 /// The planner chose silence while nobody addressed lilia: back off
 /// (15s, doubling to 5 min) after two such decisions in a row.

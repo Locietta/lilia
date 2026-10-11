@@ -44,6 +44,14 @@ void test_triggers() {
     require(chat::classify(group_message({text_segment("lilia 在吗")}), k_self, false, config) == TriggerReason::ALIAS,
             "ASCII aliases match case-insensitively");
     require(chat::classify(group_message({text_segment("问问莉莉娅")}), k_self, false, config) == TriggerReason::ALIAS, "CJK alias");
+    require(chat::classify(group_message({text_segment("lilia在吗")}), k_self, false, config) == TriggerReason::ALIAS &&
+                chat::classify(group_message({text_segment("是 lilia.")}), k_self, false, config) == TriggerReason::ALIAS,
+            "an ASCII alias next to CJK or punctuation");
+    require(chat::classify(group_message({text_segment("Ophilia 好强")}), k_self, false, config) == TriggerReason::NONE,
+            "not inside a longer word");
+    require(chat::classify(group_message({text_segment("看 https://github.com/Locietta/lilia 这个")}), k_self, false, config) ==
+                TriggerReason::NONE,
+            "not inside a link");
     require(chat::classify(group_message({text_segment("随便聊聊")}), k_self, true, config) == TriggerReason::REPLY, "reply to self");
     require(chat::classify(group_message({text_segment("随便聊聊")}), k_self, false, config) == TriggerReason::NONE, "plain chatter");
     require(chat::classify(group_message({at_segment(k_self)}, k_self), k_self, false, config) == TriggerReason::NONE,
@@ -294,6 +302,28 @@ void test_flow() {
     flow.unseen.push_back(stored(1, 2031, "b", "你是gpt吗"));
     require(chat::should_plan(flow, settings, 2031), "whom she just answered is not");
     require(!chat::should_plan(flow, settings, 2400), "only inside the conversation window");
+
+    // Silence counts: after a quiet spell one message can be enough.
+    chat::Flow lively;
+    for (i64 t = 1000; t <= 1100; t += 10) {
+        chat::note_arrival(lively, t);
+        lively.unseen.clear(); // the planner looked each time
+    }
+    require(lively.interval > 9 && lively.interval < 11, "the interval follows the pace");
+    chat::note_arrival(lively, 1130);
+    lively.unseen.push_back(stored(1, 1130, "a", "x"));
+    require(lively.quiet_before == 30 && !chat::should_plan(lively, settings, 1130), "half a minute of quiet earns one message");
+    lively.unseen.clear();
+    chat::note_arrival(lively, 1250);
+    lively.unseen.push_back(stored(2, 1250, "a", "x"));
+    require(lively.quiet_before == 120 && chat::should_plan(lively, settings, 1250), "two minutes earn the rest");
+    chat::note_arrival(lively, 1255);
+    require(lively.quiet_before == 120, "the quiet is measured before the first unseen message");
+
+    chat::Flow mentioned;
+    mentioned.unseen.push_back(stored(3, 1000, "a", "莉莉娅好像坏了"));
+    mentioned.named = 3;
+    require(chat::should_plan(mentioned, settings, 1000), "being named opens the gate too");
 
     chat::FlowSettings shy{.talk_value = 0};
     chat::Flow quiet;

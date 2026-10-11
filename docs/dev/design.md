@@ -23,11 +23,20 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
   - Segments keep their data as `glz::generic_i64`, so ids stay exact and
     unknown segment types survive.
 - **`chat/`**: one turn per decision, modelled on MaiBot's planner/replyer split.
-  - `flow` is the cheap gate. Being addressed (@, a reply to lilia, her
-    name, an allowed private chat) always opens it. For `conversation_window_seconds`
-    after she speaks every new message opens it. Otherwise it opens every
-    `ceil(1/talk_value)` messages. Two silent decisions in a row back off
-    (15 s doubling to 5 min) unless a burst of 6 messages arrives.
+  - `flow` is the cheap gate. Being addressed (@, a reply to lilia, an
+    allowed private chat) always opens it, and she always answers. Her name
+    alone (ASCII aliases as whole words, never inside a link) opens it too,
+    but the planner may stay silent: it may be talk about her (2026-10-11).
+    For `conversation_window_seconds` after she speaks every new message
+    opens it. Otherwise it opens every `ceil(1/talk_value)` messages, where
+    the silence before them counts as MaiBot's: one virtual message per
+    average interval (at least 30 s), at most one short. Two silent decisions
+    in a row back off (15 s doubling to 5 min) unless a burst of 6 messages
+    arrives.
+  - On every connection she reads each allowed group's newest 100 messages
+    and stores what she missed (not for a chat she has never seen). Whoever
+    called her in the last half hour is answered late; the next turn is told
+    she just came back online.
   - The worker waits for the burst to settle (`debounce_seconds`, 2 s when
     addressed, 15 s at most).
   - The planner (`prompts/planner.md`, `planner_model`, thinking off) sees the

@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <lighter/async/runtime/task.h>
 
@@ -69,6 +70,10 @@ struct Session : std::enable_shared_from_this<Session> {
     Session();
     ~Session();
 };
+
+/// Up to `count` of a group's newest messages, oldest first, paged through
+/// get_group_msg_history; fewer when NapCat fails (logged).
+lighter::Task<std::vector<MessageEvent>> group_history(std::shared_ptr<Session> session, i64 group, usize count);
 
 /// Classifies one incoming frame. Exposed for tests.
 struct Frame {

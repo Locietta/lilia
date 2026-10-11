@@ -193,11 +193,33 @@ Task<> test_mutes_and_notices() {
     co_await tasks.join();
 }
 
+Task<> test_names_do_not_force() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.planner->answer = [](const provider::History &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::tool_call("stay_silent", R"({"reason":"只是在说她"})")};
+    };
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("嗯？")};
+    };
+    // Talked about, not to: the planner may let it pass.
+    require(h.say(1, 20001, "小明", {onebot::text_segment("莉莉娅好像又坏了")}).has_value(), "her name opens the gate");
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent.empty() && h.writer->requests.empty(), "and silence stands");
+    require(text_of(h.planner->requests[0].back()).contains("提到了莉莉娅的名字"), "the planner knows it may be about her");
+
+    // Called with an @: silence is not an answer.
+    require(h.say(2, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 你坏了吗")}).has_value(), "an @");
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent == std::vector<std::string>{"嗯？"}, "she answers anyway");
+    co_await tasks.join();
+}
+
 } // namespace
 
 int main() {
     try {
-        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices}) {
+        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_names_do_not_force}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

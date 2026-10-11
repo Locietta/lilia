@@ -54,7 +54,10 @@ struct PlannerInput {
     std::vector<store::StoredMessage> recent;
     /// Ids of messages the planner has not seen before.
     std::vector<i64> fresh;
+    /// Someone called her (an @, a reply to her): she answers.
     bool addressed = false;
+    /// Someone only named her: maybe to her, maybe about her.
+    bool named = false;
     i64 now = 0;
     i32 utc_offset_minutes = 480;
     usize log_bytes = 12'000;

@@ -12,7 +12,7 @@ enum struct TriggerReason {
     NONE,
     MENTION, ///< @-mentioned the bot
     REPLY,   ///< quoted one of the bot's messages
-    ALIAS,   ///< called the bot by name
+    ALIAS,   ///< named the bot (to her, or about her)
     PRIVATE, ///< any message in an allowed private chat
 };
 
@@ -22,6 +22,7 @@ std::string_view to_string(TriggerReason reason) noexcept;
 bool chat_allowed(const onebot::MessageEvent &event, const ChatConfig &config);
 
 /// ASCII letters compare case-insensitively; other bytes must match exactly.
+/// An ASCII alias counts only as a whole word outside links and paths.
 bool contains_alias(std::string_view text, const std::vector<std::string> &aliases);
 
 /// `replies_to_self` is whether the quoted message (if any) was sent by lilia.

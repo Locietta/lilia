@@ -38,8 +38,11 @@ bool chat_allowed(const onebot::MessageEvent &event, const ChatConfig &config) {
 }
 
 bool contains_alias(std::string_view text, const std::vector<std::string> &aliases) {
+    const auto alnum = [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+    const auto space = [](char c) { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; };
     for (const auto &alias : aliases) {
         if (alias.empty() || alias.size() > text.size()) continue;
+        const bool ascii = std::ranges::all_of(alias, [](char c) { return static_cast<unsigned char>(c) < 0x80; });
         for (usize start = 0; start + alias.size() <= text.size(); ++start) {
             bool matched = true;
             for (usize i = 0; i < alias.size(); ++i) {
@@ -48,7 +51,19 @@ bool contains_alias(std::string_view text, const std::vector<std::string> &alias
                     break;
                 }
             }
-            if (matched) return true;
+            if (!matched) continue;
+            if (ascii) {
+                // A whole word ("lilia在吗"), not part of one ("Ophilia") ...
+                const usize end = start + alias.size();
+                if ((start > 0 && alnum(text[start - 1])) || (end < text.size() && alnum(text[end]))) continue;
+                // ... nor of a link or path ("github.com/x/lilia").
+                usize first = start;
+                while (first > 0 && !space(text[first - 1])) --first;
+                usize last = end;
+                while (last < text.size() && !space(text[last])) ++last;
+                if (text.substr(first, last - first).contains('/')) continue;
+            }
+            return true;
         }
     }
     return false;

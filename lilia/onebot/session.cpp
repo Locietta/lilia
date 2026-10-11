@@ -1,7 +1,10 @@
 #include "session.h"
 
+#include <algorithm>
+#include <format>
 #include <map>
 #include <memory>
+#include <set>
 #include <utility>
 
 #include <lighter/async/runtime/sync.h>
@@ -267,6 +270,49 @@ Task<SentMessage, OneBotError> Session::send_group_msg(i64 group_id, Message mes
 
 Task<SentMessage, OneBotError> Session::send_private_msg(i64 user_id, Message message) {
     return send_impl(shared_from_this(), "send_private_msg", SendPrivateParams{.user_id = user_id, .message = std::move(message)});
+}
+
+namespace {
+
+struct HistoryPage {
+    std::vector<MessageEvent> messages;
+};
+
+} // namespace
+
+// With `message_seq` (a message id) NapCat pages forward from that message
+// unless `reverseOrder` is set, which pages back up to it.
+Task<std::vector<MessageEvent>> group_history(std::shared_ptr<Session> session, i64 group, usize count) {
+    constexpr usize k_page = 500;
+    std::vector<MessageEvent> collected;
+    std::set<i64> seen;
+    std::optional<i64> anchor;
+    while (collected.size() < count) {
+        auto params = std::format(R"({{"group_id":{},"count":{})", group, std::min(k_page, count - collected.size() + 1));
+        if (anchor) params += std::format(R"(,"message_seq":{},"reverseOrder":true)", *anchor);
+        params += "}";
+        auto data = co_await session->call("get_group_msg_history", std::move(params));
+        if (data.has_error()) {
+            log::warn("group {}: cannot read history: {}", group, data.error().message());
+            break;
+        }
+        HistoryPage page;
+        if (auto ec = glz::read<k_read_opts>(page, *data)) {
+            log::warn("group {}: undecodable history: {}", group, glz::format_error(ec, *data));
+            break;
+        }
+        std::vector<MessageEvent> older;
+        for (auto &message : page.messages) {
+            if (seen.insert(message.message_id).second) older.push_back(std::move(message));
+        }
+        if (older.empty()) break;
+        std::ranges::sort(older, {}, &MessageEvent::time);
+        anchor = older.front().message_id;
+        collected.insert(collected.begin(), std::make_move_iterator(older.begin()), std::make_move_iterator(older.end()));
+    }
+    std::ranges::stable_sort(collected, {}, &MessageEvent::time);
+    if (collected.size() > count) collected.erase(collected.begin(), collected.end() - static_cast<std::ptrdiff_t>(count));
+    co_return collected;
 }
 
 void Session::close() noexcept {

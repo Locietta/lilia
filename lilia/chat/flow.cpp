@@ -11,6 +11,10 @@ namespace lilia::chat {
 namespace {
 
 constexpr usize k_repeat_max_code_points = 20;
+/// Silence credit: the interval never counts as less than this, and a gap
+/// longer than this cap enters the average as the cap.
+constexpr double k_min_interval = 30;
+constexpr i64 k_max_interval_sample = 600;
 
 } // namespace
 
@@ -32,9 +36,22 @@ std::optional<RepeatChain> repeat_chain(const std::vector<store::StoredMessage> 
     return RepeatChain{.text = text, .people = people.size()};
 }
 
+void note_arrival(Flow &flow, i64 now) {
+    if (flow.last_arrival > 0) {
+        const i64 gap = std::max<i64>(now - flow.last_arrival, 0);
+        if (flow.unseen.empty()) flow.quiet_before = gap;
+        // A night's silence says nothing about how fast people talk.
+        const double sample = static_cast<double>(std::min(gap, k_max_interval_sample));
+        flow.interval = flow.interval == 0 ? sample : 0.8 * flow.interval + 0.2 * sample;
+    } else if (flow.unseen.empty()) {
+        flow.quiet_before = 0;
+    }
+    flow.last_arrival = now;
+}
+
 bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now) {
     if (flow.unseen.empty()) return false;
-    if (flow.addressed) return true;
+    if (flow.addressed || flow.named) return true;
     const bool in_window = flow.last_spoke > 0 && now - flow.last_spoke <= settings.window_seconds;
     if (in_window && flow.partner != 0 &&
         std::ranges::any_of(flow.unseen, [&](const store::StoredMessage &m) { return m.sender_id == flow.partner; })) {
@@ -44,7 +61,9 @@ bool should_plan(const Flow &flow, const FlowSettings &settings, i64 now) {
     if (in_window) return true;
     if (settings.talk_value <= 0) return false;
     const auto threshold = static_cast<usize>(std::ceil(1.0 / std::min(settings.talk_value, 1.0)));
-    return flow.unseen.size() >= threshold;
+    const double pace = std::max(flow.interval, k_min_interval);
+    const auto credit = std::min(static_cast<usize>(static_cast<double>(flow.quiet_before) / pace), threshold - 1);
+    return flow.unseen.size() + credit >= threshold;
 }
 
 void note_silent(Flow &flow, i64 now) {

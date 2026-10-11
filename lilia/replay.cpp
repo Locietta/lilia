@@ -354,6 +354,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
                 auto &state = responder.chats[chat];
                 state.flow.unseen.clear();
                 state.flow.addressed.reset();
+                state.flow.named.reset();
             }
             std::ignore = feed(lines[i]);
         }
@@ -419,46 +420,6 @@ struct GroupEntry {
     std::string group_name;
 };
 
-struct HistoryPage {
-    std::vector<onebot::MessageEvent> messages;
-};
-
-/// Up to `count` of a group's newest messages, oldest first, fetched a page
-/// at a time. With `message_seq` (a message id) NapCat pages forward from that
-/// message unless `reverseOrder` is set, which pages back up to it.
-Task<std::vector<onebot::MessageEvent>> fetch_history(std::shared_ptr<onebot::Session> session, i64 group, usize count) {
-    constexpr usize k_page = 500;
-    std::vector<onebot::MessageEvent> collected;
-    std::set<i64> seen;
-    std::optional<i64> anchor;
-    while (collected.size() < count) {
-        auto params = std::format(R"({{"group_id":{},"count":{})", group, std::min(k_page, count - collected.size() + 1));
-        if (anchor) params += std::format(R"(,"message_seq":{},"reverseOrder":true)", *anchor);
-        params += "}";
-        auto data = co_await session->call("get_group_msg_history", std::move(params));
-        if (data.has_error()) {
-            print(std::format("  群 {}：读取历史失败：{}", group, data.error().message()));
-            break;
-        }
-        HistoryPage page;
-        if (auto ec = glz::read<onebot::k_read_opts>(page, *data)) {
-            print(std::format("  群 {}：历史无法解析：{}", group, glz::format_error(ec, *data)));
-            break;
-        }
-        std::vector<onebot::MessageEvent> older;
-        for (auto &message : page.messages) {
-            if (seen.insert(message.message_id).second) older.push_back(std::move(message));
-        }
-        if (older.empty()) break;
-        std::ranges::sort(older, {}, &onebot::MessageEvent::time);
-        anchor = older.front().message_id;
-        collected.insert(collected.begin(), std::make_move_iterator(older.begin()), std::make_move_iterator(older.end()));
-    }
-    std::ranges::stable_sort(collected, {}, &onebot::MessageEvent::time);
-    if (collected.size() > count) collected.erase(collected.begin(), collected.end() - static_cast<std::ptrdiff_t>(count));
-    co_return collected;
-}
-
 std::string clock_text(i64 time, i32 utc_offset_minutes) {
     const auto local = std::chrono::sys_seconds(std::chrono::seconds(time + i64{utc_offset_minutes} * 60));
     return std::format("{:%m-%d %H:%M}", local);
@@ -506,7 +467,7 @@ Task<int> learn_history(Config config, std::vector<i64> groups, usize count, std
             print(std::format("== 群 {}（{}）：不学习，跳过", group, name));
             continue;
         }
-        const auto messages = co_await fetch_history(session, group, count);
+        const auto messages = co_await onebot::group_history(session, group, count);
         auto span = store->learned_span(group);
         const auto known = span.has_value() ? *span : std::optional<store::LearnedSpan>{};
         std::vector<learn::Line> lines;
