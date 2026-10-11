@@ -36,9 +36,9 @@ std::string describe(const store::ChatKey &chat);
 /// nullopt when it could not be sent.
 lighter::Task<std::optional<i64>> send_message(Responder *r, const store::ChatKey &chat, onebot::Message message);
 
-/// Sends one message and records it as lilia's own; its id, or nullopt when
-/// it could not be sent.
-lighter::Task<std::optional<i64>> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Message message);
+/// Sends one message and records it as lilia's own (as `text` when given,
+/// else as rendered); its id, or nullopt when it could not be sent.
+lighter::Task<std::optional<i64>> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Message message, std::string text = {});
 
 /// One OneBot action through the live session; false when it is gone or the
 /// call failed.
@@ -68,6 +68,14 @@ i64 notice_actor(const store::StoredMessage &line);
 
 /// She has stickers she may send.
 bool stickers_ready(Responder *r);
+
+/// The planner's find_sticker: the registered stickers closest to `feeling`
+/// (by embedding, or by words without one), at most `stickers.candidates`.
+lighter::Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feeling);
+
+/// Sends `sticker` as a QQ sticker and records it ("[表情: 描述]"); false
+/// when it could not be read or sent.
+lighter::Task<bool> send_sticker(Responder *r, store::ChatKey chat, store::Sticker sticker);
 
 /// What one reply came to.
 struct Delivered {

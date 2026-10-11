@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <lilia/onebot/message.h>
@@ -51,6 +52,48 @@ void test_sample() {
     require(popular > 150, "seen often means picked often");
 }
 
+void test_finding() {
+    std::vector<store::Sticker> pool{
+        {.id = 1, .sha1 = "a", .description = "猫在转圈", .tags = "开心、好耶", .seen = 9},
+        {.id = 2, .sha1 = "b", .description = "猫瞪眼，配字\"啊？\"", .tags = "无语、震惊", .seen = 1},
+        {.id = 3, .sha1 = "c", .description = "熊猫头摊手", .tags = "无语、无奈", .seen = 5},
+    };
+    std::mt19937 rng(7);
+    const auto found = sticker::match(pool, "无语/震惊", 2, rng);
+    require(found.size() == 2 && found[0].id == 2 && found[1].id == 3, "more words matched first, then the more popular");
+    require(sticker::match(pool, "晚安", 2, rng).size() == 2, "nothing matched: a sample fills up");
+
+    const std::unordered_map<std::string, std::vector<float>> vectors{{"a", {1, 0}}, {"b", {0, 1}}, {"c", {0.6f, 0.8f}}};
+    const auto ranked = sticker::rank(pool, {0, 1}, vectors, 2);
+    require(ranked.size() == 2 && ranked[0].id == 2 && ranked[1].id == 3, "closest by embedding");
+
+    require(sticker::parse_handle("s12") == 12 && sticker::parse_handle("#s3") == 3 && sticker::parse_handle(" 7 ") == 7 &&
+                !sticker::parse_handle("s1x") && !sticker::parse_handle("无语"),
+            "sticker numbers");
+    pool[1].last_used = 1000;
+    require(sticker::render_candidates({pool[1], pool[0]}, 2000) ==
+                "s2 标签：无语、震惊｜画面：猫瞪眼，配字\"啊？\"（她一天内发过）\ns1 标签：开心、好耶｜画面：猫在转圈\n",
+            "candidates by number, recent ones marked");
+}
+
+void test_resend() {
+    onebot::Segment sticker{.type = "image"};
+    sticker.data["url"] = "https://multimedia.nt.qq.com.cn/a";
+    sticker.data["sub_type"] = i64{1};
+    const auto again = sticker::resend_segment({sticker});
+    require(again && again->type == "image" && onebot::data_string(*again, "file") == "https://multimedia.nt.qq.com.cn/a" &&
+                onebot::data_integer(*again, "sub_type") == 1,
+            "an image sticker goes again by its url");
+    onebot::Segment mface{.type = "mface"};
+    mface.data["emoji_id"] = "abc";
+    require(sticker::resend_segment({mface}) && sticker::resend_segment({mface})->type == "mface", "an mface goes as it came");
+    onebot::Segment photo{.type = "image"};
+    photo.data["url"] = "https://multimedia.nt.qq.com.cn/b";
+    require(!sticker::resend_segment({photo}) && !sticker::resend_segment({sticker, onebot::text_segment("草")}) &&
+                !sticker::resend_segment({onebot::text_segment("6")}),
+            "photos, stickers with words and text are not stickers to resend");
+}
+
 void test_store_and_pool() {
     auto db = store::Store::open_memory();
     require(db.has_value(), "open");
@@ -82,6 +125,8 @@ int main() {
         test_parse_tagging();
         test_urls();
         test_sample();
+        test_finding();
+        test_resend();
         test_store_and_pool();
         return 0;
     } catch (const std::exception &e) {

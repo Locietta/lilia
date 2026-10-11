@@ -1,4 +1,8 @@
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -11,6 +15,7 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/responder.h>
 #include <lilia/onebot/message.h>
+#include <lilia/sticker/sticker.h>
 #include <lilia/tests/support/fake_provider.h>
 #include <lilia/tests/support/fake_ws_peer.h>
 
@@ -28,7 +33,7 @@ std::string text_of(const provider::Item &item) {
     std::string out;
     for (const auto &part : item.parts) {
         if (const auto *text = std::get_if<provider::TextPart>(&part)) out += text->text;
-        if (const auto *outcome = std::get_if<ToolOutcome>(&part)) out += outcome->receipt;
+        if (const auto *outcome = std::get_if<ToolOutcome>(&part)) out += outcome->receipt + "\n";
     }
     return out;
 }
@@ -73,6 +78,7 @@ struct Harness {
     std::shared_ptr<test::FakeProvider::State> planner = std::make_shared<test::FakeProvider::State>();
     std::shared_ptr<test::FakeProvider::State> writer = std::make_shared<test::FakeProvider::State>();
     std::vector<std::string> sent;
+    std::vector<onebot::Message> outgoing;
     i64 clock = 1'791'032'700;
     i64 next_sent = 900;
     std::unique_ptr<chat::Responder> responder;
@@ -91,6 +97,7 @@ struct Harness {
         responder->next_notice_id = -1;
         responder->outbox = [this](const store::ChatKey &, onebot::Message message) -> Task<std::optional<i64>> {
             sent.push_back(onebot::render_plain(message));
+            outgoing.push_back(std::move(message));
             co_return ++next_sent;
         };
     }
@@ -415,6 +422,62 @@ Task<> test_pokes_and_repeats() {
     co_await tasks.join();
 }
 
+Task<> test_stickers() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    const auto dir = std::filesystem::temp_directory_path() / ("lilia-test-stickers-" + std::to_string(std::rand()));
+    std::filesystem::create_directories(dir / "stickers");
+    std::ofstream(dir / "stickers" / "a.png", std::ios::binary) << "PNG";
+    h.config.stickers.enabled = true;
+    sticker::Collector collector(h.config.stickers, dir, h.store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    h.responder->stickers = &collector;
+    const auto add = [&](std::string sha1, std::string description, std::string tags) {
+        const auto id = *h.store.add_sticker({.sha1 = sha1, .path = "stickers/a.png", .media_type = "image/png", .first_seen = 1});
+        std::ignore = h.store.describe_sticker(id, description, tags, "registered");
+        return id;
+    };
+    std::ignore = add("h1", "一只猫开心地转圈", "开心、好耶");
+    const auto speechless = add("h2", "一只猫瞪大眼睛，配字\"啊？\"", "无语、震惊");
+
+    // The planner looks for a sticker, sees the candidates and sends one.
+    h.planner->answer = [speechless](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        const auto last = text_of(history.back());
+        if (last.contains("她发了表情包")) return analysed("发完了", test::tool_call("stay_silent", R"({"reason":"发完了"})"));
+        if (last.contains("找到这些")) {
+            return analysed("这张瞪眼的合适", test::tool_call("send_sticker", std::format(R"({{"sticker":"s{}"}})", speechless)));
+        }
+        return analysed("有点无语，发个表情", test::tool_call("find_sticker", R"({"feeling":"无语"})"));
+    };
+    std::ignore = h.say(1, 20001, "小明", {onebot::text_segment("我把作业落在地铁上了")});
+    co_await h.responder->run_turn(k_chat);
+    const auto &requests = h.planner->requests;
+    require(requests.size() == 3 && text_of(requests[1].back()).starts_with(std::format("找到这些：\ns{} 标签：无语、震惊", speechless)),
+            "find_sticker shows the closest stickers first: " + text_of(requests[1].back()));
+    require(h.outgoing.size() == 1 && h.outgoing[0].front().type == "image" &&
+                h.stored_text(h.next_sent) == "[表情: 一只猫瞪大眼睛，配字\"啊？\"]",
+            "the sticker goes out and is stored as what it shows");
+    require(text_of(requests[0].front()).contains("先用 find_sticker"), "the planner is told how to use stickers");
+
+    // 复读 of a sticker sends the same sticker again.
+    onebot::Segment cat{.type = "image"};
+    cat.data["url"] = "https://multimedia.nt.qq.com.cn/cat";
+    cat.data["sub_type"] = i64{1};
+    cat.data["summary"] = "[动画表情]";
+    h.clock += 120;
+    std::ignore = h.say(2, 20002, "小红", {cat});
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return analysed("好了", test::tool_call("stay_silent", R"({"reason":"好了"})"));
+        return analysed("跟一张", test::tool_call("repeat", R"({"target":")" + line_number(history, "小红") + R"("})"));
+    };
+    co_await h.responder->run_turn(k_chat);
+    require(h.outgoing.size() == 2 && h.outgoing[1].front().type == "image" &&
+                onebot::data_string(h.outgoing[1].front(), "file") == "https://multimedia.nt.qq.com.cn/cat",
+            "a sticker is repeated as the same sticker");
+    co_await tasks.join();
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 Task<> test_history_survives_many_turns() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
@@ -441,7 +504,8 @@ Task<> test_history_survives_many_turns() {
 int main() {
     try {
         for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
-                           &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches}) {
+                           &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches,
+                           &test_pokes_and_repeats, &test_stickers}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

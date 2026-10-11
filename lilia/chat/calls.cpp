@@ -58,9 +58,9 @@ Task<std::optional<i64>> send_message(Responder *r, const store::ChatKey &chat, 
     co_return sent->message_id;
 }
 
-Task<std::optional<i64>> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Message message) {
+Task<std::optional<i64>> send_and_record(Responder *r, const store::ChatKey &chat, onebot::Message message, std::string text) {
     auto segments_json = glz::write_json(message).value_or("[]");
-    auto text = onebot::render_plain(message);
+    if (text.empty()) text = onebot::render_plain(message);
     auto plain = onebot::text_only(message);
     const auto id = co_await send_message(r, chat, std::move(message));
     if (!id) co_return std::nullopt;

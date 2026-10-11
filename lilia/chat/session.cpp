@@ -139,20 +139,26 @@ std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
                          .required = {"target", "style", reference_handoff ? "brief" : "intent"}},
     });
     if (set.stickers) {
-        auto &reply = tools.back().input_schema;
-        reply.properties.emplace("sticker", property("string", "可选：说完话后想配的表情包的感觉，比如\"无语\"；大多数时候不填"));
-        // A tool of its own, like MaiBot's send_emoji: buried in reply, it was never picked.
+        // Tools of their own, like MaiBot's send_emoji: buried in reply, a
+        // sticker was never picked. The planner sees the candidates and
+        // chooses itself.
+        tools.push_back({
+            .name = "find_sticker",
+            .description = "找几张她能发的表情包看看（编号、标签和画面），然后可以用 send_sticker 发其中一张",
+            .input_schema = {.properties = {{"feeling",
+                                             property("string", "想表达的感觉或反应，比如\"笑死\"\"无语\"\"震惊\"\"好耶\"\"晚安\"")}},
+                             .required = {"feeling"}},
+        });
         tools.push_back({
             .name = "send_sticker",
-            .description = "只发一张表情包、不说话，用来表达情绪或反应",
-            .input_schema = {.properties = {{"feeling", property("string", "想表达的感觉，比如\"笑死\"\"无语\"\"震惊\"\"好耶\"")},
-                                            {"target", property("string", "可选：在回应哪条消息，例如 \"#18345\"")}},
-                             .required = {"feeling"}},
+            .description = "发一张表情包，用来表达情绪或反应",
+            .input_schema = {.properties = {{"sticker", property("string", "find_sticker 找到的表情包编号，例如 \"s12\"")}},
+                             .required = {"sticker"}},
         });
     }
     tools.push_back({
         .name = "repeat",
-        .description = "复读：把一条群友的短消息原样再发一遍（QQ 群里的玩梗习惯）",
+        .description = "复读：把一条群友的短消息或表情包原样再发一遍（QQ 群里的玩梗习惯）",
         .input_schema = {.properties = {{"target", property("string", "要复读的消息编号，例如 \"#18345\"")}}, .required = {"target"}},
     });
     tools.push_back({
@@ -226,14 +232,9 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
             return {.target = target->message_id, .look_up = true};
         }
         if (tool->call.name == "send_sticker") {
-            // Aimed at the given message, else the newest one shown.
-            const auto *target = find_target(string_field(input, "target"), rows);
-            const i64 id = target ? target->message_id : rows.empty() ? 0 : rows.back().message_id;
-            return {.reply = true,
-                    .target = id,
-                    .intent = string_field(input, "feeling"),
-                    .sticker = string_field(input, "feeling"),
-                    .sticker_only = true};
+            const auto sticker = string_field(input, "sticker");
+            if (sticker.empty()) return {.reason = "send_sticker without a sticker"};
+            return {.sticker = sticker};
         }
         if (tool->call.name == "wait") {
             // MaiBot waits 30 seconds when the argument is missing or invalid.
@@ -260,8 +261,6 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
                                          ReplyStyle::SHORT,
             .intent = string_field(input, "intent"),
             .brief = string_field(input, "brief"),
-            .sticker = string_field(input, "sticker"),
-            .sticker_only = style == "sticker",
         };
     }
     return {.reason = "no tool call"};

@@ -7,6 +7,7 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <lighter/async/runtime/task.h>
@@ -44,17 +45,32 @@ std::vector<std::string> sticker_urls(const onebot::Message &message);
 /// seen + 2 * used + 1 so popular ones come up more.
 std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng);
 
-/// "1. 标签：无语、震惊｜画面：……" lines.
-std::string render_candidates(const std::vector<store::Sticker> &candidates);
+/// What a sticker is embedded as: its tags and description.
+std::string embedding_text(const store::Sticker &sticker);
 
-struct PickRequest {
-    provider::History history;
-    std::vector<provider::ToolDefinition> tools;
-};
+/// The `count` stickers closest to `query` (cosine over `vectors`, keyed by
+/// sha1); stickers without a vector are left out.
+std::vector<store::Sticker> rank(const std::vector<store::Sticker> &pool, const std::vector<float> &query,
+                                 const std::unordered_map<std::string, std::vector<float>> &vectors, usize count);
 
-/// The pick call: recent chat lines, what she wants to express, candidates.
-PickRequest build_pick_request(std::string_view prompt, const std::vector<std::string> &recent, std::string_view intent,
-                               const std::vector<store::Sticker> &candidates);
+/// Without embeddings: stickers whose tags or description contain words of
+/// `feeling` ("无语、震惊"), most matched and most popular first, then a
+/// weighted sample to fill up to `count`.
+std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng);
+
+/// "s12": how the planner names a sticker.
+std::string handle(const store::Sticker &sticker);
+
+/// "s12", "#s12" or "12" -> 12.
+std::optional<i64> parse_handle(std::string_view text);
+
+/// "s12 标签：无语、震惊｜画面：……" lines; stickers she sent within the last
+/// day are marked so she does not keep sending the same one.
+std::string render_candidates(const std::vector<store::Sticker> &candidates, i64 now);
+
+/// A message that is a single sticker, as a segment to send again (复读):
+/// an image sticker by its URL, an mface as it came; nullopt otherwise.
+std::optional<onebot::Segment> resend_segment(const onebot::Message &message);
 
 struct Collector {
     using Spawn = std::move_only_function<void(lighter::Task<>)>;
@@ -86,6 +102,8 @@ struct Collector {
     std::optional<provider::Provider> vision;
     std::string vision_model;
     std::map<i64, std::string> last_text; ///< per group, never written anywhere
+    /// Embeddings of registered stickers by sha1 (memory only; see rank()).
+    std::unordered_map<std::string, std::vector<float>> vectors;
     i64 hour = 0;
     usize downloads_this_hour = 0;
     usize descriptions_this_hour = 0;

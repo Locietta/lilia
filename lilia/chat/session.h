@@ -65,7 +65,7 @@ struct PlannerToolSet {
     bool memory = false;            ///< search_history
     bool people = false;            ///< look_up_person
     bool web = false;               ///< search_web
-    bool stickers = false;          ///< send_sticker, and reply's sticker
+    bool stickers = false;          ///< find_sticker and send_sticker
     bool poke = false;              ///< poke (groups only)
 };
 

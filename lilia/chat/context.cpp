@@ -212,10 +212,10 @@ std::string fill_template(std::string_view text, const std::vector<std::pair<std
 
 std::string_view sticker_rule(bool enabled) {
     if (!enabled) return "";
-    return "- 群里大家常用表情包回应。她想表达的主要是情绪或反应（笑死、无语、震惊、赞同、收到、委屈、看戏）时，用 send_sticker "
-           "只发一张表情包，往往比打字自然，也比打\"确实\"\"草\"这种一两个字的反应好；说完话还想补个情绪时，在 reply 里填 "
-           "sticker（想表达的感觉），她会在说完话后配一张。"
-           "认真回答问题、说正事时不用表情包；刚发过一张就隔一会儿。\n";
+    return "- 群里大家常用表情包回应。她想表达的主要是情绪或反应（笑死、无语、震惊、赞同、收到、委屈、看戏、晚安）时，发一张表情包"
+           "往往比打字自然，也比打\"确实\"\"草\"这种一两个字的反应好。先用 find_sticker 按想表达的感觉找几张，挑一张贴合语气的用 "
+           "send_sticker 发；都不合适就别发，或者打字。说完话想补个情绪，也可以接着发一张。别人发的表情包好玩，也可以用 repeat "
+           "复读那一张。认真回答问题、说正事时不用表情包；刚发过一张就隔一会儿，也别总发同一张。\n";
 }
 
 std::string memory_rule(bool history, bool people) {

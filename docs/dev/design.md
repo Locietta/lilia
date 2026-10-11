@@ -43,7 +43,8 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       rounds among them: its analysis, its tool call and the result. New lines
       simply follow. Between trims it only grows, so it is a cached prefix.
     - Each round it writes a short analysis, then calls one tool:
-      `reply(target, quote, style, intent)`, `send_sticker`, `repeat`,
+      `reply(target, quote, style, intent)`, `find_sticker(feeling)`,
+      `send_sticker(sticker)`, `repeat` (text or a sticker),
       `wait(seconds)`, `poke(target)`, `search_history(query)`,
       `look_up_person(target)` (the facts she noted about whoever wrote it),
       `search_web(query)` or `stay_silent(reason)`; no call means silence.
@@ -176,12 +177,14 @@ Model calls (2026-10-11):
      chat's.
    - Next: persona revisions proposed by reflection and approved by an admin,
      with every version kept.
-4. **Stickers (later).**
-   - Learn stickers from every group the account is in.
-   - Keep the image (deduplicated by hash) and a short usage note written
-     by a vision model from the surrounding messages, then drop the other
-     groups' text.
-   - Pick by tags first, embeddings once the collection is large; send
-     through a `send_sticker` planner tool.
+4. **Stickers.**
+   - Learn stickers from every group the account is in (`sticker/`): the
+     image (deduplicated by hash), a vision model's description and tags,
+     a capped pool of the fit ones; other groups' text is never stored.
+   - The planner sends them itself (2026-10-11): `find_sticker(feeling)`
+     shows the closest few of the whole pool (local embeddings of tags and
+     description, cached per process; words without memory), marking ones
+     she sent within a day; `send_sticker(s<id>)` sends the one it picks.
+     `repeat` resends someone's sticker (复读) by its URL.
 
 Not planned now: server-management tools, art feeds.

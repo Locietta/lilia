@@ -33,10 +33,8 @@ struct Plan {
     std::string intent;
     /// "reference" handoff: the planner's notes for the writer.
     std::string brief;
-    /// The feeling of a sticker to send with the reply ("无语"); empty: none.
+    /// The send_sticker tool: the sticker to send ("s12").
     std::string sticker;
-    /// Style "sticker": only a sticker, no words.
-    bool sticker_only = false;
     /// The wait tool: seconds to wait before looking again (0: not waiting).
     i64 wait = 0;
     /// Decided after she already spoke this turn.

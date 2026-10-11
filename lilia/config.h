@@ -271,8 +271,8 @@ struct StickerConfig {
     usize descriptions_per_hour = 10;
     usize downloads_per_hour = 200;
     u64 max_bytes = 2ull * 1024 * 1024;
-    /// Candidates shown to the pick call, and the pause between her stickers.
-    usize candidates = 25;
+    /// Stickers find_sticker shows the planner, and the pause between hers.
+    usize candidates = 8;
     i64 cooldown_seconds = 60;
 };
 

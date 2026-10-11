@@ -192,8 +192,8 @@ void test_planner() {
     require(chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":"600"})"))}, rows).wait == 60 &&
                 chat::parse_plan({OutputItem(tool_call("wait", R"({})"))}, rows).wait == 30,
             "waits are capped at a minute; 30 seconds when unsaid");
-    const auto sticker = chat::parse_plan({OutputItem(tool_call("send_sticker", R"({"feeling":"笑死"})"))}, rows);
-    require(sticker.reply && sticker.sticker_only && sticker.sticker == "笑死" && sticker.target == 1050, "a sticker alone, at the newest");
+    const auto sticker = chat::parse_plan({OutputItem(tool_call("send_sticker", R"({"sticker":"s12"})"))}, rows);
+    require(!sticker.reply && sticker.sticker == "s12", "a sticker by its number");
 
     // The tools never change between rounds; what is offered follows the chat.
     const auto names = [](const std::vector<provider::ToolDefinition> &tools) {
@@ -204,8 +204,8 @@ void test_planner() {
     require(names(chat::planner_tools({})) == std::vector<std::string>{"reply", "repeat", "wait", "stay_silent"},
             "reply, repeat, wait, stay_silent");
     require(names(chat::planner_tools({.memory = true, .people = true, .web = true, .stickers = true, .poke = true})) ==
-                std::vector<std::string>{"reply", "send_sticker", "repeat", "wait", "poke", "search_history", "look_up_person",
-                                         "search_web", "stay_silent"},
+                std::vector<std::string>{"reply", "find_sticker", "send_sticker", "repeat", "wait", "poke", "search_history",
+                                         "look_up_person", "search_web", "stay_silent"},
             "with stickers, pokes, memory, people and the web");
     const auto briefed = chat::planner_tools({.reference_handoff = true});
     require(std::ranges::contains(briefed[0].input_schema.required, std::string("brief")) &&

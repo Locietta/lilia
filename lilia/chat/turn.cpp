@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <format>
+#include <optional>
 #include <utility>
 #include <variant>
+
+#include <glaze/json.hpp>
 
 #include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/when.h>
@@ -37,9 +40,17 @@ constexpr usize k_max_rounds = 8;
 constexpr usize k_max_waits = 3;
 constexpr usize k_max_replies = 3;
 
-/// Web searches and people looked up per turn.
+/// Web searches, people looked up and sticker searches per turn.
 constexpr usize k_max_web_searches = 2;
 constexpr usize k_max_look_ups = 3;
+constexpr usize k_max_sticker_finds = 3;
+
+/// A message that is a single sticker, ready to send again (复读).
+std::optional<onebot::Segment> sticker_again(const store::StoredMessage &message) {
+    onebot::Message segments;
+    if (glz::read<onebot::k_read_opts>(segments, message.segments_json)) return std::nullopt;
+    return sticker::resend_segment(segments);
+}
 
 /// A string argument of a tool call; empty when missing.
 std::string string_input(const glz::generic &input, std::string_view key) {
@@ -175,18 +186,19 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     const ChatInfo info{
         .chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self_name(chat)};
     const bool knows_people = memory && config.memory.facts;
+    const bool has_stickers = stickers_ready(this);
     const auto rule = memory_rule(memory != nullptr, knows_people);
     const auto prompt = fill_template(embedded(xmake::planner_md), {{"name", settings.name},
                                                                     {"persona", persona},
                                                                     {"handoff", handoff_rule(settings.handoff == "reference")},
                                                                     {"memory_rule", rule},
                                                                     {"search_rule", search_rule(config.model.web_search)},
-                                                                    {"sticker_rule", sticker_rule(stickers_ready(this))}});
+                                                                    {"sticker_rule", sticker_rule(has_stickers)}});
     const auto tools = planner_tools({.reference_handoff = settings.handoff == "reference",
                                       .memory = memory != nullptr,
                                       .people = knows_people,
                                       .web = config.model.web_search,
-                                      .stickers = stickers_ready(this),
+                                      .stickers = has_stickers,
                                       .poke = chat.type == "group"});
     const u64 cycle = ++state.cycles;
 
@@ -271,6 +283,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     // chat's history for every later round and turn.
     usize searches = 0;
     usize look_ups = 0;
+    usize sticker_finds = 0;
     usize waits = 0;
     usize replies = 0;
     i64 seen_row = 0;
@@ -300,6 +313,13 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (!analysis.empty()) log::info("{} planner: {}", describe(chat), analysis);
         const auto call_id = first_call_id(*planned);
         const auto tool = first_call_name(*planned);
+        // A string argument of the round's tool call.
+        const auto argument = [&](std::string_view key) {
+            for (const auto &item : *planned) {
+                if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) return string_input(call->call.input, key);
+            }
+            return std::string();
+        };
         // The round stays in the history with its result.
         const auto keep = [&](std::string receipt) {
             PlannerRecord record{.after_row = shown, .cycle = cycle, .output = *planned};
@@ -311,7 +331,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         // never change, which would void the cached prompt).
         std::string unavailable;
         if ((tool == "search_history" && searches >= config.memory.max_searches) ||
-            (tool == "search_web" && web_searches >= k_max_web_searches) || (tool == "look_up_person" && look_ups >= k_max_look_ups)) {
+            (tool == "search_web" && web_searches >= k_max_web_searches) || (tool == "look_up_person" && look_ups >= k_max_look_ups) ||
+            (tool == "find_sticker" && sticker_finds >= k_max_sticker_finds)) {
             unavailable = "这一轮已经查过了，不能再查，根据现有的信息决定。";
         } else if ((tool == "wait" || tool == "stay_silent" || tool.empty()) && must_speak && replies == 0) {
             unavailable = "这次需要她说点什么，用 reply。";
@@ -326,10 +347,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
         // A look into the history: its result goes back to the planner.
         if (memory && tool == "search_history") {
-            const auto &call = std::get<provider::ToolCallItem>(*std::ranges::find_if(*planned, [](const provider::OutputItem &item) {
-                                   return std::holds_alternative<provider::ToolCallItem>(item);
-                               })).call;
-            const auto hits = co_await memory->search(chat, string_input(call.input, "query"));
+            const auto hits = co_await memory->search(chat, argument("query"));
             const auto found = memory::render_hits(hits);
             if (!hits.empty()) remembered += found;
             keep(found);
@@ -339,13 +357,21 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         // A look online: what it finds goes back to the planner, and to the
         // writer if she replies.
         if (config.model.web_search && tool == "search_web") {
-            const auto &call = std::get<provider::ToolCallItem>(*std::ranges::find_if(*planned, [](const provider::OutputItem &item) {
-                                   return std::holds_alternative<provider::ToolCallItem>(item);
-                               })).call;
-            const auto found = co_await search_web(this, chat, info, string_input(call.input, "query"));
+            const auto found = co_await search_web(this, chat, info, argument("query"));
             if (!found.empty()) online += (online.empty() ? "" : "\n") + found;
             keep(found.empty() ? std::string("没查到。") : "查到的：" + found);
             ++web_searches;
+            continue;
+        }
+        // Stickers she could send: the planner picks one (or none) next round.
+        if (has_stickers && tool == "find_sticker") {
+            const auto feeling = argument("feeling");
+            const auto found = co_await find_stickers(this, feeling);
+            log::info("{} looks for stickers for \"{}\": {} found", describe(chat), feeling, found.size());
+            keep(found.empty() ?
+                     std::string("没找到能发的表情包。") :
+                     std::format("找到这些：\n{}要发就用 send_sticker 填编号；都不贴切就别发。", sticker::render_candidates(found, now())));
+            ++sticker_finds;
             continue;
         }
 
@@ -367,13 +393,43 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             ++look_ups;
             continue;
         }
-        if (plan.repeat) {
-            // 复读: the message again, as it is.
-            const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
+        if (!plan.sticker.empty()) {
+            // Any registered sticker by its number, usually one find_sticker showed.
+            std::optional<store::Sticker> chosen;
+            if (const auto id = sticker::parse_handle(plan.sticker)) {
+                if (auto pool = store.stickers("registered"); pool.has_value()) {
+                    if (const auto it = std::ranges::find(*pool, *id, &store::Sticker::id); it != pool->end()) chosen = *it;
+                }
+            }
             std::string receipt;
-            if (target == rows.end() || target->from_self || is_notice(*target) || !repeatable(target->text)) {
-                receipt = "这条不适合复读（只复读别人的短消息），没有发。";
-            } else if (co_await send_and_record(this, chat, {onebot::text_segment(target->text)})) {
+            if (!chosen) {
+                receipt = "没有这个编号的表情包；编号要用 find_sticker 找到的，比如 s12。";
+            } else if (co_await send_sticker(this, chat, *chosen)) {
+                ++replies;
+                note_spoke(state.flow);
+                if (observer) observer(chat, plan, {"[表情]"});
+                receipt = std::format("她发了表情包 {}。", sticker::handle(*chosen));
+            } else {
+                receipt = "没发出去。";
+            }
+            keep(receipt);
+            if (replies >= k_max_replies) {
+                ended = "replied enough";
+                break;
+            }
+            co_await refresh();
+            continue;
+        }
+        if (plan.repeat) {
+            // 复读: the message again, as it is (a sticker too).
+            const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
+            const auto again = target != rows.end() && !target->from_self ? sticker_again(*target) : std::nullopt;
+            std::string receipt;
+            if (target == rows.end() || target->from_self || is_notice(*target) || (!again && !repeatable(target->text))) {
+                receipt = "这条不适合复读（只复读别人的短消息或表情包），没有发。";
+            } else if (co_await send_and_record(this, chat,
+                                                again ? onebot::Message{*again} : onebot::Message{onebot::text_segment(target->text)},
+                                                again ? target->text : std::string())) {
                 ++replies;
                 note_spoke(state.flow);
                 if (observer) observer(chat, plan, {target->text});
@@ -436,7 +492,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         }
         waits = 0;
         if (!plan.reply) {
-            if (tool == "reply" || tool == "repeat" || tool == "send_sticker" || tool == "poke" || tool == "look_up_person") {
+            if (tool == "reply" || tool == "repeat" || tool == "poke" || tool == "look_up_person") {
                 // A target that is not in the history: let it look again.
                 keep("没找到这个编号的消息，没有发。");
                 continue;

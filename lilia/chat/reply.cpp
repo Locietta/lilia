@@ -10,15 +10,13 @@
 #include <xmake/bin2obj/facts_md.hpp>
 #include <xmake/bin2obj/select_md.hpp>
 #include <xmake/bin2obj/self_facts_md.hpp>
-#include <xmake/bin2obj/sticker_pick_md.hpp>
 
 #include <lilia/chat/delivery.h>
 #include <lilia/chat/typos.h>
 #include <lilia/log.h>
-#include <lilia/net/codec.h>
 
-// One reply: the writer's text, sent the way MaiBot sends it, or a sticker;
-// expression selection and the facts learned after it.
+// One reply: the writer's text, sent the way MaiBot sends it; expression
+// selection before it and the facts learned after it.
 
 namespace lilia::chat {
 
@@ -121,56 +119,6 @@ Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, 
     co_return picked;
 }
 
-/// Picks a registered sticker for `feeling` (a pick call over a weighted
-/// sample) and sends it as a QQ sticker; false when none fits, she sent one
-/// too recently, or sending failed.
-Task<bool> send_sticker(Responder *r, store::ChatKey chat, std::string feeling, std::vector<store::StoredMessage> log) {
-    auto &state = r->chats[chat];
-    if (!r->stickers || r->now() - state.last_sticker < r->config.stickers.cooldown_seconds) co_return false;
-    auto pool = r->store.stickers("registered");
-    if (pool.has_error() || pool->empty()) co_return false;
-    const auto candidates = sticker::sample(*std::move(pool), r->config.stickers.candidates, r->rng);
-    std::vector<std::string> recent;
-    for (usize i = log.size() > k_selector_context ? log.size() - k_selector_context : 0; i < log.size(); ++i) {
-        recent.push_back(speaker(r, log[i]) + ": " + log[i].text);
-    }
-    const auto prompt = fill_template(embedded(xmake::sticker_pick_md), {{"name", r->config.chat.name}});
-    const auto request = sticker::build_pick_request(prompt, recent, feeling, candidates);
-    const auto items = co_await call_planner(r, "sticker", chat, request.history, request.tools);
-    if (!items) co_return false;
-    const auto picks = learn::parse_picks(*items, "pick_sticker", "ids", candidates.size(), 1);
-    if (picks.empty()) {
-        log::info("{} found no sticker for \"{}\"", describe(chat), feeling);
-        co_return false;
-    }
-    const auto &chosen = candidates[picks.front()];
-    const auto bytes = r->stickers->read(chosen);
-    if (!bytes) co_return false;
-
-    onebot::Segment image{.type = "image"};
-    image.data["file"] = "base64://" + net::base64_encode(*bytes);
-    image.data["sub_type"] = i64{1};
-    image.data["summary"] = "[动画表情]";
-    const auto id = co_await send_message(r, chat, {std::move(image)});
-    if (!id) co_return false;
-    // The stored copy names the sticker instead of carrying its bytes.
-    auto stored = r->store.add_message({
-        .chat = chat,
-        .message_id = *id,
-        .sender_id = r->self.user_id,
-        .sender_name = r->self_name(chat),
-        .time = r->now(),
-        .segments_json = std::format(R"([{{"type":"image","data":{{"file":"sticker:{}","sub_type":1}}}}])", chosen.sha1),
-        .text = std::format("[表情: {}]", chosen.description),
-        .from_self = true,
-    });
-    if (stored.has_error()) log::error("cannot record sent sticker: {}", stored.error().message());
-    std::ignore = r->store.sticker_used(chosen.id, r->now());
-    state.last_sticker = r->now();
-    log::info("{} sent a sticker for \"{}\": [{}] {}", describe(chat), feeling, chosen.tags, chosen.description);
-    co_return true;
-}
-
 /// What she knows about the person she answers, for the writer.
 std::string known_about(Responder *r, const store::StoredMessage &target) {
     if (!r->memory || !r->config.memory.facts || target.from_self) return {};
@@ -243,27 +191,11 @@ Task<> learn_self_facts(Responder *r, store::ChatKey chat, std::vector<store::St
 
 namespace detail {
 
-bool stickers_ready(Responder *r) {
-    if (!r->stickers) return false;
-    auto pool = r->store.stickers("registered");
-    return pool.has_value() && !pool->empty();
-}
-
 Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vector<store::StoredMessage> log_lines,
                         store::StoredMessage target, ChatInfo info, i64 started, std::string remembered, std::string reference,
                         std::string self_notes, std::string presence) {
     auto &state = r->chats[chat];
     const auto &settings = r->config.chat;
-    if (plan.sticker_only) {
-        const auto feeling = plan.sticker.empty() ? plan.intent : plan.sticker + "：" + plan.intent;
-        if (co_await send_sticker(r, chat, feeling, log_lines)) {
-            if (r->observer) r->observer(chat, plan, {"[表情]"});
-            note_spoke(state.flow);
-            co_return Delivered{.sent = true, .said = "[表情包]"};
-        }
-        plan.style = ReplyStyle::SHORT; // nothing fitting: say it in words
-    }
-
     const auto habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
     const auto history = build_writer_history({
@@ -351,10 +283,6 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     }
     if (sent == 0) co_return Delivered{};
     if (r->memory && r->config.memory.facts) r->spawn(learn_self_facts(r, chat, own, log_lines));
-    if (!plan.sticker.empty()) {
-        if (r->realtime) co_await lighter::sleep(std::chrono::milliseconds(800));
-        std::ignore = co_await send_sticker(r, chat, plan.sticker + "：" + plan.intent, log_lines);
-    }
     note_spoke(state.flow);
     if (r->memory && r->config.memory.facts && !target.from_self && !is_notice(target)) r->spawn(learn_facts(r, chat, target, log_lines));
 

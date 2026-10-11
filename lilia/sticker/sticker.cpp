@@ -1,6 +1,8 @@
 #include "sticker.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <chrono>
 #include <format>
 #include <fstream>
@@ -17,6 +19,7 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/log.h>
+#include <lilia/memory/memory.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
 
@@ -109,32 +112,92 @@ std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count
     return picked;
 }
 
-std::string render_candidates(const std::vector<store::Sticker> &candidates) {
+std::string embedding_text(const store::Sticker &sticker) { return std::format("{}：{}", sticker.tags, sticker.description); }
+
+std::vector<store::Sticker> rank(const std::vector<store::Sticker> &pool, const std::vector<float> &query,
+                                 const std::unordered_map<std::string, std::vector<float>> &vectors, usize count) {
+    std::vector<std::pair<double, const store::Sticker *>> scored;
+    for (const auto &sticker : pool) {
+        if (const auto it = vectors.find(sticker.sha1); it != vectors.end())
+            scored.emplace_back(memory::cosine(query, it->second), &sticker);
+    }
+    std::ranges::stable_sort(scored, std::greater<>{}, &std::pair<double, const store::Sticker *>::first);
+    std::vector<store::Sticker> out;
+    for (usize i = 0; i < scored.size() && i < count; ++i) out.push_back(*scored[i].second);
+    return out;
+}
+
+std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng) {
+    std::vector<std::string_view> words;
+    for (usize i = 0; i < feeling.size();) {
+        // Split at ASCII separators and the common full-width ones.
+        static constexpr std::array<std::string_view, 8> k_separators{" ", ",", "/", ":", "、", "，", "：", "；"};
+        usize cut = feeling.size();
+        usize width = 0;
+        for (const auto separator : k_separators) {
+            if (const auto at = feeling.find(separator, i); at < cut) {
+                cut = at;
+                width = separator.size();
+            }
+        }
+        if (cut > i) words.push_back(feeling.substr(i, cut - i));
+        i = cut + width;
+    }
+    std::vector<std::pair<usize, store::Sticker>> hits;
+    std::vector<store::Sticker> rest;
+    for (auto &sticker : pool) {
+        const auto found = std::ranges::count_if(
+            words, [&](std::string_view word) { return sticker.tags.contains(word) || sticker.description.contains(word); });
+        if (found > 0) {
+            hits.emplace_back(static_cast<usize>(found), std::move(sticker));
+        } else {
+            rest.push_back(std::move(sticker));
+        }
+    }
+    std::ranges::stable_sort(hits, [](const auto &a, const auto &b) {
+        if (a.first != b.first) return a.first > b.first;
+        return a.second.seen + 2 * a.second.used > b.second.seen + 2 * b.second.used;
+    });
+    std::vector<store::Sticker> out;
+    for (usize i = 0; i < hits.size() && out.size() < count; ++i) out.push_back(std::move(hits[i].second));
+    for (auto &sticker : sample(std::move(rest), count - out.size(), rng)) out.push_back(std::move(sticker));
+    return out;
+}
+
+std::string handle(const store::Sticker &sticker) { return std::format("s{}", sticker.id); }
+
+std::optional<i64> parse_handle(std::string_view text) {
+    text = trim(text);
+    if (text.starts_with('#')) text.remove_prefix(1);
+    if (text.starts_with('s') || text.starts_with('S')) text.remove_prefix(1);
+    i64 id = 0;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), id);
+    if (ec != std::errc{} || end != text.data() + text.size()) return std::nullopt;
+    return id;
+}
+
+std::string render_candidates(const std::vector<store::Sticker> &candidates, i64 now) {
+    constexpr i64 k_recent_seconds = 86'400;
     std::string out;
-    for (usize i = 0; i < candidates.size(); ++i) {
-        out += std::format("{}. 标签：{}｜画面：{}\n", i + 1, candidates[i].tags, candidates[i].description);
+    for (const auto &sticker : candidates) {
+        out += std::format("{} 标签：{}｜画面：{}{}\n", handle(sticker), sticker.tags, sticker.description,
+                           sticker.last_used > 0 && now - sticker.last_used < k_recent_seconds ? "（她一天内发过）" : "");
     }
     return out;
 }
 
-PickRequest build_pick_request(std::string_view prompt, const std::vector<std::string> &recent, std::string_view intent,
-                               const std::vector<store::Sticker> &candidates) {
-    PickRequest request;
-    provider::append_system(request.history, std::string(prompt));
-    std::string user = "最近的聊天：\n";
-    for (const auto &line : recent) user += line + "\n";
-    user += std::format("\n她想表达的意思：{}\n\n可以发的表情包：\n{}", intent, render_candidates(candidates));
-    provider::append_user(request.history, std::move(user));
-    glz::generic item_schema;
-    std::ignore = glz::read_json(item_schema, R"({"type": "string"})");
-    provider::SchemaProperty ids{.type = "array", .description = "选中的编号，最多一个；不挑就为空"};
-    ids.items.emplace(std::move(item_schema));
-    request.tools.push_back({
-        .name = "pick_sticker",
-        .description = "提交要发的表情包编号",
-        .input_schema = {.properties = {{"ids", std::move(ids)}}, .required = {"ids"}},
-    });
-    return request;
+std::optional<onebot::Segment> resend_segment(const onebot::Message &message) {
+    if (message.size() != 1) return std::nullopt;
+    const auto &segment = message.front();
+    if (segment.type == "mface") return segment;
+    if (segment.type != "image" || onebot::data_integer(segment, "sub_type").value_or(0) != 1) return std::nullopt;
+    const auto url = onebot::data_string(segment, "url");
+    if (!url || !(url->starts_with("http://") || url->starts_with("https://"))) return std::nullopt;
+    onebot::Segment again{.type = "image"};
+    again.data["file"] = *url;
+    again.data["sub_type"] = i64{1};
+    again.data["summary"] = "[动画表情]";
+    return again;
 }
 
 Collector::Collector(const StickerConfig &config, std::filesystem::path data_dir, store::Store &store, Spawn spawn)
