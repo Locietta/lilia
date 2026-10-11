@@ -33,6 +33,9 @@ enum struct Role {
 
 struct TextPart {
     std::string text;
+    /// Ends a stable prefix: providers with prompt caching put a breakpoint
+    /// after this part (lilia: the chat log, before what changes per call).
+    bool cache = false;
 };
 
 /// Provider-private state carried opaquely through semantic session entries

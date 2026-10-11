@@ -74,6 +74,15 @@ search, intent)`, `wait(seconds)`, `search_history(query)` or
     recalled message is stored as "[已撤回]" (its segments stay) and is never
     answered. Muted, she stores messages but makes no model calls. Her group
     card, from `get_group_member_info` on connect, is her name in each group.
+  - Prompts are laid out for prompt caching (2026-10-11). The log window is
+    anchored and only grows between trims (MaiBot's 2× then 1×), so a turn's
+    log is a prefix of the next one's. The planner gets the place and
+    the numbered log as one cached part, then a tail with what changes per
+    turn, the time last. The writer's system prompt is persona plus rules,
+    the same in every chat; the log turns end a cached prefix; the place,
+    time, style and notes form the final user part. The planner's tools
+    never change between rounds; a tool she cannot use right now answers
+    with a receipt instead.
   - `lilia replay <chat.jsonl>` runs the same ingest and turn code on a
     recorded or synthetic log without NapCat and prints every decision;
     `scripts/replay-remote.sh` runs it on cachy with the live keys.- **`archive/`**: copies the media of allowed chats (pictures, stickers,

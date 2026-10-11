@@ -710,10 +710,13 @@ def test_reply_and_reconnect(tmp_path):
         "no_cache": True,
     }, "she asks for her own card"
     assert "tools" not in writer, "no search unless the planner asks for it"
-    assert "莉莉娅" in writer["system"] and "测试群" in writer["system"]
+    assert "莉莉娅" in writer["system"] and "测试群" not in writer["system"], (
+        "the writer's system prompt is the same in every chat"
+    )
     last = writer["messages"][-1]
     texts = "".join(b.get("text", "") for b in last["content"] if b["type"] == "text")
     assert "你好呀" in texts and "打个招呼" in texts and "别理我" not in texts
+    assert "测试群" in last["content"][-1]["text"], "where she is comes with the note"
     assert len(napcat.sent) == 1
     params = napcat.sent[0]["params"]
     assert params["group_id"] == GROUP

@@ -141,8 +141,15 @@ void test_planner() {
             "what the sender wrote");
     const auto hers = stored(8, t, "lilia", "在的", true);
     require(chat::quote_prefix(&hers, "闭锁") == "[回复 闭锁: 在的] ", "her own line under her name here");
-    require(user.find("以下是新消息") < user.find("#3 "), "the new messages are marked");
-    require(user.find("以下是新消息") > user.find("#2 "), "old lines come before the marker");
+    // The log is a cached prefix; what changes per turn follows it, the time last.
+    const auto &parts = request.history[1].parts;
+    require(parts.size() == 2 && std::get<provider::TextPart>(parts[0]).cache && !std::get<provider::TextPart>(parts[1]).cache,
+            "the log part ends a cached prefix");
+    const auto &log = std::get<provider::TextPart>(parts[0]).text;
+    const auto &tail = std::get<provider::TextPart>(parts[1]).text;
+    require(log.starts_with("这是 QQ 群「测试群」") && log.contains("#3 [21:04]") && !log.contains("2026-10-03"),
+            "the log part holds the place and the lines, never the time");
+    require(tail.starts_with("#3 起是新消息") && tail.ends_with("现在是 2026-10-03 21:05（UTC+8）。"), "the tail: " + tail);
     require(user.find("没有人直接叫莉莉娅") != std::string::npos, "the planner is told nobody addressed her");
     require(request.tools.size() == 4 && request.tools[0].name == "reply" && request.tools[1].name == "repeat" &&
                 request.tools[2].name == "wait" && request.tools[3].name == "stay_silent",
@@ -235,19 +242,21 @@ void test_writer() {
         .log_bytes = 10'000,
     });
     using provider::Role;
-    require(history.size() == 7, "system, developer, then user/assistant turns");
+    require(history.size() == 7, "persona, rules, then user/assistant turns");
     require(history[0].role == Role::SYSTEM && text_of(history[0]) == "PERSONA", "persona is the system prompt");
-    require(history[1].role == Role::DEVELOPER && text_of(history[1]).find("RULES") != std::string::npos &&
-                text_of(history[1]).find("一两个词") != std::string::npos,
-            "rules and the style instruction are developer text");
+    require(history[1].role == Role::SYSTEM && text_of(history[1]) == "RULES", "so are the rules, nothing that changes per reply");
     require(history[2].role == Role::USER && text_of(history[2]) == "（更早的聊天记录略）",
             "a log starting with her own line gets a user stub");
     require(history[3].role == Role::ASSISTANT && text_of(history[3]) == "早", "her lines are assistant turns without labels");
     require(history[4].role == Role::USER && text_of(history[4]) == "b: 第三集作画崩了\nc: 确实", "consecutive lines share a turn");
     require(history[5].role == Role::ASSISTANT && text_of(history[5]) == "崩成ppt了", "assistant turn");
-    const auto last = text_of(history[6]);
-    require(history[6].role == Role::USER && last.starts_with("b: 莉莉娅你追吗\n\n【你要回应b的这条") && last.ends_with("现在，你说："),
-            "the note ends the last user turn");
+    require(history[6].role == Role::USER && history[6].parts.size() == 2, "the last log turn and the note");
+    const auto &last_line = std::get<provider::TextPart>(history[6].parts[0]);
+    require(last_line.text == "b: 莉莉娅你追吗" && last_line.cache, "the log ends a cached prefix");
+    const auto last = std::get<provider::TextPart>(history[6].parts[1]).text;
+    require(last.starts_with("这是 QQ 群「测试群」") && last.contains("现在是 2026-10-03 21:05") && last.contains("一两个词") &&
+                last.contains("【你要回应b的这条") && last.ends_with("现在，你说："),
+            "where, when, the style and the note come last: " + last);
     require(last.find("说在追") != std::string::npos, "the intent reaches the writer");
     const auto briefed = chat::build_writer_history({
         .persona = "PERSONA",
@@ -262,7 +271,7 @@ void test_writer() {
     require(briefed_note.find("回复信息参考：b 在问她追不追第三集") != std::string::npos &&
                 briefed_note.find("不用完全遵守") != std::string::npos && briefed_note.find("你想表达的意思") == std::string::npos,
             "a brief reaches the writer as optional reference");
-    require(text_of(history[1]).find("口气") == std::string::npos, "no voice section without samples");
+    require(last.find("口气") == std::string::npos, "no voice section without samples");
 }
 
 void test_flow() {

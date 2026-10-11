@@ -215,11 +215,54 @@ Task<> test_names_do_not_force() {
     co_await tasks.join();
 }
 
+/// The text of the planner's cached log part in one request.
+std::string log_part(const provider::History &history) {
+    for (const auto &item : history) {
+        for (const auto &part : item.parts) {
+            if (const auto *text = std::get_if<provider::TextPart>(&part); text && text->cache) return text->text;
+        }
+    }
+    return {};
+}
+
+Task<> test_cacheable_prompts() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.responder->must_speak = true; // so a round is refused and retried
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        const bool refused = after_tool_result(history) && text_of(history.back()).contains("用 reply");
+        if (after_tool_result(history) && !refused) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
+        if (!refused) return std::vector{test::tool_call("stay_silent", R"({"reason":"不想说"})")};
+        return std::vector{test::tool_call("reply", R"({"target":"#1","style":"short","intent":"接一句"})")};
+    };
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("确实")};
+    };
+    std::ignore = h.say(1, 20001, "小明", {onebot::text_segment("新番好看吗")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent == std::vector<std::string>{"确实"}, "the refused silence became a reply");
+    std::ignore = h.say(2, 20002, "小红", {onebot::text_segment("还行")});
+    co_await h.responder->run_turn(k_chat);
+
+    const auto &requests = h.planner->requests;
+    require(requests.size() >= 4, "two turns of rounds");
+    for (const auto &tools : h.planner->tools) {
+        require(tools.size() == h.planner->tools.front().size(), "the same tools every round");
+    }
+    const auto first = log_part(requests.front());
+    const auto later = log_part(requests.back());
+    require(!first.empty() && later.starts_with(first), "a later turn's log extends the earlier one:\n" + first + "\n--\n" + later);
+    require(!first.contains("现在是"), "the time is not in the cached part");
+    const auto writer_log = log_part(h.writer->requests.front());
+    require(writer_log == "小明: 新番好看吗", "the writer's log part is cached too: " + writer_log);
+    co_await tasks.join();
+}
+
 } // namespace
 
 int main() {
     try {
-        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_names_do_not_force}) {
+        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_names_do_not_force, &test_cacheable_prompts}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

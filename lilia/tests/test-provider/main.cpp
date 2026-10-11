@@ -74,11 +74,27 @@ void test_system_cache() {
     }
 }
 
+void test_part_cache() {
+    provider::History history;
+    provider::append_system(history, "PERSONA");
+    history.push_back(
+        {.role = provider::Role::USER, .parts = {provider::TextPart{.text = "LOG", .cache = true}, provider::TextPart{.text = "NOW"}}});
+
+    const auto json = encode(history, true);
+    const auto &content = field(field(json, "messages")->get_array()[0], "content")->get_array();
+    require(content.size() == 2 && cached(content[0]) && !cached(content[1]), "a breakpoint after the log part only");
+    const auto plain = encode(history, false);
+    for (const auto &block : field(field(plain, "messages")->get_array()[0], "content")->get_array()) {
+        require(!cached(block), "no part markers without caching");
+    }
+}
+
 } // namespace
 
 int main() {
     try {
         test_system_cache();
+        test_part_cache();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

@@ -804,6 +804,34 @@ void Responder::attach(std::shared_ptr<onebot::Session> live, onebot::LoginInfo 
     for (const auto group : config.chat.groups) spawn(rejoin(this, group));
 }
 
+std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &chat) {
+    auto &state = chats[chat];
+    const auto &settings = config.chat;
+    const auto size = [](const store::StoredMessage &message) { return message.text.size() + message.sender_name.size() + 24; };
+    if (state.log_anchor > 0) {
+        if (auto window = store.messages_after(chat, state.log_anchor, 2 * settings.context_messages + 1); window.has_value()) {
+            usize bytes = 0;
+            for (const auto &message : *window) bytes += size(message);
+            if (window->size() <= 2 * settings.context_messages && bytes <= 2 * settings.context_bytes) return *std::move(window);
+        }
+    }
+    auto recent = store.recent_messages(chat, settings.context_messages);
+    if (!recent.has_value() || recent->empty()) {
+        if (recent.has_error()) log::error("cannot read chat log: {}", recent.error().message());
+        state.log_anchor = 0;
+        return {};
+    }
+    usize bytes = 0;
+    usize kept = 0;
+    for (auto it = recent->rbegin(); it != recent->rend(); ++it, ++kept) {
+        if (kept > 0 && bytes + size(*it) > settings.context_bytes) break;
+        bytes += size(*it);
+    }
+    recent->erase(recent->begin(), recent->end() - static_cast<std::ptrdiff_t>(kept));
+    state.log_anchor = recent->front().row_id - 1;
+    return *std::move(recent);
+}
+
 std::string Responder::self_name(const store::ChatKey &chat) const {
     const auto it = chats.find(chat);
     return it != chats.end() && !it->second.self_card.empty() ? it->second.self_card : self.nickname;
@@ -1082,7 +1110,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .style_override = style_override,
         .now = started,
         .utc_offset_minutes = settings.utc_offset_minutes,
-        .log_bytes = settings.context_bytes,
+        .log_bytes = std::numeric_limits<usize>::max(), // log_window() bounds it
         .reference = reference,
         .habits = habits,
         .remembered = remembered,
@@ -1207,6 +1235,14 @@ std::string first_call_id(const std::vector<provider::OutputItem> &items) {
     return {};
 }
 
+/// The name of the first tool call in a planner response; empty when none.
+std::string first_call_name(const std::vector<provider::OutputItem> &items) {
+    for (const auto &item : items) {
+        if (const auto *call = std::get_if<provider::ToolCallItem>(&item)) return call->call.name;
+    }
+    return {};
+}
+
 /// Results for every tool call of a planner response: `receipt` for the one
 /// acted on, a note for any extra call (one tool per round).
 std::vector<ToolOutcome> outcomes(const std::vector<provider::OutputItem> &items, std::string_view acted, std::string receipt) {
@@ -1254,9 +1290,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     };
     co_await settle_images(fresh);
 
-    auto recent = store.recent_messages(chat, settings.context_messages);
-    if (recent.has_error()) log::error("cannot read chat log: {}", recent.error().message());
-    auto log_lines = recent.has_value() ? *std::move(recent) : fresh;
+    auto log_lines = log_window(chat);
+    if (log_lines.empty()) log_lines = fresh;
 
     // MaiBot weighs "how much of the recent chat was me" heavily: once she has
     // said a lot lately, only being called (or answered right after her own
@@ -1289,7 +1324,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         .named = named.has_value(),
         .now = started,
         .utc_offset_minutes = settings.utc_offset_minutes,
-        .log_bytes = settings.context_bytes,
+        .log_bytes = std::numeric_limits<usize>::max(), // log_window() bounds it
         .reference_handoff = settings.handoff == "reference",
         .decisions = {state.decisions.begin(), state.decisions.end()},
         .memory_search = memory != nullptr,
@@ -1340,7 +1375,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (arrived.empty()) co_return std::string();
         co_await settle_images(arrived);
         newest = arrived.back().message_id;
-        if (auto latest = store.recent_messages(chat, settings.context_messages); latest.has_value()) log_lines = *std::move(latest);
+        if (auto latest = log_window(chat); !latest.empty()) log_lines = std::move(latest);
         // Their descriptions may have landed since they were queued.
         for (auto &message : arrived) {
             if (const auto it = std::ranges::find(log_lines, message.message_id, &store::StoredMessage::message_id); it != log_lines.end())
@@ -1379,18 +1414,25 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
     std::string ended = "planner call failed";
     for (usize round = 0; round < k_max_rounds; ++round) {
-        auto offered = request.tools;
-        if (!memory || searches >= config.memory.max_searches)
-            std::erase_if(offered, [](const auto &tool) { return tool.name == "search_history"; });
-        if (must_speak && replies == 0)
-            std::erase_if(offered, [](const auto &tool) { return tool.name == "wait" || tool.name == "stay_silent"; });
-        // Right after a sticker, no second one.
-        if (now() - state.last_sticker < config.stickers.cooldown_seconds)
-            std::erase_if(offered, [](const auto &tool) { return tool.name == "send_sticker"; });
-        const auto planned = co_await call_planner(this, "planner", chat, history, offered);
+        // The same tools every round (changing them would void the cached
+        // prompt); one she cannot use right now gets a receipt saying why.
+        const auto planned = co_await call_planner(this, "planner", chat, history, request.tools);
         if (!planned) break;
         for (const auto &item : *planned) provider::append_output_item(history, item);
         const auto call_id = first_call_id(*planned);
+        const auto tool = first_call_name(*planned);
+        std::string unavailable;
+        if (tool == "search_history" && searches >= config.memory.max_searches) {
+            unavailable = "这一轮已经查过了，不能再查，根据现有的信息决定。";
+        } else if ((tool == "wait" || tool == "stay_silent") && must_speak && replies == 0) {
+            unavailable = "这次需要她说点什么，用 reply。";
+        } else if (tool == "send_sticker" && now() - state.last_sticker < config.stickers.cooldown_seconds) {
+            unavailable = "她刚发过表情包，隔一会儿再发；可以用文字回应，或者不说话。";
+        }
+        if (!unavailable.empty()) {
+            provider::append_tool_outcomes(history, outcomes(*planned, call_id, unavailable));
+            continue;
+        }
 
         // A look into the history: its result goes back to the planner.
         const auto search = std::ranges::find_if(*planned, [](const provider::OutputItem &item) {

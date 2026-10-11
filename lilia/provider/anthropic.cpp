@@ -24,6 +24,10 @@
 // detail behind complete()/compact().
 namespace lilia::anthropic::wire {
 
+struct CacheControl {
+    std::string type = "ephemeral";
+};
+
 struct TextBlock {
     std::string text;
     struct Citation {
@@ -32,6 +36,8 @@ struct TextBlock {
         std::optional<std::string> title;
     };
     std::optional<std::vector<Citation>> citations;
+    /// Requests only: a cache breakpoint after this block.
+    std::optional<CacheControl> cache_control;
 };
 
 // Neutral ToolCall's fields (id/name/input) already spell the Anthropic wire
@@ -83,10 +89,6 @@ struct ImageBlock {
 
 using ContentBlock = std::variant<TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, RedactedThinkingBlock, ServerToolUseBlock,
                                   WebSearchToolResultBlock, WebFetchToolResultBlock, ImageBlock>;
-
-struct CacheControl {
-    std::string type = "ephemeral";
-};
 
 /// The block form of `system`, which unlike the plain string can carry a
 /// cache breakpoint.
@@ -276,7 +278,9 @@ std::optional<std::variant<std::string, std::vector<wire::SystemBlock>>> encode_
     return prompt;
 }
 
-Result<WireHistory> to_wire(const provider::History &history) {
+/// `prompt_cache` keeps the breakpoints text parts ask for; without it they
+/// are dropped.
+Result<WireHistory> to_wire(const provider::History &history, bool prompt_cache) {
     WireHistory serialized;
     serialized.messages.reserve(history.size());
     bool conversation_started = false;
@@ -303,7 +307,10 @@ Result<WireHistory> to_wire(const provider::History &history) {
 
         for (const auto &part : item.parts) {
             if (const auto *text = std::get_if<provider::TextPart>(&part)) {
-                message.content.push_back(wire::TextBlock{.text = text->text});
+                message.content.push_back(wire::TextBlock{
+                    .text = text->text,
+                    .cache_control = prompt_cache && text->cache ? std::optional(wire::CacheControl{}) : std::nullopt,
+                });
             } else if (const auto *call = std::get_if<provider::ToolCall>(&part)) {
                 message.content.push_back(*call);
             } else if (const auto *result = std::get_if<ToolOutcome>(&part)) {
@@ -924,7 +931,7 @@ Error decode_status_error(int status, std::string_view body, std::string request
 
 Result<std::string> encode_complete_request(const provider::History &history, const std::vector<provider::ToolDefinition> &tools,
                                             const ClientOptions &options) {
-    auto wire_history = to_wire(history);
+    auto wire_history = to_wire(history, options.prompt_cache);
     if (!wire_history) {
         return outcome_error(std::move(wire_history).error());
     }

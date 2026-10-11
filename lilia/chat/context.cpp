@@ -36,16 +36,17 @@ std::string display_name(const store::StoredMessage &message) {
     return message.sender_name.empty() ? std::to_string(message.sender_id) : message.sender_name;
 }
 
-/// Shared "where and when" facts for both calls.
-std::string chat_facts(const ChatInfo &info, i64 now, i32 utc_offset_minutes) {
-    std::string facts = std::format("现在是 {}（{}）。", format_local_time(now, utc_offset_minutes), offset_label(utc_offset_minutes));
-    if (info.chat.type == "group") {
-        facts += std::format("这是 QQ 群「{}」。", info.chat_name);
-    } else {
-        facts += std::format("这是和「{}」的私聊。", info.chat_name);
-    }
-    facts += std::format("{}的 QQ 昵称是「{}」，别人 @ 她时会显示成「@{}」。", info.name, info.self_name, info.self_name);
+/// Where the chat is, for both calls; stable, so it may lead a cached prefix.
+std::string chat_place(const ChatInfo &info) {
+    std::string facts =
+        info.chat.type == "group" ? std::format("这是 QQ 群「{}」。", info.chat_name) : std::format("这是和「{}」的私聊。", info.chat_name);
+    facts += std::format("{}在这里的名字是「{}」，别人 @ 她时会显示成「@{}」。", info.name, info.self_name, info.self_name);
     return facts;
+}
+
+/// When it is; changes every call, so it goes last.
+std::string clock_line(i64 now, i32 utc_offset_minutes) {
+    return std::format("现在是 {}（{}）。", format_local_time(now, utc_offset_minutes), offset_label(utc_offset_minutes));
 }
 
 /// Newest-first walk that keeps whole lines within `budget` bytes, returned
@@ -232,23 +233,25 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
     const auto kept = fit_lines(input.recent, input.log_bytes,
                                 [&input](const store::StoredMessage &message) { return render_line(message, input.utc_offset_minutes); });
 
-    std::string user = chat_facts(input.info, input.now, input.utc_offset_minutes);
-    user += "\n\n聊天记录（编号在行首）：\n";
-    bool marked = false;
+    // The log is a prefix that stays the same from turn to turn (the window
+    // is anchored), so it is cached on its own; everything that changes per
+    // turn follows it, the time last.
+    std::string log = chat_place(input.info);
+    log += "\n\n聊天记录（编号在行首）：\n";
+    usize first_fresh = 0;
     for (const auto index : kept) {
         const auto &message = input.recent[index];
-        if (!marked && fresh.contains(message.message_id)) {
-            user += "—— 以下是新消息 ——\n";
-            marked = true;
-        }
         request.ids.push_back(message.message_id);
-        user += std::format("#{} {}\n", request.ids.size(), render_line(message, input.utc_offset_minutes));
+        if (first_fresh == 0 && fresh.contains(message.message_id)) first_fresh = request.ids.size();
+        log += std::format("#{} {}\n", request.ids.size(), render_line(message, input.utc_offset_minutes));
     }
-    user += input.addressed ? std::format("\n新消息里有人在叫{}，一般应该回应。", input.info.name) :
-            input.named     ? std::format("\n新消息里有人提到了{0}的名字：可能是在跟她说话，也可能只是在聊她。是在跟她说话就回应；"
+    std::string user;
+    if (first_fresh > 0) user += std::format("#{} 起是新消息（她上次看过之后才发的）。\n", first_fresh);
+    user += input.addressed ? std::format("新消息里有人在叫{}，一般应该回应。", input.info.name) :
+            input.named     ? std::format("新消息里有人提到了{0}的名字：可能是在跟她说话，也可能只是在聊她。是在跟她说话就回应；"
                                           "只是聊到她，就像被人背后提到一样看情况，可以接一句，也可以不出声。",
                                           input.info.name) :
-                              std::format("\n没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
+                              std::format("没有人直接叫{}。她可以只是看着，也可以在有话想说的时候插一句。", input.info.name);
     if (!input.presence.empty()) user += "\n" + input.presence;
     if (!input.people.empty()) {
         // MaiBot's person profiles: background for the planner only.
@@ -267,7 +270,10 @@ PlannerRequest build_planner_request(const PlannerInput &input) {
         for (const auto &decision : input.decisions) user += "- " + decision + "\n";
         user += "别重复她刚说过的意思。";
     }
-    provider::append_user(request.history, std::move(user));
+    user += "\n\n" + clock_line(input.now, input.utc_offset_minutes);
+    request.history.push_back(
+        {.role = provider::Role::USER,
+         .parts = {provider::TextPart{.text = std::move(log), .cache = true}, provider::TextPart{.text = std::move(user)}}});
 
     request.tools.push_back({
         .name = "reply",
@@ -418,19 +424,11 @@ std::string quoted_phrase(std::string_view style) {
 }
 
 provider::History build_writer_history(const WriterInput &input) {
+    // Persona and rules never change, then the anchored log: both cacheable.
+    // Where, when, the style and every note come in the final user part.
     provider::History history;
     provider::append_system(history, input.persona);
-
-    std::string developer = chat_facts(input.info, input.now, input.utc_offset_minutes);
-    developer += "\n\n";
-    developer += input.rules;
-    developer += "\n";
-    developer += input.style_override.empty() ? style_instruction(input.plan.style) : std::string_view(input.style_override);
-    if (!input.voice.empty()) {
-        developer += "\n\n群里的人平时会说这样的话，只是让你找找大家说话的口气，不用照搬：";
-        for (usize i = 0; i < input.voice.size(); ++i) developer += (i ? "、" : "") + std::format("「{}」", input.voice[i]);
-    }
-    provider::append_developer(history, std::move(developer));
+    provider::append_system(history, input.rules);
 
     const auto turn_text = [](const store::StoredMessage &message) {
         if (is_notice(message)) return "（群通知）" + message.text;
@@ -448,8 +446,15 @@ provider::History build_writer_history(const WriterInput &input) {
         if (role == provider::Role::ASSISTANT && history.size() == 2) provider::append_user(history, "（更早的聊天记录略）");
         history.push_back({.role = role, .parts = {provider::TextPart{.text = turn_text(message)}}});
     }
+    if (history.size() > 2) std::get<provider::TextPart>(history.back().parts.back()).cache = true;
 
-    std::string note = std::format("【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
+    std::string note = chat_place(input.info) + clock_line(input.now, input.utc_offset_minutes) + "\n";
+    note += input.style_override.empty() ? style_instruction(input.plan.style) : std::string_view(input.style_override);
+    if (!input.voice.empty()) {
+        note += "\n群里的人平时会说这样的话，只是让你找找大家说话的口气，不用照搬：";
+        for (usize i = 0; i < input.voice.size(); ++i) note += (i ? "、" : "") + std::format("「{}」", input.voice[i]);
+    }
+    note += std::format("\n【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
     if (!input.reference.empty()) {
         // The planner's intent predates the search; after it she knows.
         note += std::format("。你刚去查过了，情况如下：{}\n"
@@ -484,7 +489,8 @@ provider::History build_writer_history(const WriterInput &input) {
     }
     note += "\n现在，你说：";
     if (history.size() > 2 && history.back().role == provider::Role::USER) {
-        std::get<provider::TextPart>(history.back().parts.back()).text += "\n\n" + note;
+        // Its own part: the log before it stays a cacheable prefix.
+        history.back().parts.push_back(provider::TextPart{.text = std::move(note)});
     } else {
         provider::append_user(history, std::move(note));
     }

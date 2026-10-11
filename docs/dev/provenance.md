@@ -32,6 +32,9 @@ Local changes since the copy:
   top-level automatic caching, a breakpoint on the last tool, and `system` sent
   as text blocks (one per instruction item) with a breakpoint after the leading
   SYSTEM part. Without it `system` stays the single string liminal sends.
+- `provider::TextPart::cache` marks the end of a stable prefix inside the
+  messages; with `prompt_cache` the text block gets a breakpoint (lilia: the
+  chat log, before the per-call tail).
 
 From liminal `main` at `d520ce6`, keeping the relative paths so fixes can be
 ported in either direction:
@@ -80,3 +83,10 @@ against MaiBot's code: homophone candidates for all 20,991 characters and
 `src/chat/utils/utils.py`. One deliberate difference: a space next to a Latin
 letter or digit never splits (MaiBot: only between two), since writers space
 English words inside Chinese.
+
+## QQ face names
+
+`lilia/onebot/message.cpp` names the common QQ system faces by id. The table
+is lilia's own; on 2026-10-11 each entry was checked against the list in
+MaiBot-Napcat-Adapter's `qq_emoji_list.py` and only those that agreed were
+kept.

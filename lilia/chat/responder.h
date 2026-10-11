@@ -118,7 +118,17 @@ struct Responder {
         i64 muted_until = 0;
         /// Her group card here; empty when she has none (or it is unknown).
         std::string self_card;
+        /// The log turns show starts after this row (messages.id); 0: not
+        /// set yet. See log_window().
+        i64 log_anchor = 0;
     };
+
+    /// The chat log a turn shows, oldest first: everything after the chat's
+    /// anchor. Between trims it only grows, so the prompts built on it share
+    /// a cacheable prefix (MaiBot's 2x-then-1x trimming); past twice
+    /// `context_messages` or `context_bytes` the anchor moves to keep the
+    /// newest `context_messages` within `context_bytes`.
+    std::vector<store::StoredMessage> log_window(const store::ChatKey &chat);
 
     const Config &config;
     store::Store &store;

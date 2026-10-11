@@ -98,6 +98,9 @@ struct PlannerRequest {
     std::vector<i64> ids;
 };
 
+/// The system prompt; then one user message: the place and the numbered log
+/// (a cached prefix: the Responder anchors the window, so it only grows
+/// between trims), then what changes per turn, the time last.
 PlannerRequest build_planner_request(const PlannerInput &input);
 
 /// Reads the planner's tool call. No call, an unknown tool or an invalid
@@ -148,8 +151,9 @@ std::string quoted_phrase(std::string_view style);
 provider::History build_search_history(const ChatInfo &info, const store::StoredMessage &target, const Plan &plan, i64 now,
                                        i32 utc_offset_minutes);
 
-/// SYSTEM persona; DEVELOPER facts, rules and style; then the chat log as
-/// alternating turns (lilia's own lines are assistant turns) ending with a
+/// SYSTEM persona and rules; then the chat log as alternating turns (lilia's
+/// own lines are assistant turns; the last one ends a cached prefix); then a
+/// final user part with where and when, the style and notes, ending with a
 /// note that it is her turn to answer `target`.
 provider::History build_writer_history(const WriterInput &input);
 
