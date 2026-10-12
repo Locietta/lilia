@@ -203,8 +203,9 @@ struct LearningConfig {
     /// the planner's intent (with MMR for variety), or a weighted sample when
     /// there are no embeddings.
     usize candidates = 30;
-    /// Patterns the selector may pick for one reply.
-    usize max_selected = 5;
+    /// Patterns the selector may pick for one reply (MaiBot's is 5;
+    /// prompts/select.md asks for at most 3).
+    usize max_selected = 3;
     /// Use only patterns a person has checked (`lilia expressions --check`).
     bool checked_only = false;
     /// Chats that share learned patterns: each inner list is a sharing group,
@@ -266,8 +267,9 @@ struct MemoryConfig {
     bool facts = true;
     /// Facts shown per person, and the similarity that counts as a repeat.
     usize facts_per_person = 6;
-    /// Measured with Qwen3-Embedding-0.6B: paraphrases ~0.86-0.88, different
-    /// facts ("学吉他" vs "学钢琴") ~0.75.
+    /// Measured with the default Qwen3-Embedding-0.6B: paraphrases ~0.86-0.88,
+    /// different facts ("学吉他" vs "学钢琴") ~0.75. Similarities shift with the
+    /// model; re-measure this and the scores below when changing it.
     double duplicate_fact_score = 0.82;
     /// Messages per rolling summary (0 turns summaries off).
     usize summary_messages = 36;
@@ -275,8 +277,8 @@ struct MemoryConfig {
     /// the similarity that brings a summary back (measured on rolling
     /// summaries' cues; window summaries' may want another).
     usize recall_messages = 6;
-    /// Measured with Qwen3-Embedding-0.6B (tests/replay/recall.jsonl): unrelated
-    /// chatter ~0.45, the topic coming back 0.61-0.69.
+    /// Measured with the default Qwen3-Embedding-0.6B (tests/replay/recall.jsonl):
+    /// unrelated chatter ~0.45, the topic coming back 0.61-0.69.
     double recall_score = 0.6;
 };
 

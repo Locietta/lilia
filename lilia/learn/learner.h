@@ -153,7 +153,7 @@ struct SelectionInput {
     std::string target;
     std::string intent;
     std::vector<std::string> candidates;
-    usize max_picks = 5;
+    usize max_picks = 3;
 };
 
 /// The selector call: picks 0 to `max_picks` candidates that fit this reply.
