@@ -75,7 +75,8 @@ std::string render_facts(const std::vector<store::PersonFact> &facts);
 // log window drops is summarised whole, with recall cues; the newest few lead
 // the planner's log, and an older one comes back when its cues match the chat.
 
-/// Window summaries shown ahead of the planner's log (MaiBot keeps 10).
+/// Window summaries shown ahead of the planner's log. MaiBot keeps the newest
+/// 10 in its history too, but hides them from the planner and only recalls.
 inline constexpr usize k_earlier_summaries = 10;
 
 struct SummaryResult {

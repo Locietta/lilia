@@ -1,16 +1,19 @@
 # MaiBot reference notes
 
 Read on 2026-10-08 from MaiBot `f9ec367` (2026-10-07,
-https://github.com/MaiM-with-u/MaiBot). Paths are relative to that repo.
+https://github.com/MaiM-with-u/MaiBot) and checked again on 2026-10-13
+against `0f94cfa8` (2026-10-12). Paths are relative to that repo.
 This version runs the "Maisaka" planner/replyer; the older JSON planner,
 `plan_style`, `states` and mood system are gone (old defaults come from tag
-`0.11.6-beta`). Notes cover what matters for lilia; prompts are quoted where
-the wording is the point.
+`0.11.6-beta`), and so is behaviour learning (removed 2026-10-10,
+`8a7b96c7`: it learned from trimmed history and gave the planner a
+"[行为表现参考]"). Notes cover what matters for lilia; prompts are quoted
+where the wording is the point.
 
 ## Persona
 
 - Three fields, each used by one model:
-  - `personality` (replyer): "是一个大二女大学生，现在正在上网和群友聊天。善于用人类的角度思考问题，聊天偏日常。"
+  - `personality` (replyer): "是大二女大学生，现在正在上网和群友聊天。善于用人类的角度思考问题，聊天偏日常。"
   - `behavior_style` (planner only): the same plus "不会没话题硬找话题，".
   - `reply_style` (replyer): "你的风格平淡简短，可以参考贴吧的回复风格。不滥用比喻或者生硬句子。视情况省略主语或者进行倒装，风格较为随意。"
 - The replyer's identity line is `你的名字是{nick}，也有人叫你{aliases}。\n{personality}`. The fallback is "是人类。" The voice model is never told it is an AI; only the focus-mode planner says "AI".
@@ -19,6 +22,7 @@ the wording is the point.
   > 回复尽量简短一些。最好一次对一个话题进行回复，但必须考虑不同群友发言之间的交互，免得啰嗦或者回复内容太乱。请注意把握聊天内容。
   > 不要总是提及自己的身份背景，根据聊天内容自由发挥，但是要日常不浮夸，不要刻意找话题。
   > 不用刻意回复其他人发送的表情包，只要关注表情包表达的含义。你可以适当发送表情包表达情绪。控制回复的频率，不要每个人的消息都回复，优先回复你感兴趣的或者主动提及你的，适当回复其他话题。
+- In private chats `private_chat_prompts` replaces it for both, wrapped in "在该聊天中的注意事项：\n通用注意事项：\n…" (`src/maisaka/chat_loop_service.py:808-823`).
 - Optional alternative styles are chosen with `multiple_probability` (default 0): "用1-2个字进行回复", "用1-2个符号进行回复", "带点翻译腔，但不要太长", and so on.
 - `emotion_trait` adds a fixed suffix, for example "你整体理性冷静……".
 - Old 0.11 extras:
@@ -30,23 +34,25 @@ the wording is the point.
 ## Planner (`src/maisaka`, `prompts/zh-CN/maisaka_chat.prompt`)
 
 - **An agent loop with native tools**: `reply`, `wait(seconds)`, `send_emoji`, `query_memory`, `query_person_profile`, and others. Calling no tool means "done, stay quiet". The model writes a free-text 分析 (analysis) and then tool calls.
-  - Its earlier analyses and tool results **stay in its history**, so it knows what it did and why.
-  - After `reply` it runs again with its own message in context, and may add more, `wait`, or stop. The cap is 10 internal rounds.
-  - `wait` is capped at 3 in a row. In groups, new messages do not cut a wait short.
+  - Its history keeps the latest 3 outputs whole. Older tool rounds fold into one user message, "[已折叠的历史工具调用]", listing the calls and their results; their analyses go, and so do `reply`, `wait` and other control calls. Older outputs without a tool call are dropped (`post_processor.py`, `enable_context_optimization`, on by default).
+  - All the calls of one response run in order (`reasoning_engine.py:2047-2112`). `wait` returns at once and skips the calls after it; a tool marked `stop_after_execution` lets the rest run, then ends the turn.
+  - After `reply` it runs again with its own message in context, and may add more, `wait`, or stop. The cap is 16 internal rounds (`runtime.py:75`; 10 before 2026-10-09).
+  - `wait` is capped at 3 in a row. In groups new messages do not cut a wait short; in private chats they do (`turn_trigger/scheduler.py:53-56`). The experimental `planner_message_steering` (off by default, 2026-10-10) ends waits in groups too.
 - Prompt core:
   - "你的任务是分析聊天和聊天中的互动情况，然后做出下一步动作。"
   - "请注意，你不是 {bot_name} 本人，不要替 {bot_name} 发言"
   - "现在的上下文和聊天记录只是与参与聊天的用户当前的互动，你们之间可能有更多过去的关系和信息没有展现在上下文中。"
   - "默认直接输出你当前的最新分析，不要重复之前的分析内容"
+  - "请在 reply_reference 中提供本次回复的上下文关键信息与回复方向指引。"
   - The final user turn: "你需要输出对{bot_name}发言的分析，视情况输出文本内容的分析，思考是否进行工具调用".
-- **Anti-loop**: an analysis that is more than 90% similar to the previous one is replaced with "我应该根据我上面思考的内容进行反思，重新思考……".
+- **Anti-loop**: an analysis whose `difflib` ratio to the previous one is over 0.9 is replaced with "我应该根据我上面思考的内容进行反思，重新思考我下一步的行动，我需要分析当前场景，对话，然后直接输出我的想法：" (`reasoning_engine.py:440`).
 - **`reply` tool arguments**:
   - `msg_id`
-  - `set_quote`
-  - `reply_reference`: "有助于回复的信息，包括当前聊天状态、人物关系、事实信息、回忆信息"
+  - `set_quote`, default true: "以引用回复的方式发送这条回复，适合应用在发言时间较早或者间隔消息数较多的msg_id". Only the hint speaks of older targets; no rule in code.
+  - `reply_reference`, required and non-empty (2026-10-09, `908dfa6e`): "提供本次回复的上下文关键信息与回复方向，包括当前聊天状态、人物关系、事实信息、回忆信息；不是回复正文。" A blank one fails the call and asks again.
   - `reply_style`: 简短表达 / 正常回复 / 长回复
-  - optional `expression_intent{focus,reply_act,scene,tone,prefer,avoid}`
-  - The replyer receives `reply_reference`, or the planner's analysis if that is empty. It never gets a scripted "intent".
+  - optional `expression_intent{focus,reply_act,scene,tone,prefer,avoid}`, only with vector expression selection, and read only by the selector's query.
+  - The replyer receives `reply_reference` and never the analysis (called with `reply_reason=""`; before `908dfa6e` an empty reference fell back to the analysis). It never gets a scripted "intent".
 - **Trigger** (`turn_trigger/`):
   - Threshold of `ceil(1/talk_value)` pending messages.
   - Silence earns credit: idle seconds divided by the average interval (at least 30 s) count as virtual messages, up to threshold−1.
@@ -55,8 +61,7 @@ the wording is the point.
   - An @ forces a planner turn, but the planner may still decide not to reply.
   - Optional time-of-day `talk_value` rules.
   - A "dynamic" mode uses a fitted logistic P(reply) held to a per-hour budget.
-- **Duplicate guard**: "你刚刚已经回复过这条消息，你刚刚的发言是：“…”……注意请不要和之前你的发言重复。"
-- **Restart note**: "你离线休息了 {elapsed}，醒来后仍记得上次关机前的聊天内容。"
+- **Restart note**: "你离线休息了 {elapsed}，醒来后仍记得上次关机前的聊天内容。" (one of five tiers by time away).
 
 ## Replyer (`src/chat/replyer/maisaka_generator_base.py`, `prompts/zh-CN/maisaka_replyer.prompt`)
 
@@ -73,11 +78,12 @@ the wording is the point.
   1. History: others as user turns with an XML-ish header (msg_id, time, nickname); its own past replies as assistant turns.
   2. A separate user turn: "【表达习惯参考，请视情况自然的使用】\n- 当"{situation}"时，可以用"{style}"来表达。" (0–5 items).
   3. An optional temporary style: "你的说话风格可以尝试：…".
-  4. The reference: the planner's `reply_reference`, or its analysis.
+  4. The reference: the planner's `reply_reference`.
   5. The final turn: "当前时间：… 你想要回复的消息是 {sender} 发送的…目标消息，不要把其他历史消息当成当前回复对象。- 发言内容：… 请自然地回复。不要输出多余说明、括号、@ 或额外标记，只输出实际要发言的内容。"
   6. For 简短表达: "请简短的回复，允许句子残缺，奇怪表达，倒装，省略，符合口语习惯，符合省力随意回复习惯". For 长回复: "可以针对问题做出较为详细的评论和说明".
-- Memory, person profiles and tool results are **filtered out** of the replyer's context. Only what the planner puts in `reply_reference` reaches it.
-- The older "retro" template ends with "现在，你说：". Its light and private variants add "不要回复的太有条理" and "平淡一些".
+- **Duplicate guard** in the final turn when the target was answered before: "你刚刚已经回复过这条消息，你刚刚的发言是：“…”……注意请不要和之前你的发言重复。"
+- Memory, person profiles, mid-term summaries and tool results are **filtered out** of the replyer's context. Only what the planner puts in `reply_reference` reaches it.
+- The older "retro" template ends with "现在，你说：". Its light and private variants add "不要回复的太有条理" and "平淡一些". Since 2026-10-09 identity and the chat's attention block come first as their own system message.
 - **Models**:
   - replyer: deepseek-v4-pro, randomly with or without thinking, temperature 1
   - planner: v4-flash, temperature 0.7
@@ -135,11 +141,14 @@ the wording is the point.
 
 ## Memory (`src/A_memorix`, `src/maisaka/memory`)
 
-- **Person facts**: after each bot reply, facts about the person it answered are extracted. They must be "能被目标用户原始发言直接支持", with a verbatim quote that is checked in code, and must be stable (no jokes, guesses or temporary plans).
+- **Person facts**: after each bot reply, facts about the person it answered are extracted. They must be stable (no jokes, guesses or temporary plans). The prompt still asks for a verbatim quote "必须逐字摘自目标用户原始发言", but since 2026-10-09 (`22206768`) the code no longer checks it: every extracted fact is stored as user-supported, and `person_fact_verifier.py` is unused.
 - **Chat summaries**: incremental, every 36 messages. The model sees the previous 2 summaries and may return an empty result: "宁可少提取，也不要把噪声写进记忆". It also extracts entities and relations.
 - **Profiles**: built from facts into fixed sections (身份 / 关系 / 稳定了解 / 相处偏好 / 近期互动 / 不确定). Cached for 6 h or until the evidence fingerprint changes.
-  - Injected for up to 3 people as a user turn: "【人物画像-内部参考】以下内容仅供内部推理，不要向用户逐字复述。……若与当前对话冲突，以当前对话为准。"
+  - Injected for up to 3 people per planner round as a one-off user turn, never kept in history: "【人物画像-内部参考】以下内容仅供内部推理，不要向用户逐字复述。……若与当前对话冲突，以当前对话为准。"
 - **Retrieval**: no LLM. Vectors, BM25 and graph are combined with RRF and PPR.
   - Exposed to the planner as a `query_memory` tool: "只有回复明显依赖群内过去对话、共同经历、公开约定……时使用；不要为了寒暄、即时情绪回应、轻松接话……而检索。不要把私聊或个人隐私记忆带到群聊里。"
-- **Mid-term recall**: messages trimmed from context are summarised into `{summary, recall_cues[3-5]}`. Cues are embedded, and the best one with cosine ≥ 0.8 against the last 12 messages is injected.
+- **Mid-term recall** (`src/maisaka/memory/mid_term.py`, on by default):
+  - When the planner context passes 2 × `max_context_size` (default 40) it is cut back to 40. The chat lines and its own replies among what was cut (not analyses or tool results, at most 16000 characters) are summarised into `{summary, recall_cues[3-5]}` (`mid_term_memory_summary.prompt`).
+  - The newest 10 summaries stay in its history as "[聊天回想]" blocks, but planner and replyer requests filter them out.
+  - Once per planner turn, the last 12 context messages (360 characters each, 2400 in all) are embedded as one query; the best cue above 0.8 brings its summary back to the planner as "【聊天回想-内部参考】\n以下是根据当前上下文匹配到的一条聊天回想，只作为内部参考；仅在自然相关时使用，不要生硬复述。"
 - A_Memorix is off by default; mid-term recall is on. All memory calls use the cheap flash model, plus embeddings.

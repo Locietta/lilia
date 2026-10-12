@@ -99,12 +99,14 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       keep 1×; rounds about lines no longer shown go, older turns keep their
       calls but lose their analyses. After a restart the history is the
       stored lines again.
-    - Window summaries (2026-10-12, MaiBot's mid-term memory): whenever the
-      anchor is set, the lines up to it that no window summary covers (at
+    - Window summaries (2026-10-12, after MaiBot's mid-term memory): whenever
+      the anchor is set, the lines up to it that no window summary covers (at
       most twice `context_messages`) are summarised whole
       (`prompts/window_summary.md`: threads, who thinks what, what was
-      settled, with recall cues). The newest 10 lead the planner's log;
-      older ones come back through recall.
+      settled, with recall cues). The newest 10 lead the planner's log, in
+      the cached part; older ones come back through recall. MaiBot shows
+      none of them, only the one recalled (a cue above 0.8 against the last
+      12 lines); showing the newest is lilia's choice.
     - Limits: 16 rounds per turn, 3 waits in a row (MaiBot's), 3 replies per
       turn (lilia's), waits of 1–60 s. Replay passes waits in simulated time.
   - The writer (`prompts/persona.md` + `prompts/writer.md`) sees the log as
@@ -219,9 +221,11 @@ Model calls (2026-10-11):
        Each leg ranks 4x what is wanted; RRF (k 60, 0.7/0.3) fuses them.
        The gate looks at the dense similarity; recency is a small boost;
        expressions use MMR (0.85).
-   - Next: incremental facts and per-person profiles. Facts must quote the
-     person; never store lilia's own lines, jokes, rumours, or relationships
-     inferred from sharing a group. Record who said what.
+   - Facts about people (done 2026-10-08), from the person she answers, each
+     with a verbatim quote checked in code; never her own lines, jokes,
+     rumours, or relationships inferred from sharing a group. Her own facts
+     from what she says about herself (2026-10-10).
+   - Next: per-person profiles.
    - Summaries of chat that scrolls out of context, with recall cues (done
      2026-10-12: window summaries, above). Recall's threshold was measured
      on the rolling summaries' cues; re-measure it on window summaries.
@@ -230,17 +234,18 @@ Model calls (2026-10-11):
    - Expression learning (done 2026-10-07, `learn/`). Every group the
      account is in feeds an in-memory buffer; batches of 30 lines become
      "当[情境]时，可以[说法]" patterns with counts, and the text is dropped.
-     Other groups are read-only. The planner picks up to two of about 15
-     candidates per reply.
+     Other groups are read-only.
    - MaiBot-style learning (2026-10-09). Patterns are kept per source chat
      (`expression_groups` decides which chats share them), reviewed before
      storing with every verdict logged, embedded, and picked after the
-     planner by a selector call over MMR-ranked candidates. Jargon is mined
+     planner by a selector call: up to 3 of 30 MMR-ranked candidates
+     (`learning.max_selected`). Jargon is mined
      from the same batches: each sighting keeps an anonymised ±3-line
      snippet (at most 10 per term), and the meaning is inferred at 4, 8, 25
      and 100 sightings, with and without context; a term counts as slang
      only when the two readings differ. Known terms in the recent chat reach
-     the planner as notes. Not ported: clustering, behaviour learning.
+     the planner as notes. Not ported: clustering, and behaviour learning,
+     which MaiBot itself removed on 2026-10-10.
    - High-frequency terms (2026-10-09). `learn/segment.*` ports jieba's
      default `cut` (dictionary DAG plus HMM, jieba's own data embedded);
      `learn/frequency.*` ports MaiBot's word-frequency service. Batches of
@@ -282,5 +287,46 @@ Model calls (2026-10-11):
      description; words alone without memory), marking ones
      she sent within a day; `send_sticker(s<id>)` sends the one it picks.
      `repeat` resends someone's sticker (复读) by its URL.
+5. **Replace the ad hoc parts** (review against MaiBot `0f94cfa8`,
+   2026-10-12). About a fifth of `chat/` and half the rules in `planner.md`
+   and `writer.md` patch symptoms. Each change is measured in replay first.
+   - Writer output. The log reaches the writer as `name: text`, so it
+     sometimes answers as a transcript, and a chain of scrubbers cleans up
+     after it (speaker labels, leading mentions, asides, transcripts, length
+     caps). Fix the format; keep one validator that retries and counts its
+     repairs.
+   - Addressee is worked out five times: planner prose about 你/你们, tail
+     facts repeating `→她`, `interaction_summary`, a different dyad
+     definition with keyword lists in `line_features`, and two writer
+     patches. Keep the arrows and quotes; make the fitted prior the one
+     derived signal.
+   - Planner dispatch: an if-chain on tool names with per-tool counters,
+     silent repairs of planner mistakes (a self target becomes the newest
+     line, a missing wait becomes 30 s), and replay's `must_speak` inside the
+     production loop.
+   - Writer rules quote the phrases they forbid, which primes them. A/B a
+     rule in replay before adding it.
+   - No anti-loop guard: MaiBot replaces an analysis over 90% like the
+     previous one with a reflection prompt.
+   - People reach the planner only through `look_up_person`, as the newest 6
+     facts by date; a near-duplicate update keeps the stale fact. MaiBot
+     (with A_Memorix) shows sectioned profiles of up to 3 people per round.
+   - Learning: the expression blocklists match substrings, `learner.md`
+     contradicts itself on 梗, and styles are not checked against the source
+     line. The sticker pool freezes (a newcomer replaces only a never-sent
+     sticker; counts never decay; reward is a running sum): use decayed
+     counts and a Beta reward. The feedback reward table is hand-set, and
+     `--eval` scores with settings that differ from production.
+   - Smaller: she cannot @ anyone; quoting is opt-in, where MaiBot quotes
+     by default (its hint says for older targets); facts from private chats
+     are not kept out of groups.
+   - Wait for more hindsight labels: whether to speak is prose rate control
+     (fit P(reply) under a budget, as MaiBot's dynamic mode, or a bandit on
+     the hindsight reward), and four delays stack (debounce, presence, busy
+     schedule, image wait) where one latency distribution fitted to real
+     gaps would do.
+   - Keep: delivery and typos, the planner history and caching, edges and
+     quotes, fact grounding, the jargon and sticker usage cycles, the
+     retriever core, the prior fitting, privacy scrubbing.
 
 Not planned now: server-management tools, art feeds.
