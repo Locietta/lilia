@@ -163,7 +163,10 @@ std::string usage_text(const store::Sticker &sticker) { return sticker.usage.emp
 std::vector<std::string> embedding_inputs(const store::Sticker &sticker, const std::filesystem::path &data_dir, bool images, bool usage) {
     std::vector<std::string> out{embedding_text(sticker)};
     if (usage && !sticker.usage.empty()) out.push_back(usage_text(sticker));
-    if (images) out.push_back(retrieval::image_input(data_dir / sticker.path));
+    // A missing file would fail the embedding call of every text sent with it.
+    if (std::error_code ec; images && std::filesystem::exists(data_dir / sticker.path, ec)) {
+        out.push_back(retrieval::image_input(data_dir / sticker.path));
+    }
     return out;
 }
 

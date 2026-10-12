@@ -3,7 +3,7 @@
     python scripts/apply_sticker_edits.py labels.json [--data-dir ~/.local/share/lilia] [--dry-run]
 
 Reads the "edits" of a labels.json exported by scripts/sticker_label_page.py
-({"<id>": {"tags", "description"}}) and rewrites those registered stickers,
+({"<id>": {"tags", "description"}}) and rewrites those stickers (registered or spare),
 marking them modified_by = 'USER' so machine tagging leaves them alone (an
 edit already applied is only marked). The database is backed up to --backup-dir first. lilia reads the pool on every
 search and embeds the new text then, so the running bot needs no restart.
@@ -40,7 +40,7 @@ def main():
     current = {
         sticker_id: (tags, description, modified_by)
         for sticker_id, tags, description, modified_by in db.execute(
-            "SELECT id, tags, description, modified_by FROM stickers WHERE status = 'registered'"
+            "SELECT id, tags, description, modified_by FROM stickers WHERE status IN ('registered', 'spare')"
         )
     }
     changes, unchanged, missing, invalid = [], 0, 0, 0
@@ -57,7 +57,7 @@ def main():
         else:
             changes.append((sticker_id, tags, description))
     print(
-        f"{len(changes)} to update, {unchanged} unchanged, {missing} not registered, {invalid} without a description"
+        f"{len(changes)} to update, {unchanged} unchanged, {missing} not in the pool, {invalid} without a description"
     )
     if not changes or args.dry_run:
         return
@@ -73,7 +73,7 @@ def main():
     with db:
         db.executemany(
             "UPDATE stickers SET tags = ?2, description = ?3, modified_by = 'USER' "
-            "WHERE id = ?1 AND status = 'registered'",
+            "WHERE id = ?1 AND status IN ('registered', 'spare')",
             changes,
         )
     print(f"updated {len(changes)} stickers")
