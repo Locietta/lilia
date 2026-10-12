@@ -488,6 +488,83 @@ Task<> test_stickers() {
     std::filesystem::remove_all(dir, ec);
 }
 
+Task<> test_several_calls_a_round() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("在追")};
+    };
+    // A reply and the end of the turn in one answer: both run, in order.
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        const auto target = line_number(history, "新番");
+        return std::vector{test::text_answer("小明在问她，答一句就够了"),
+                           test::tool_call("reply", R"({"target":")" + target + R"(","style":"short","intent":"说在追"})", "toolu_1"),
+                           test::tool_call("stay_silent", R"({"reason":"说完了"})", "toolu_2")};
+    };
+    std::ignore = h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 新番追了吗")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent == std::vector<std::string>{"在追"} && h.planner->requests.size() == 1, "one round: she replied, then stopped");
+    const auto &record = h.responder->chats[k_chat].records.back();
+    require(record.outcomes.size() == 2 && record.outcomes[0].receipt.starts_with("她回复了") && record.outcomes[1].receipt == "好。",
+            "each call has its result");
+
+    // Calls after a wait are not run: the planner looks again first.
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"算了"})")};
+        const auto target = line_number(history, "那你");
+        return std::vector{test::tool_call("wait", R"({"seconds":5})", "toolu_3"),
+                           test::tool_call("reply", R"({"target":")" + target + R"(","style":"short","intent":"再答"})", "toolu_4")};
+    };
+    std::ignore = h.say(2, 20001, "小明", {onebot::text_segment("那你看第几集了")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent.size() == 1, "the reply after the wait was not sent");
+    const auto &second = h.planner->requests.back();
+    require(text_of(second.back()).contains("等了") && text_of(second.back()).contains("没有执行"), "the planner is told which ran");
+    co_await tasks.join();
+}
+
+Task<> test_private_chats() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.config.chat.private_users = {20001};
+    const store::ChatKey friend_chat{.type = "private", .id = 20001};
+    const auto say = [&](i64 id, std::string text) {
+        h.clock += 5;
+        return h.responder->ingest({.time = h.clock,
+                                    .self_id = k_self,
+                                    .message_type = "private",
+                                    .message_id = id,
+                                    .user_id = 20001,
+                                    .sender = {.user_id = 20001, .nickname = "小明"},
+                                    .message = {onebot::text_segment(std::move(text))}});
+    };
+    // The planner waits; the friend writes again, which ends the wait.
+    h.responder->realtime = true;
+    h.responder->observer = [&](const store::ChatKey &, const chat::Plan &plan, const auto &) {
+        if (plan.wait > 0) {
+            tasks.spawn([](auto *say) -> Task<> {
+                std::ignore = (*say)(2, "我是说今天");
+                co_return;
+            }(&say));
+        }
+    };
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (text_of(history.back()).contains("等了")) return std::vector{test::tool_call("stay_silent", R"({"reason":"等他说完"})")};
+        return std::vector{test::tool_call("wait", R"({"seconds":60})")};
+    };
+    require(say(1, "你说").has_value(), "a private message is answered");
+    const auto started = std::chrono::steady_clock::now();
+    co_await h.responder->run_turn(friend_chat);
+    require(std::chrono::steady_clock::now() - started < std::chrono::seconds(30), "the new message ended the wait");
+    const auto &requests = h.planner->requests;
+    require(requests.size() == 2 && text_of(requests[1].back()).contains("对方发来了新消息") &&
+                text_of(requests[1].back()).contains("我是说今天"),
+            "and the planner sees it");
+    const auto system = text_of(requests[0].front());
+    require(system.contains("这是私聊") && !system.contains("先弄清每条新消息是对谁说的"), "the private rules, not the group's: " + system);
+    co_await tasks.join();
+}
+
 Task<> test_history_survives_many_turns() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
@@ -515,7 +592,7 @@ int main() {
     try {
         for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
                            &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches,
-                           &test_pokes_and_repeats, &test_stickers}) {
+                           &test_pokes_and_repeats, &test_stickers, &test_several_calls_a_round, &test_private_chats}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

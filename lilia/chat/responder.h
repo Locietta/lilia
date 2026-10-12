@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include <lighter/async/runtime/sync.h>
 #include <lighter/async/runtime/task.h>
 
 #include <lilia/archive/archiver.h>
@@ -130,13 +131,16 @@ struct Responder {
         std::optional<i64> log_anchor;
         /// Whom each shown row is said to, by row; a row's never change.
         std::map<i64, LineEdges> edges;
+        /// Set when a message comes in; ends a planner wait in a private chat.
+        std::shared_ptr<lighter::Event> arrival = std::make_shared<lighter::Event>();
     };
 
     /// The chat log a turn shows, oldest first: everything after the chat's
     /// anchor. Between trims it only grows, so the prompts built on it share
     /// a cacheable prefix (MaiBot's 2x-then-1x trimming); past twice
     /// `context_messages` or `context_bytes` the anchor moves to keep the
-    /// newest `context_messages` within `context_bytes`.
+    /// newest `context_messages` within `context_bytes`, and what it passed
+    /// is summarised (memory::Memory::summarize_window).
     std::vector<store::StoredMessage> log_window(const store::ChatKey &chat);
 
     const Config &config;

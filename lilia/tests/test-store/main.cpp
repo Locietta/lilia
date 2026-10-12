@@ -146,7 +146,7 @@ PRAGMA user_version = 11;
             require(statement.has_value() && *statement->step(), "query");
             return statement->column_int(0);
         };
-        require(count("PRAGMA user_version") == 16, "now schema 16");
+        require(count("PRAGMA user_version") == 17, "now schema 17");
         auto sticker = db->sticker_by_hash("s");
         require(sticker.has_value() && *sticker && (*sticker)->modified_by == "AI" && (*sticker)->tags == "无语" &&
                     (*sticker)->usage.empty() && (*sticker)->usage_count == 0 && (*sticker)->tags_by == "VISION",
@@ -161,6 +161,8 @@ PRAGMA user_version = 11;
                 "chunks are rebuilt with their search text");
         require(db->facts(7, 0)->size() == 1 && db->all_summaries()->front().cues == "聊到成都" && db->expressions(0)->size() == 1,
                 "facts, summaries and expressions keep their rows");
+        require(db->all_summaries()->front().kind == store::k_rolling_summary && db->summaries({.type = "group", .id = 1}, 0)->size() == 1,
+                "old summaries are rolling ones");
         require(db->add_embeddings("p", {{"h", "vvvv"}}).has_value() && db->embeddings("p", {"h", "x"})->size() == 1,
                 "the embeddings table");
     }

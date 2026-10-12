@@ -271,11 +271,6 @@ provider::History build_writer_history(const WriterInput &input) {
 
     std::string note = chat_place(input.info) + clock_line(input.now, input.utc_offset_minutes) + "\n";
     note += style_instruction(input.plan.style);
-    if (!input.plan.analysis.empty()) {
-        // MaiBot hands its replyer the planner's reasoning the same way.
-        note += std::format("\n【旁观者对眼下情况的看法（里面的\"她\"就是你），可以参考：{}】",
-                            resolve_rows(input.plan.analysis, input.recent));
-    }
     note += std::format("\n【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
     if (input.plan.to_her == "no") note += "（这条不是对你说的，你是插一句：别装作对方在问你）";
     if (!input.plan.brief.empty()) {
@@ -291,9 +286,8 @@ provider::History build_writer_history(const WriterInput &input) {
                             "不报数字、日期和来源，不贴链接，别照抄】",
                             input.reference);
     }
-    if (!input.known.empty()) {
-        note += std::format("\n【你知道的关于{}的事，用得上就自然地用，别逐条复述，也别再问一遍：{}】", display_name(input.target),
-                            input.known);
+    for (const auto &person : input.known) {
+        note += std::format("\n【你知道的关于{}的事，用得上就自然地用，别逐条复述，也别再问一遍：{}】", person.name, person.facts);
     }
     if (!input.presence.empty()) note += std::format("\n【{}】", input.presence);
     if (!input.self_notes.empty()) {

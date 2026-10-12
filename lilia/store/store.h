@@ -85,9 +85,14 @@ struct MemoryChunk {
     std::string search_text;
 };
 
-/// An incremental summary of a stretch of chat (empty `summary`: nothing
-/// worth keeping, a checkpoint only). `cues` are newline-separated recall
-/// cues.
+/// Kinds of chat summary: every `summary_messages` messages, what is new and
+/// worth keeping (searched); and what the planner's log window dropped, whole
+/// enough to pick the talk up again (shown and recalled).
+inline constexpr std::string_view k_rolling_summary = "rolling";
+inline constexpr std::string_view k_window_summary = "window";
+
+/// A summary of a stretch of chat (empty `summary`: nothing worth keeping, a
+/// checkpoint only). `cues` are newline-separated recall cues.
 struct ChatSummary {
     i64 id = 0;
     ChatKey chat;
@@ -97,6 +102,7 @@ struct ChatSummary {
     i64 end_time = 0;
     std::string summary;
     std::string cues;
+    std::string kind = std::string(k_rolling_summary);
 };
 
 /// A sticker seen in any group. `status`: "pending" (not described yet),
@@ -427,13 +433,13 @@ struct Store {
 
     Result<void> add_summary(const ChatSummary &summary);
 
-    /// The last message row covered by summaries of `chat` (0: none).
-    Result<i64> last_summary_row(const ChatKey &chat);
+    /// The last message row covered by summaries of `chat` of `kind` (0: none).
+    Result<i64> last_summary_row(const ChatKey &chat, std::string_view kind = k_rolling_summary);
 
-    /// Summaries of `chat`, oldest first; `limit` > 0 keeps only the newest.
-    Result<std::vector<ChatSummary>> summaries(const ChatKey &chat, usize limit);
+    /// Summaries of `chat` of `kind`, oldest first; `limit` > 0 keeps only the newest.
+    Result<std::vector<ChatSummary>> summaries(const ChatKey &chat, usize limit, std::string_view kind = k_rolling_summary);
 
-    /// Every summary of every chat.
+    /// Every summary of every chat, of either kind.
     Result<std::vector<ChatSummary>> all_summaries();
 
     /// The sticker with this content hash, if known.

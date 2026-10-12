@@ -40,20 +40,29 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     one history per chat, as MaiBot's does (`chat/session.*`, 2026-10-11).
     - It is rendered each round from the stored lines after the window's
       anchor (`#<row id> [HH:MM] name(qq)→addressee: text`) with the planner's
-      own rounds among them: its analysis, its tool call and the result. New
-      lines simply follow. Between trims it only grows, so it is a cached prefix.
+      own rounds among them: its analysis, its tool calls and their results.
+      New lines simply follow. Between trims it only grows, so it is a cached
+      prefix. The newest window summaries (below) lead it.
+    - Its rules depend on the chat (2026-10-12): `planner_group.md` (whom a
+      line is said to, when to chip in) or `planner_private.md` (MaiBot's
+      private prompt: everything is said to her; mind the other's pace). The
+      writer's opening likewise (`writer_group.md` / `writer_private.md`).
     - Who a line is said to (`chat/addressee`, 2026-10-12): `→她` / `→小明` /
       `→全体` from its @s and quotes, quotes as `[回复 #row 小明: …]` (hers
       restored from her stored segments), computed once per row. An @ without a
       name is named when stored. LLMs find the addressee of a group-chat line
       far better with this structure than from text (Tan et al. 2023; Penzo et
       al. 2024): in a four-person group, friends say 你 to each other.
-    - Each round it writes a short analysis, then calls one tool:
+    - Each round it writes a short analysis, then calls tools:
       `reply(target, to_her, quote, style, intent)`, `find_sticker(feeling)`,
       `send_sticker(sticker)`, `repeat` (text or a sticker),
       `wait(seconds)`, `poke(target)`, `search_history(query)`,
       `look_up_person(target)` (the facts she noted about whoever wrote it),
       `search_web(query)` or `stay_silent(reason)`; no call means silence.
+      The calls of a round run in order, as MaiBot runs them (2026-10-12): a
+      reply and a sticker, or a look-up and a reply, take one round; `wait`
+      and `stay_silent` end the round, and the calls after them are answered
+      as not run. In a private chat a new message ends a wait (MaiBot's).
       Results are short ("她回复了 #n", "等了 N 秒", what a search found);
       her bubbles show up as her own lines. Side actions are its calls too:
       it is told that people are repeating a line or that someone poked her,
@@ -66,8 +75,8 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       knows about people comes on request, through `look_up_person`.
     - `to_her` is the planner's reading of the reply's target (called,
       likely, unsure, no); for `no` the writer is told it is chipping in.
-      Every round is logged in `planner_turns` (tool, argument, target,
-      to_her, her messages, a short analysis), kept 180 days.
+      Every call is logged in `planner_turns` (tool, argument, target,
+      to_her, her messages, the round's analysis), kept 180 days.
     - Hindsight feedback (`feedback/`, 2026-10-12, after MaiBot's
       reply_effect; off by default): ten minutes after she speaks (or once 40
       lines wait) the helper model reads the window with what came after and
@@ -90,13 +99,23 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       keep 1×; rounds about lines no longer shown go, older turns keep their
       calls but lose their analyses. After a restart the history is the
       stored lines again.
-    - Limits: 8 rounds and 3 replies per turn, 3 waits in a row (MaiBot's),
-      waits of 1–60 s. Replay passes waits in simulated time.
+    - Window summaries (2026-10-12, MaiBot's mid-term memory): whenever the
+      anchor is set, the lines up to it that no window summary covers (at
+      most twice `context_messages`) are summarised whole
+      (`prompts/window_summary.md`: threads, who thinks what, what was
+      settled, with recall cues). The newest 10 lead the planner's log;
+      older ones come back through recall.
+    - Limits: 16 rounds per turn, 3 waits in a row (MaiBot's), 3 replies per
+      turn (lilia's), waits of 1–60 s. Replay passes waits in simulated time.
   - The writer (`prompts/persona.md` + `prompts/writer.md`) sees the log as
-    turns (her lines are assistant turns) plus the planner's style, intent
-    and analysis (MaiBot's reply reason; "#n" becomes the line it names),
-    what the planner looked up this turn, and picked expressions.
-    Everything else about how she talks lives in `writer.md`.
+    turns (her lines are assistant turns) plus the planner's style and
+    intent ("#n" becomes the line it names), never its analysis: that is
+    decision talk, and MaiBot stopped passing it on (2026-10-09, `908dfa6e`).
+    What the turn found reaches it as facts: the recalled summary, what
+    `search_history` and `search_web` found, what she knows about the
+    person she answers and anyone `look_up_person` looked up. Then the
+    picked expressions. Everything else about how she talks lives in
+    `writer.md`.
   - `delivery` sends replies the way MaiBot does (2026-10-10).
     - Casual replies are split at "，,。;", spaces and newlines, then
       neighbours merge at random. `typos` swaps in a homophone now and then
@@ -203,8 +222,10 @@ Model calls (2026-10-11):
    - Next: incremental facts and per-person profiles. Facts must quote the
      person; never store lilia's own lines, jokes, rumours, or relationships
      inferred from sharing a group. Record who said what.
-   - Then: summaries of chat that scrolls out of context, with recall cues;
-     ranking by recency and use; private memories never reach groups.
+   - Summaries of chat that scrolls out of context, with recall cues (done
+     2026-10-12: window summaries, above). Recall's threshold was measured
+     on the rolling summaries' cues; re-measure it on window summaries.
+   - Then: ranking by recency and use; private memories never reach groups.
 3. **lilia's own style.**
    - Expression learning (done 2026-10-07, `learn/`). Every group the
      account is in feeds an in-memory buffer; batches of 30 lines become

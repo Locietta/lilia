@@ -86,12 +86,26 @@ struct Delivered {
     std::string refused;
 };
 
-/// One reply as the planner asked for it: a sticker alone, or the writer's
-/// text (with what the planner looked up this turn and the picked
-/// expressions) sent the way MaiBot sends replies, plus a sticker when asked.
+/// What a turn found out before replying; the writer gets it as facts,
+/// whatever the planner's intent mentions.
+struct Findings {
+    std::string remembered; ///< the recalled summary and search_history hits
+    std::string online;     ///< what search_web found
+    /// Whom look_up_person looked up (QQ number) and what she knows of them.
+    std::vector<std::pair<i64, KnownPerson>> people;
+    std::string self_notes; ///< what she said about herself before
+    std::string presence;   ///< just woke up, was busy, back online
+};
+
+/// One reply as the planner asked for it: the writer's text (with what the
+/// turn found and the picked expressions) sent the way MaiBot sends replies.
 /// Records what she said.
 lighter::Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vector<store::StoredMessage> log_lines,
-                                 store::StoredMessage target, ChatInfo info, i64 started, std::string remembered, std::string reference,
-                                 std::string self_notes, std::string presence);
+                                 store::StoredMessage target, ChatInfo info, i64 started, Findings found);
+
+/// The planner or writer prompt for this kind of chat: `{situation}` in
+/// `prompt` becomes the group or private variant, then `values` are filled.
+std::string situated(std::string_view prompt, const store::ChatKey &chat, std::vector<std::pair<std::string_view, std::string_view>> values,
+                     std::string_view group, std::string_view private_chat);
 
 } // namespace lilia::chat::detail

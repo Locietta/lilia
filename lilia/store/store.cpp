@@ -17,8 +17,9 @@ namespace {
 // (keyed by profile and text hash), memory_chunks.search_text. 13:
 // stickers.modified_by. 14: sticker usage (stickers.usage and its counts,
 // sticker_evidence). 15: planner_turns. 16: hindsight feedback (stickers.reward,
-// addressee_labels, reply_effects, addressee_models, feedback_progress).
-constexpr int k_schema_version = 16;
+// addressee_labels, reply_effects, addressee_models, feedback_progress). 17:
+// chat_summaries.kind (window summaries).
+constexpr int k_schema_version = 17;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -186,7 +187,8 @@ CREATE TABLE IF NOT EXISTS chat_summaries (
     start_time INTEGER NOT NULL,
     end_time INTEGER NOT NULL,
     summary TEXT NOT NULL,
-    cues TEXT NOT NULL
+    cues TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'rolling'
 );
 CREATE INDEX IF NOT EXISTS chat_summaries_by_chat ON chat_summaries (chat_type, chat_id, last_row);
 
@@ -414,6 +416,9 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
             return lighter::outcome_error(std::move(added).error());
         }
     }
+    if (auto added = ensure_column("chat_summaries", "kind", "TEXT NOT NULL DEFAULT 'rolling'"); added.has_error()) {
+        return lighter::outcome_error(std::move(added).error());
+    }
     // The media table predates its description column in versions 2 and 3.
     if (current == 2 || current == 3) {
         auto added = store.database.execute("ALTER TABLE media ADD COLUMN description TEXT NOT NULL DEFAULT ''");
@@ -561,7 +566,7 @@ Result<std::vector<MemoryChunk>> Store::chunks(const ChatKey &chat) {
 
 Result<void> Store::add_summary(const ChatSummary &summary) {
     auto statement = database.prepare("INSERT INTO chat_summaries (chat_type, chat_id, first_row, last_row, start_time, end_time, summary, "
-                                      "cues) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
+                                      "cues, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, summary.chat.type);
     statement->bind(2, summary.chat.id);
@@ -571,27 +576,31 @@ Result<void> Store::add_summary(const ChatSummary &summary) {
     statement->bind(6, summary.end_time);
     statement->bind(7, summary.summary);
     statement->bind(8, summary.cues);
+    statement->bind(9, summary.kind);
     return statement->run();
 }
 
-Result<i64> Store::last_summary_row(const ChatKey &chat) {
-    auto statement = database.prepare("SELECT COALESCE(MAX(last_row), 0) FROM chat_summaries WHERE chat_type = ?1 AND chat_id = ?2");
+Result<i64> Store::last_summary_row(const ChatKey &chat, std::string_view kind) {
+    auto statement =
+        database.prepare("SELECT COALESCE(MAX(last_row), 0) FROM chat_summaries WHERE chat_type = ?1 AND chat_id = ?2 AND kind = ?3");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, chat.type);
     statement->bind(2, chat.id);
+    statement->bind(3, std::string(kind));
     auto row = statement->step();
     if (row.has_error()) return lighter::outcome_error(std::move(row).error());
     return *row ? statement->column_int(0) : 0;
 }
 
-Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize limit) {
+Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize limit, std::string_view kind) {
     auto statement = database.prepare("SELECT * FROM (SELECT id, first_row, last_row, start_time, end_time, summary, cues "
-                                      "FROM chat_summaries "
-                                      "WHERE chat_type = ?1 AND chat_id = ?2 ORDER BY last_row DESC LIMIT ?3) ORDER BY last_row");
+                                      "FROM chat_summaries WHERE chat_type = ?1 AND chat_id = ?2 AND kind = ?4 "
+                                      "ORDER BY last_row DESC LIMIT ?3) ORDER BY last_row");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, chat.type);
     statement->bind(2, chat.id);
     statement->bind(3, limit == 0 ? i64{-1} : static_cast<i64>(limit));
+    statement->bind(4, std::string(kind));
     std::vector<ChatSummary> summaries;
     for (;;) {
         auto row = statement->step();
@@ -606,6 +615,7 @@ Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize lim
             .end_time = statement->column_int(4),
             .summary = statement->column_text(5),
             .cues = statement->column_text(6),
+            .kind = std::string(kind),
         });
     }
     return summaries;
@@ -914,7 +924,7 @@ Result<std::vector<std::string>> Store::search_texts() {
 }
 
 Result<std::vector<ChatSummary>> Store::all_summaries() {
-    auto statement = database.prepare("SELECT id, first_row, last_row, start_time, end_time, summary, cues, chat_type, chat_id "
+    auto statement = database.prepare("SELECT id, first_row, last_row, start_time, end_time, summary, cues, chat_type, chat_id, kind "
                                       "FROM chat_summaries ORDER BY id");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     std::vector<ChatSummary> summaries;
@@ -931,6 +941,7 @@ Result<std::vector<ChatSummary>> Store::all_summaries() {
             .end_time = statement->column_int(4),
             .summary = statement->column_text(5),
             .cues = statement->column_text(6),
+            .kind = statement->column_text(9),
         });
     }
     return summaries;

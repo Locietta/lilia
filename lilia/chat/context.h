@@ -49,7 +49,8 @@ struct Plan {
     /// The look_up_person tool: what she knows about whoever wrote `target`.
     bool look_up = false;
     std::string reason; ///< why she stays silent or waits
-    /// What the planner wrote before its tool call (its view of the chat).
+    /// What the planner wrote before its tool calls (its view of the chat);
+    /// logged, never shown to the writer.
     std::string analysis;
 };
 
@@ -73,14 +74,21 @@ std::string_view sticker_rule(bool enabled);
 /// The planner.md line describing what it hands the writer.
 std::string_view handoff_rule(bool reference);
 
+/// What she knows about one person, for the writer.
+struct KnownPerson {
+    std::string name;
+    std::string facts; ///< "对芒果过敏；住在杭州"
+};
+
 struct WriterInput {
     std::string persona;
-    std::string rules; ///< writer.md
+    std::string rules; ///< writer.md, its situation filled in
     ChatInfo info;
     std::vector<store::StoredMessage> recent;
     store::StoredMessage target;
-    /// Its analysis reaches the writer too, "#row" numbers replaced by the
-    /// lines they stand for.
+    /// Its intent (or brief) reaches the writer, "#row" numbers replaced by
+    /// the lines they stand for. Its analysis does not: that is decision talk
+    /// (MaiBot stopped passing it on, 908dfa6e).
     Plan plan;
     i64 now = 0;
     i32 utc_offset_minutes = 480;
@@ -89,10 +97,11 @@ struct WriterInput {
     std::string reference;
     /// Learned patterns the selector picked for this reply, "当X时，可以Y".
     std::vector<std::string> habits;
-    /// Older chat the planner looked up for this reply (search_history).
+    /// Older chat this turn brought back: the recalled summary and what
+    /// search_history found.
     std::string remembered;
-    /// Facts about the person she answers ("住在成都；在学吉他").
-    std::string known;
+    /// The person she answers, then anyone the planner looked up this turn.
+    std::vector<KnownPerson> known;
     /// What she has said about herself before ("- [MM-DD] 她……"), to stay
     /// consistent with.
     std::string self_notes;

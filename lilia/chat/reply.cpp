@@ -10,6 +10,8 @@
 #include <xmake/bin2obj/facts_md.hpp>
 #include <xmake/bin2obj/select_md.hpp>
 #include <xmake/bin2obj/self_facts_md.hpp>
+#include <xmake/bin2obj/writer_group_md.hpp>
+#include <xmake/bin2obj/writer_private_md.hpp>
 
 #include <lilia/chat/delivery.h>
 #include <lilia/chat/typos.h>
@@ -111,11 +113,20 @@ Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, 
     co_return picked;
 }
 
-/// What she knows about the person she answers, for the writer.
-std::string known_about(Responder *r, const store::StoredMessage &target) {
-    if (!r->memory || !r->config.memory.facts || target.from_self) return {};
-    auto facts = r->store.facts(target.sender_id, r->config.memory.facts_per_person);
-    return facts.has_value() ? memory::render_facts(*facts) : std::string();
+/// What she knows about the person she answers, then about anyone else the
+/// planner looked up this turn, for the writer.
+std::vector<KnownPerson> known_people(Responder *r, const store::StoredMessage &target,
+                                      const std::vector<std::pair<i64, KnownPerson>> &looked_up) {
+    std::vector<KnownPerson> known;
+    if (!r->memory || !r->config.memory.facts) return known;
+    if (!target.from_self && !is_notice(target)) {
+        auto facts = r->store.facts(target.sender_id, r->config.memory.facts_per_person);
+        if (facts.has_value() && !facts->empty()) known.push_back({.name = display_name(target), .facts = memory::render_facts(*facts)});
+    }
+    for (const auto &[user, person] : looked_up) {
+        if (user != target.sender_id || target.from_self) known.push_back(person);
+    }
+    return known;
 }
 
 /// MaiBot's person-fact writeback: after she answers someone, learn stable
@@ -184,15 +195,14 @@ Task<> learn_self_facts(Responder *r, store::ChatKey chat, std::vector<store::St
 namespace detail {
 
 Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vector<store::StoredMessage> log_lines,
-                        store::StoredMessage target, ChatInfo info, i64 started, std::string remembered, std::string reference,
-                        std::string self_notes, std::string presence) {
+                        store::StoredMessage target, ChatInfo info, i64 started, Findings found) {
     auto &state = r->chats[chat];
     const auto &settings = r->config.chat;
     const auto habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
     const auto history = build_writer_history({
         .persona = r->persona,
-        .rules = r->writer_rules,
+        .rules = situated(r->writer_rules, chat, {}, embedded(xmake::writer_group_md), embedded(xmake::writer_private_md)),
         .info = info,
         .recent = log_lines,
         .target = target,
@@ -200,12 +210,12 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .now = started,
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = std::numeric_limits<usize>::max(), // log_window() bounds it
-        .reference = reference,
+        .reference = std::move(found.online),
         .habits = habits,
-        .remembered = remembered,
-        .known = known_about(r, target),
-        .self_notes = self_notes,
-        .presence = presence,
+        .remembered = std::move(found.remembered),
+        .known = known_people(r, target, found.people),
+        .self_notes = std::move(found.self_notes),
+        .presence = std::move(found.presence),
         .previous_reply = previous == state.replied.end() ? std::string() : previous->second,
     });
     auto written = co_await call_model(r, r->writer, r->config.model.model, "writer", chat, history, {});

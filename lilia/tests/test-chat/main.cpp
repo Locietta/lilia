@@ -200,7 +200,8 @@ void test_planner() {
                 log.contains("#102 [21:02] 闭锁(她自己): 我在") && !log.contains("2026-10-03"),
             "lines are numbered by row; hers are marked; no time in the cached part: " + log);
     const auto tail = text_part(parts[1]).text;
-    require(tail.starts_with("#103 起是新消息") && tail.contains("#103 是叫她的") && tail.ends_with("现在是 2026-10-03 21:05（UTC+8）。"),
+    require(tail.starts_with("——以上是聊天记录") && tail.contains("\n#103 起是新消息") && tail.contains("#103 是叫她的") &&
+                tail.ends_with("现在是 2026-10-03 21:05（UTC+8）。"),
             "the tail: " + tail);
 
     // A round stays: its analysis and call, then its result opens the next
@@ -223,7 +224,15 @@ void test_planner() {
     require(next.size() == 3 && std::holds_alternative<ToolOutcome>(next[0]) && std::get<ToolOutcome>(next[0]).receipt == "她回复了 #103。",
             "the result comes first, right after the call");
     require(text_part(next[1]).text.contains("#105 [21:05] c(20105): 哪部") && text_part(next[1]).cache, "then the lines after it");
-    require(text_part(next[2]).text.starts_with("现在是"), "and the tail");
+    require(text_part(next[2]).text.starts_with("——以上是聊天记录") && text_part(next[2]).text.contains("现在是"),
+            "and the tail, set apart from the lines");
+
+    // What scrolled out of the window leads the log, inside the cached part.
+    const auto summarised = chat::render_session("PLANNER", info, rows, {}, {.now = t + 20}, {}, "[10-03 19:00 至 20:10] a 说周六去成都\n");
+    const auto head = text_part(summarised[1].parts[0]).text;
+    require(head.contains("更早的聊天") && head.find("a 说周六去成都") < head.find("聊天记录（行首是消息编号）") &&
+                text_part(summarised[1].parts[0]).cache,
+            "earlier summaries come before the lines: " + head);
 
     // At a trim, rounds about lines no longer shown go; older turns keep their
     // calls and results but not their analyses.
@@ -369,12 +378,18 @@ void test_writer() {
                         .info = group_info(),
                         .recent = {asked},
                         .target = asked,
-                        .plan = {.reply = true, .target = 205, .intent = "说在追", .analysis = "#18345 在问她，#9 早就刷走了"},
+                        .plan = {.reply = true, .target = 205, .intent = "接#18345 说在追", .analysis = "她应该接一句，因为#9 早就刷走了"},
                         .now = t,
+                        .remembered = "[10-02 21:00 至 22:30 的聊天摘要] b 说周六去成都",
+                        .known = {{.name = "b", .facts = "住在杭州"}, {.name = "c", .facts = "在学吉他"}},
                     })
                     .back());
-    require(analysed.contains("可以参考：「b: 莉莉娅你追吗，第三集作画…」在问她，那条消息早就刷走了"),
-            "the planner's analysis reaches the writer, its row numbers as lines: " + analysed);
+    require(!analysed.contains("她应该") && !analysed.contains("刷走"), "the planner's analysis stays with the planner: " + analysed);
+    require(analysed.contains("你想表达的意思：接「b: 莉莉娅你追吗，第三集作画…」说在追"),
+            "row numbers in the intent become lines: " + analysed);
+    require(analysed.contains("b 说周六去成都") && analysed.contains("关于b的事") && analysed.contains("住在杭州") &&
+                analysed.contains("关于c的事") && analysed.contains("在学吉他"),
+            "what the turn recalled and looked up reaches the writer as it is: " + analysed);
 }
 
 void test_flow() {

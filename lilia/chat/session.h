@@ -15,7 +15,7 @@ namespace lilia::chat {
 
 // The planner's history of one chat, the way MaiBot's planner keeps one: the
 // chat's lines (stored rows after the window's anchor) interleaved with the
-// planner's own rounds (its analysis, its tool call and the result). Each
+// planner's own rounds (its analysis, its tool calls and their results). Each
 // round renders it again; between trims it only grows, so consecutive calls
 // share a cacheable prefix and the planner always sees what it thought and did
 // before.
@@ -41,7 +41,7 @@ struct PlannerTail {
     std::string presence;           ///< just woke up, was busy, back online
     std::string self_notes;         ///< what she said about herself before
     std::string jargon;             ///< slang in the recent lines
-    std::string recall;             ///< an older summary the chat brings back
+    std::string recall;             ///< an older window summary the chat brings back
     i64 now = 0;
     i32 utc_offset_minutes = 480;
 };
@@ -55,10 +55,11 @@ std::string session_line(const store::StoredMessage &message, i32 utc_offset_min
 /// by row (a record closes the lines before it; its results open the next
 /// user message, followed by the lines that came after), the last line ending
 /// a cached prefix, then `tail` as a final part. `edges` are the rows'
-/// (aligned with them; empty: none shown).
+/// (aligned with them; empty: none shown). `earlier`, the summaries of what
+/// scrolled out of the window (memory::render_earlier), leads the log.
 provider::History render_session(std::string_view prompt, const ChatInfo &info, const std::vector<store::StoredMessage> &rows,
                                  const std::deque<PlannerRecord> &records, const PlannerTail &tail,
-                                 const std::vector<LineEdges> &edges = {});
+                                 const std::vector<LineEdges> &edges = {}, std::string_view earlier = {});
 
 /// After the window's anchor moved to `anchor_row`: records about lines no
 /// longer shown go, and all but the newest `keep_cycles` turns lose their
@@ -78,9 +79,12 @@ struct PlannerToolSet {
 /// The planner's tools; the same every round, so they never break the cache.
 std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set);
 
-/// Reads the planner's tool call. Targets are "#<row id>" among `rows`; no
-/// call, an unknown tool or an invalid target means silence. Waits are
-/// clamped to 1..60 seconds (30 when missing).
+/// Reads one planner tool call. Targets are "#<row id>" among `rows`; an
+/// unknown tool or an invalid target means silence (with the reason). Waits
+/// are clamped to 1..60 seconds (30 when missing).
+Plan parse_call(const provider::ToolCall &call, const std::vector<store::StoredMessage> &rows);
+
+/// parse_call() of the first tool call in `items`; no call means silence.
 Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vector<store::StoredMessage> &rows);
 
 } // namespace lilia::chat

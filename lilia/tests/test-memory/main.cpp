@@ -8,6 +8,7 @@
 
 #include <lilia/memory/memory.h>
 #include <lilia/store/store.h>
+#include <lilia/tests/support/fake_provider.h>
 #include <lilia/tests/support/fake_ws_peer.h>
 
 namespace {
@@ -123,7 +124,7 @@ void test_summaries() {
         if (const auto *text = std::get_if<provider::TextPart>(&part)) user += text->text;
     }
     require(user.find("以前的摘要（只用来理解上下文，别照抄）：\n- 阿紫说周六去成都\n") != std::string::npos &&
-                user.find("新的群聊记录：\n[10-05 21:00] a: 定了") != std::string::npos,
+                user.find("新的聊天记录：\n[10-05 21:00] a: 定了") != std::string::npos,
             "previous non-empty summaries come first, then the new lines");
     require(request.tools.size() == 1 && request.tools[0].name == "record_summary", "record_summary tool");
 
@@ -157,6 +158,13 @@ void test_summaries() {
     require(newest.has_value() && newest->size() == 2 && newest->front().summary == "20" && newest->back().summary == "30",
             "the newest summaries, oldest first");
     require(db->summaries(chat, 0)->size() == 3 && db->all_summaries()->size() == 3, "0 lists all");
+    require(db->add_summary({.chat = chat, .first_row = 31, .last_row = 40, .summary = "w", .kind = std::string(store::k_window_summary)})
+                .has_value(),
+            "add a window summary");
+    require(*db->last_summary_row(chat) == 30 && *db->last_summary_row(chat, store::k_window_summary) == 40 &&
+                db->summaries(chat, 0)->size() == 3 && db->summaries(chat, 0, store::k_window_summary)->front().summary == "w" &&
+                db->all_summaries()->size() == 4,
+            "each kind keeps its own rows");
 }
 
 /// Memory on a fake embedding service: a direction per topic word.
@@ -207,7 +215,7 @@ Task<> test_memory() {
     hits = co_await memory.search(chat, "MC");
     require(hits.size() == 1 && hits[0].chunk.text.contains("打 MC"), "another topic");
 
-    // Summaries compete in search and come back in recall.
+    // Rolling summaries compete in search.
     require(db->add_summary({.chat = chat,
                              .first_row = 1,
                              .last_row = 2,
@@ -218,9 +226,42 @@ Task<> test_memory() {
             "add summary");
     hits = co_await memory.search(chat, "成都");
     require(hits.size() == 1 && hits[0].chunk.id < 0 && hits[0].chunk.text.contains("聊天摘要"), "a summary is a hit too");
-    std::vector<store::StoredMessage> recent{{.chat = chat, .sender_name = "老王", .text = "成都好玩吗", .row_id = 5},
-                                             {.chat = chat, .sender_name = "阿紫", .text = "还行", .row_id = 6}};
-    require((co_await memory.recall(chat, recent)).contains("阿紫说周末去成都"), "recalled by its cue");
+
+    // Window summaries: what the planner's window dropped.
+    auto summarizer = std::make_shared<test::FakeProvider::State>();
+    summarizer->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        std::string seen;
+        for (const auto &part : history.back().parts) {
+            if (const auto *text = std::get_if<provider::TextPart>(&part)) seen += text->text;
+        }
+        const bool chengdu = seen.contains("成都");
+        return std::vector{test::tool_call("record_summary", chengdu ? R"({"summary":"阿紫说周末去成都","recall_cues":["聊到成都"]})" :
+                                                                       R"({"summary":"阿紫和老王在闲聊","recall_cues":["闲聊"]})")};
+    };
+    memory.summarizer = test::fake_provider(summarizer);
+    require(db->add_message({.chat = chat, .message_id = 7, .sender_id = 7, .sender_name = "阿紫", .time = 1006, .text = "周末去成都"})
+                .has_value(),
+            "add message");
+    co_await memory.summarize_window(chat, 7, 4);
+    auto windows = db->summaries(chat, 0, store::k_window_summary);
+    require(windows->size() == 1 && windows->front().first_row == 4 && windows->front().last_row == 7,
+            "the newest lines up to the anchor, at most the span");
+    co_await memory.summarize_window(chat, 7, 4);
+    require(db->summaries(chat, 0, store::k_window_summary)->size() == 1, "lines are summarised once");
+    require(memory.earlier(chat).contains("阿紫说周末去成都"), "the newest lead the planner's log");
+    std::vector<store::StoredMessage> recent{{.chat = chat, .sender_name = "老王", .text = "成都好玩吗", .row_id = 20},
+                                             {.chat = chat, .sender_name = "阿紫", .text = "还行", .row_id = 21}};
+    require((co_await memory.recall(chat, recent)).empty(), "one the planner already sees is not recalled");
+    for (usize i = 0; i < memory::k_earlier_summaries; ++i) {
+        const auto row = static_cast<i64>(8 + i);
+        require(db->add_message({.chat = chat, .message_id = row, .sender_id = 7, .sender_name = "老王", .time = 1000 + row, .text = "早"})
+                    .has_value(),
+                "add message");
+        co_await memory.summarize_window(chat, row, 4);
+    }
+    const auto shown = memory.earlier(chat);
+    require(!shown.contains("成都") && shown.contains("闲聊"), "only the newest few are shown: " + shown);
+    require((co_await memory.recall(chat, recent)).contains("阿紫说周末去成都"), "an older one is recalled by its cue");
     recent[0].text = "今天吃什么";
     require((co_await memory.recall(chat, recent)).empty(), "nothing alike, nothing recalled");
 

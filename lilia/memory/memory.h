@@ -68,11 +68,15 @@ std::vector<ExtractedFact> parse_facts(const std::vector<provider::OutputItem> &
 /// "对芒果过敏；住在杭州": facts about TA, newest first, joined.
 std::string render_facts(const std::vector<store::PersonFact> &facts);
 
-// Rolling chat summaries (MaiBot's incremental chat summary and mid-term
-// recall): every `summary_messages` messages of a chat get one summary of
-// what is new, seeing the previous ones, plus recall cues. Summaries are
-// searchable; their cues bring them back when the chat returns to a topic
-// that has scrolled out of view.
+// Chat summaries, two kinds. Rolling summaries (MaiBot's incremental chat
+// summary): every `summary_messages` messages of a chat get one summary of
+// what is new and worth keeping, seeing the previous ones; they are
+// searchable. Window summaries (MaiBot's mid-term memory): what the planner's
+// log window drops is summarised whole, with recall cues; the newest few lead
+// the planner's log, and an older one comes back when its cues match the chat.
+
+/// Window summaries shown ahead of the planner's log (MaiBot keeps 10).
+inline constexpr usize k_earlier_summaries = 10;
 
 struct SummaryResult {
     std::string summary;
@@ -121,8 +125,18 @@ struct Memory {
     /// are waiting (called by index()). Needs `summarizer`.
     lighter::Task<> summarize(store::ChatKey chat);
 
-    /// A summary whose cues match the last few messages of `log` well enough,
-    /// among those that end before `log` begins; empty when none does.
+    /// After the planner's window of `chat` moved past `through_row`: one
+    /// window summary of the lines up to it that no window summary covers
+    /// yet, at most the newest `span`. Skipped while one runs for the chat
+    /// (the next covers its lines). Needs `summarizer`.
+    lighter::Task<> summarize_window(store::ChatKey chat, i64 through_row, usize span);
+
+    /// The newest `k_earlier_summaries` window summaries, oldest first, one
+    /// "[MM-DD HH:MM 至 MM-DD HH:MM] summary" line each; empty when none.
+    std::string earlier(const store::ChatKey &chat);
+
+    /// A window summary whose cues match the last few messages of `log` well
+    /// enough, among the older ones earlier() leaves out; empty when none does.
     lighter::Task<std::string> recall(store::ChatKey chat, std::vector<store::StoredMessage> log);
 
     std::move_only_function<i64()> now;
@@ -134,8 +148,18 @@ struct Memory {
     /// Writes summaries; null leaves summarizing off.
     std::optional<provider::Provider> summarizer;
     std::string summarizer_model;
-    std::vector<store::ChatKey> indexing; ///< chats with an index() running
-    std::vector<store::ChatKey> again;    ///< asked again while running
+    std::vector<store::ChatKey> indexing;  ///< chats with an index() running
+    std::vector<store::ChatKey> again;     ///< asked again while running
+    std::vector<store::ChatKey> windowing; ///< chats with a summarize_window() running
+
+private:
+    /// One summary call over `messages` (oldest first, at least one), stored
+    /// as `kind` and embedded; false when the call failed.
+    lighter::Task<bool> write_summary(store::ChatKey chat, std::string_view kind, std::string_view prompt,
+                                      std::vector<store::ChatSummary> previous, std::vector<store::StoredMessage> messages);
+
+    /// Window summaries of `chat` with something in them, oldest first.
+    std::vector<store::ChatSummary> window_summaries(const store::ChatKey &chat);
 };
 
 } // namespace lilia::memory

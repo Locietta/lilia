@@ -271,8 +271,9 @@ struct MemoryConfig {
     double duplicate_fact_score = 0.82;
     /// Messages per rolling summary (0 turns summaries off).
     usize summary_messages = 36;
-    /// Recall: the last messages compared against summary cues, and the
-    /// similarity that brings a summary back.
+    /// Recall: the last messages compared against window summary cues, and
+    /// the similarity that brings a summary back (measured on rolling
+    /// summaries' cues; window summaries' may want another).
     usize recall_messages = 6;
     /// Measured with Qwen3-Embedding-0.6B (tests/replay/recall.jsonl): unrelated
     /// chatter ~0.45, the topic coming back 0.61-0.69.

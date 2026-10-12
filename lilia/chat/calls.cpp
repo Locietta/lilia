@@ -42,6 +42,15 @@ namespace detail {
 
 std::string describe(const store::ChatKey &chat) { return chat.type + ":" + std::to_string(chat.id); }
 
+std::string situated(std::string_view prompt, const store::ChatKey &chat, std::vector<std::pair<std::string_view, std::string_view>> values,
+                     std::string_view group, std::string_view private_chat) {
+    // The variant may use the same placeholders; fill_template() does one pass.
+    auto situation = fill_template(chat.type == "group" ? group : private_chat, values);
+    while (!situation.empty() && (situation.back() == '\n' || situation.back() == '\r')) situation.pop_back();
+    values.emplace_back("situation", situation);
+    return fill_template(prompt, values);
+}
+
 Task<std::optional<i64>> send_message(Responder *r, const store::ChatKey &chat, onebot::Message message) {
     if (r->outbox) co_return co_await r->outbox(chat, std::move(message));
     auto session = r->session;

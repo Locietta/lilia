@@ -341,6 +341,9 @@ std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &ch
     // turns keep their calls and results but lose their analyses. (The very
     // first anchor has nothing to trim.)
     if (!first) trim_records(state.records, *state.log_anchor, k_kept_analyses);
+    // What it no longer shows is summarised for it (after a restart too: the
+    // lines before the first anchor may never have been).
+    if (memory) spawn(memory->summarize_window(chat, *state.log_anchor, 2 * settings.context_messages));
     return *std::move(recent);
 }
 
@@ -407,6 +410,7 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
     const auto chat = stored.chat;
     note_arrival(state.flow, now());
     state.flow.unseen.push_back(std::move(stored));
+    state.arrival->set();
     // Due now, or once the idle backoff ends (the worker waits for it).
     if (!should_plan(state.flow, flow_settings(), now()) && !next_check(state.flow, flow_settings(), now())) return std::nullopt;
     return chat;
