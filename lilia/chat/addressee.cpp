@@ -1,12 +1,14 @@
 #include "addressee.h"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <map>
 
 #include <glaze/json.hpp>
 
 #include <lilia/chat/context.h>
+#include <lilia/chat/delivery.h>
 #include <lilia/chat/trigger.h>
 #include <lilia/onebot/message.h>
 
@@ -49,9 +51,10 @@ LineEdges line_edges(const store::StoredMessage &line, i64 self_id, std::string_
             edges.quoted_row = quoted->row_id;
             if (line.from_self) edges.quote = quote_prefix(&*quoted, self_name);
             if (quoted->from_self) {
-                if (!line.from_self) edges.to_her = true;
+                if (!line.from_self) edges.to_her = edges.quotes_her = true;
             } else if (quoted->sender_id != line.sender_id || line.from_self) {
                 add(display_name(*quoted));
+                edges.quotes_other = true;
             }
         } else if (segment.type == "at") {
             const auto target = onebot::data_string(segment, "qq").value_or("");
@@ -61,9 +64,10 @@ LineEdges line_edges(const store::StoredMessage &line, i64 self_id, std::string_
             }
             const i64 user = onebot::data_integer(segment, "qq").value_or(0);
             if (user != 0 && user == self_id) {
-                if (!line.from_self) edges.to_her = true;
+                if (!line.from_self) edges.to_her = edges.at_her = true;
                 continue;
             }
+            edges.at_other = true;
             auto name = onebot::data_string(segment, "name").value_or("");
             if (name.starts_with('@')) name.erase(0, 1);
             add(name.empty() ? name_of(user) : name);
@@ -150,4 +154,96 @@ std::string interaction_summary(const std::vector<store::StoredMessage> &rows, c
     if (!dyad.empty()) out += (out.empty() ? "" : "\n") + dyad;
     return out;
 }
+Features line_features(const std::vector<store::StoredMessage> &rows, const std::vector<LineEdges> &edges, usize index) {
+    constexpr i64 k_after_her_seconds = 180;
+    constexpr i64 k_partner_seconds = 600;
+    constexpr i64 k_partner_gap_seconds = 60;
+    constexpr i64 k_recent_seconds = 300;
+    constexpr usize k_dyad_lines = 4;
+    constexpr double k_max_speakers = 6;
+    Features x{};
+    x[0] = 1;
+    if (index >= rows.size()) return x;
+    const auto &line = rows[index];
+    const LineEdges none;
+    const auto edges_of = [&](usize at) -> const LineEdges & { return at < edges.size() ? edges[at] : none; };
+    const auto &own = edges_of(index);
+    const std::string text(without_quote(line.text));
+    const auto has = [&](std::string_view word) { return text.find(word) != std::string::npos; };
+    const auto count = [&](std::string_view word) {
+        usize found = 0;
+        for (auto at = text.find(word); at != std::string::npos; at = text.find(word, at + word.size())) ++found;
+        return found;
+    };
+
+    x[1] = own.at_her;
+    x[2] = own.quotes_her;
+    x[3] = own.names_her;
+    x[4] = own.at_other;
+    x[5] = own.quotes_other;
+    std::vector<std::string> others;
+    for (usize j = 0; j < index; ++j) {
+        const auto &row = rows[j];
+        if (row.from_self || is_notice(row) || row.sender_id == line.sender_id || line.time - row.time > k_partner_seconds) continue;
+        if (auto name = display_name(row); count_code_points(name) >= 2 && !std::ranges::contains(others, name)) others.push_back(name);
+    }
+    x[6] = std::ranges::any_of(others, [&](const std::string &name) { return has(name); });
+    x[7] = count("你") > count("你们") || has("您") || has("妳");
+    x[8] = has("你们") || has("大家") || has("各位") || has("有没有人") || has("有人") || has("谁") || own.to_all;
+    x[9] = has("？") || has("?") || text.ends_with("吗") || text.ends_with("呢") || text.ends_with("么");
+    x[10] = count_code_points(text) <= 4 || text.starts_with("[表情") || text.starts_with("[图片");
+
+    // The line before (not a notice), and her latest line.
+    std::optional<usize> previous;
+    std::optional<usize> hers;
+    for (usize j = index; j-- > 0;) {
+        if (is_notice(rows[j])) continue;
+        if (!previous) previous = j;
+        if (rows[j].from_self) {
+            hers = j;
+            break;
+        }
+    }
+    x[11] = previous && rows[*previous].from_self && line.time - rows[*previous].time <= k_after_her_seconds;
+    if (hers && line.time - rows[*hers].time <= k_partner_seconds) {
+        // She answered this speaker, or quoted or @-ed them.
+        bool partner = std::ranges::contains(edges_of(*hers).to, display_name(line));
+        for (usize j = *hers; !partner && j-- > 0;) {
+            if (is_notice(rows[j])) continue;
+            partner = rows[j].sender_id == line.sender_id && rows[*hers].time - rows[j].time <= k_partner_gap_seconds;
+            break;
+        }
+        x[12] = partner;
+    }
+    usize recent = 0;
+    usize recent_hers = 0;
+    std::vector<i64> speakers;
+    for (usize j = 0; j < index; ++j) {
+        const auto &row = rows[j];
+        if (is_notice(row) || line.time - row.time > k_recent_seconds) continue;
+        ++recent;
+        if (row.from_self) {
+            ++recent_hers;
+        } else if (row.sender_id != line.sender_id && !std::ranges::contains(speakers, row.sender_id)) {
+            speakers.push_back(row.sender_id);
+        }
+    }
+    x[13] = recent > 0 ? static_cast<double>(recent_hers) / static_cast<double>(recent) : 0;
+    x[14] =
+        hers ? std::min(1.0, std::log1p(static_cast<double>(std::max<i64>(0, line.time - rows[*hers].time))) / std::log1p(86'400.0)) : 1;
+    // The last lines (this one included) between this speaker and one other.
+    std::vector<i64> people;
+    usize lines = 0;
+    bool with_her = false;
+    for (usize j = index + 1; j-- > 0 && lines < k_dyad_lines;) {
+        if (is_notice(rows[j])) continue;
+        ++lines;
+        if (rows[j].from_self) with_her = true;
+        if (!std::ranges::contains(people, rows[j].sender_id)) people.push_back(rows[j].sender_id);
+    }
+    x[15] = lines == k_dyad_lines && !with_her && people.size() == 2;
+    x[16] = std::min(k_max_speakers, static_cast<double>(speakers.size())) / k_max_speakers;
+    return x;
+}
+
 } // namespace lilia::chat

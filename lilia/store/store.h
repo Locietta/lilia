@@ -126,6 +126,8 @@ struct Sticker {
     i64 usage_count = 0;
     i64 usage_inferred_count = 0;
     std::string tags_by = "VISION";
+    /// How her sends of it went down (hindsight feedback), summed.
+    double reward = 0;
 };
 
 /// An anonymised snippet of a chat a sticker turned up in; `own` when lilia
@@ -158,6 +160,47 @@ struct PlannerTurn {
     std::string analysis;
     std::string reason;
     std::string hint;
+};
+
+/// Whether a line was said to her, judged in hindsight (or by a person), with
+/// the line's features (chat/addressee.h, `feature_version`) as JSON numbers.
+struct AddresseeLabel {
+    ChatKey chat;
+    i64 message_id = 0;
+    i64 row_id = 0;
+    i64 time = 0;
+    i64 feature_version = 0;
+    std::string features;
+    bool label = false;
+    std::string source; ///< "judge" or "manual"
+    double prior = -1;  ///< what the model said then; -1: nothing
+};
+
+/// How one of her messages went down, judged in hindsight.
+struct ReplyEffect {
+    ChatKey chat;
+    i64 her_message_id = 0;
+    i64 target_message_id = 0;
+    std::string kind; ///< "text" or "sticker"
+    i64 sticker_id = 0;
+    std::string to_her;            ///< the planner's reading
+    std::string for_her;           ///< "yes", "no", "unclear"
+    std::string answered_by_other; ///< "yes", "no", "unclear"
+    std::string stance;
+    std::string contribution;
+    double reward = 0;
+    i64 time = 0;
+};
+
+/// A fitted addressee model: per chat, or global (chat type "", id 0).
+struct AddresseeModel {
+    ChatKey chat;
+    i64 feature_version = 0;
+    std::string weights; ///< JSON numbers
+    i64 rows = 0;
+    i64 positives = 0;
+    double log_loss = 0;
+    i64 fitted_at = 0;
 };
 
 /// A stable fact about a person, quoted from their own message. `fact` is
@@ -280,6 +323,19 @@ struct Store {
     /// Forgets rounds older than `before`; returns how many went.
     Result<i64> prune_planner_turns(i64 before);
 
+    /// Hindsight feedback: how far a chat has been judged, labels (one per
+    /// message, the first kept), effects of her messages, fitted models.
+    Result<i64> feedback_progress(const ChatKey &chat);
+    Result<void> set_feedback_progress(const ChatKey &chat, i64 through_row);
+    Result<void> add_addressee_label(const AddresseeLabel &label);
+    /// Labels with this feature version; `source` empty: all.
+    Result<std::vector<AddresseeLabel>> addressee_labels(i64 feature_version, std::string_view source = {});
+    Result<void> add_reply_effect(const ReplyEffect &effect);
+    Result<std::vector<ReplyEffect>> reply_effects(const ChatKey &chat, i64 since);
+    Result<void> save_addressee_model(const AddresseeModel &model);
+    Result<std::vector<AddresseeModel>> addressee_models();
+    Result<void> add_sticker_reward(i64 id, double reward);
+
     /// Input plus output tokens of the calls at or after `since` (unix
     /// seconds): all of them, those made for chats (group and private), or
     /// the background ones (learning, sticker tagging).
@@ -354,6 +410,9 @@ struct Store {
     /// Messages of `chat` stored after row `after_row`, oldest first (with
     /// row_id set), at most `limit`.
     Result<std::vector<StoredMessage>> messages_after(const ChatKey &chat, i64 after_row, usize limit);
+    /// The newest `limit` messages of `chat` stored before row `before_row`,
+    /// oldest first (with row_id set).
+    Result<std::vector<StoredMessage>> messages_before(const ChatKey &chat, i64 before_row, usize limit);
 
     Result<void> add_chunk(const MemoryChunk &chunk);
 

@@ -19,6 +19,7 @@
 #include <lilia/chat/flow.h>
 #include <lilia/chat/session.h>
 #include <lilia/config.h>
+#include <lilia/feedback/feedback.h>
 #include <lilia/learn/learner.h>
 #include <lilia/memory/memory.h>
 #include <lilia/sticker/sticker.h>
@@ -161,6 +162,8 @@ struct Responder {
     std::string writer_rules;
     /// Replaces prompts/planner.md when set (replays comparing prompts).
     std::string planner_prompt;
+    /// Hindsight judging and the addressee prior; null when off.
+    feedback::Feedback *feedback = nullptr;
     Spawn spawn;
     /// Archives media of allowed chats; null when archiving is disabled.
     archive::Archiver *archiver = nullptr;

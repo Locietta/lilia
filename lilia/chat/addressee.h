@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <functional>
 #include <optional>
 #include <string>
@@ -30,6 +31,11 @@ struct LineEdges {
     std::vector<std::string> to;
     /// @全体成员.
     bool to_all = false;
+    /// How: an @ or a quote, of her or of someone else.
+    bool at_her = false;
+    bool quotes_her = false;
+    bool at_other = false;
+    bool quotes_other = false;
 };
 
 /// The edges of a stored line, from its segments: `lookup` finds a quoted
@@ -50,5 +56,18 @@ std::string text_with_quote(const store::StoredMessage &line, const LineEdges &e
 /// `window_seconds`; empty when nothing explicit is there.
 std::string interaction_summary(const std::vector<store::StoredMessage> &rows, const std::vector<LineEdges> &edges, i64 now,
                                 i64 window_seconds);
+
+/// The features of line `index` for the addressee model (feedback/), from
+/// the log up to it alone, so live hints, backfills and training agree:
+/// bias; @, quote or name of her; @, quote or name of someone else; 你 (not
+/// 你们); 你们/大家/谁 or @all; a question; a reaction only; right after her
+/// (3 min); someone she was just talking with; her share of the last 5
+/// minutes; time since her last line (log-scaled, 1 = never or a day); a
+/// run between this speaker and one other without her; other speakers in
+/// the last 5 minutes (of 6).
+inline constexpr usize k_features = 17;
+inline constexpr i64 k_feature_version = 1;
+using Features = std::array<double, k_features>;
+Features line_features(const std::vector<store::StoredMessage> &rows, const std::vector<LineEdges> &edges, usize index);
 
 } // namespace lilia::chat

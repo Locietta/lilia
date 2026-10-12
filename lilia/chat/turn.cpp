@@ -46,6 +46,9 @@ constexpr usize k_max_look_ups = 3;
 constexpr usize k_max_sticker_finds = 3;
 /// Who-talks-to-whom in the tail covers the last quarter hour.
 constexpr i64 k_interaction_seconds = 900;
+/// What the planner is told about the addressee hint, when hints are on.
+constexpr std::string_view k_hint_rule =
+    "- 「像是在对她说」的估计是根据这个群以往的情况算出来的，只是参考；和聊天内容不一致时，以聊天内容为准。\n";
 /// A round's analysis as logged in planner_turns.
 constexpr usize k_logged_analysis_bytes = 400;
 
@@ -202,6 +205,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     const auto rule = memory_rule(memory != nullptr, knows_people);
     const auto prompt = fill_template(planner_prompt.empty() ? embedded(xmake::planner_md) : std::string_view(planner_prompt),
                                       {{"name", settings.name},
+                                       {"hint_rule", feedback && config.feedback.hint ? std::string_view(k_hint_rule) : std::string_view()},
                                        {"persona", persona},
                                        {"handoff", handoff_rule(settings.handoff == "reference")},
                                        {"memory_rule", rule},
@@ -366,6 +370,10 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         tail.facts = facts(addressed, tail.first_new_row, edges);
         tail.now = now();
         if (chat.type == "group") tail.interactions = interaction_summary(rows, edges, tail.now, k_interaction_seconds);
+        // The addressee prior: shown as a hint when on, always logged.
+        const auto hint =
+            feedback && chat.type == "group" ? feedback->hints(chat, rows, edges, tail.first_new_row) : feedback::Feedback::Hint{};
+        tail.hint = hint.shown;
         const i64 shown = rows.back().row_id;
         const auto planned =
             co_await call_planner(this, "planner", chat, render_session(prompt, info, rows, state.records, tail, edges), tools);
@@ -403,7 +411,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                                                   .target_message_id = early.target,
                                                   .to_her = early.to_her,
                                                   .analysis = first_bytes(analysis, k_logged_analysis_bytes),
-                                                  .reason = early.reason});
+                                                  .reason = early.reason,
+                                                  .hint = hint.logged});
             if (logged.has_value()) turn_id = *logged;
         }
         // The round stays in the history with its result.

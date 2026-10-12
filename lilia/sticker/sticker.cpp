@@ -145,7 +145,8 @@ std::vector<std::string> sticker_urls(const onebot::Message &message) {
 std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng) {
     std::vector<store::Sticker> picked;
     std::vector<double> weights;
-    for (const auto &sticker : pool) weights.push_back(static_cast<double>(sticker.seen + 2 * sticker.used + 1));
+    for (const auto &sticker : pool)
+        weights.push_back(static_cast<double>(sticker.seen + 2 * sticker.used + 1) + std::max(0.0, sticker.reward));
     while (picked.size() < count && picked.size() < pool.size()) {
         std::discrete_distribution<usize> pick(weights.begin(), weights.end());
         const auto index = pick(rng);

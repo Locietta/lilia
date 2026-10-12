@@ -58,6 +58,7 @@ std::string render_tail(const PlannerTail &tail, const ChatInfo &info) {
     if (tail.first_new_row > 0) text += std::format("#{} 起是新消息。\n", tail.first_new_row);
     for (const auto &fact : tail.facts) text += fact + "\n";
     if (!tail.interactions.empty()) text += tail.interactions + "\n";
+    if (!tail.hint.empty()) text += tail.hint + "\n";
     if (!tail.presence.empty()) text += tail.presence + "\n";
     if (!tail.self_notes.empty()) {
         text +=

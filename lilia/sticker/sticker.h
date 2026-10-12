@@ -49,7 +49,7 @@ std::optional<Tagged> parse_tagging(std::string_view answer);
 std::vector<std::string> sticker_urls(const onebot::Message &message);
 
 /// Up to `count` stickers sampled without replacement, weighted by
-/// seen + 2 * used + 1 so popular ones come up more.
+/// seen + 2 * used + 1 (+ a positive reward) so popular ones come up more.
 std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng);
 
 /// What a sticker is embedded as: its tags and description.

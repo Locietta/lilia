@@ -31,6 +31,7 @@ struct Statement {
     /// Bind indexes are 1-based, as in SQLite.
     void bind(int index, i64 value);
     void bind(int index, std::string_view value);
+    void bind_double(int index, double value);
     void bind_optional(int index, const std::optional<std::string> &value);
     void bind_blob(int index, std::string_view bytes);
 

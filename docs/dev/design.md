@@ -68,6 +68,21 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       likely, unsure, no); for `no` the writer is told it is chipping in.
       Every round is logged in `planner_turns` (tool, argument, target,
       to_her, her messages, a short analysis), kept 180 days.
+    - Hindsight feedback (`feedback/`, 2026-10-12, after MaiBot's
+      reply_effect; off by default): ten minutes after she speaks (or once 40
+      lines wait) the helper model reads the window with what came after and
+      says whom each line was said to (her, other, group, self, unclear) and
+      how her messages went down (stance, contribution). Labels keep 17
+      features of the line (`chat::line_features`: explicit @/quote/name,
+      你/你们, right after her, her share of the last 5 minutes, a run between
+      two people…), not its text. A logistic prior is fitted on them
+      (Newton/IRLS, pulled toward hand-set weights, per group toward the pooled
+      model) and shown to the planner for lines that name no one
+      ("#n 像是在对她说的可能：低/中/高") when `feedback.hint` is on; it is
+      always logged in `planner_turns.hint`. Never a gate. Reward is the
+      reaction (Pang et al. 2023), not how long the chat ran; her stickers'
+      rewards boost them in search. `lilia feedback --backfill/--eval/--report/
+--import-manual`; `scripts/addressee_label_page.py` for hand labels.
     - `lilia replay <probes.jsonl> --probe` runs one turn per expected line
       of a synthetic set (`tests/replay/addressee.jsonl`: quotes, @s, her
       earlier lines) and counts intrusions, misses and to_her agreement.

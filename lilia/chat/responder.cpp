@@ -376,6 +376,8 @@ std::optional<store::ChatKey> Responder::ingest(const onebot::MessageEvent &mess
 
     bool replies_to_self = false;
     auto stored = record_event(this, message, replies_to_self);
+    // Earlier windows may be due for judging now that the chat moved on.
+    if (feedback) feedback->observe(stored.chat, self.user_id);
     auto &state = chats[stored.chat];
     if (message.is_group()) {
         if (message.group_name && !message.group_name->empty()) state.name = *message.group_name;

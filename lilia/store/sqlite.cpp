@@ -22,8 +22,11 @@ Statement::~Statement() {
 
 void Statement::bind(int index, i64 integer) { sqlite3_bind_int64(value, index, integer); }
 
+void Statement::bind_double(int index, double number) { sqlite3_bind_double(value, index, number); }
+
 void Statement::bind(int index, std::string_view text) {
-    sqlite3_bind_text(value, index, text.data(), static_cast<int>(text.size()), SQLITE_TRANSIENT);
+    // A null data pointer would bind NULL, not an empty string.
+    sqlite3_bind_text(value, index, text.data() ? text.data() : "", static_cast<int>(text.size()), SQLITE_TRANSIENT);
 }
 
 void Statement::bind_blob(int index, std::string_view bytes) {

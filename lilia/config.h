@@ -305,6 +305,29 @@ struct StickerConfig {
     bool usage_in_search = true;
 };
 
+struct FeedbackConfig {
+    /// Judge her chats in hindsight (helper model): whom each line was said
+    /// to, how her messages went down; learn an addressee prior from it.
+    bool enabled = false;
+    /// Show the prior to the planner; off, it is only logged (planner_turns).
+    bool hint = false;
+    /// Show it before any model is fitted (hand-set weights).
+    bool hint_bootstrap = false;
+    /// A window is judged this long after her last message in it, or once
+    /// this many lines wait; at most this many judge calls an hour.
+    i64 judge_after_seconds = 600;
+    usize judge_window_lines = 40;
+    usize judges_per_hour = 6;
+    /// Labels before a model is fitted: pooled, and per group (with this many
+    /// lines that were to her); refits after every refit_every new labels.
+    usize min_rows_global = 60;
+    usize min_rows_group = 80;
+    usize min_positives = 10;
+    usize refit_every = 20;
+    /// Sticker search boost per point of reward (clamped to 3 points).
+    double reward_weight = 0.02;
+};
+
 struct Config {
     OneBotConfig onebot;
     ModelConfig model;
@@ -313,6 +336,7 @@ struct Config {
     LearningConfig learning;
     MemoryConfig memory;
     StickerConfig stickers;
+    FeedbackConfig feedback;
     /// Database and persona location; empty means the platform default.
     std::string data_dir;
     std::string log_level = "info";

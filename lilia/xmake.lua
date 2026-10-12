@@ -14,7 +14,7 @@ target("lilia-core")
     add_files("data/jieba/*.txt")
     -- pypinyin readings, for chat/typos.cpp
     add_files("data/pinyin/*.txt")
-    add_files("config.cpp", "replay.cpp", "archive/*.cpp", "chat/*.cpp", "image/*.cpp", "learn/*.cpp", "memory/*.cpp", "net/*.cpp", "onebot/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "retrieval/*.cpp", "sticker/*.cpp", "store/*.cpp", "tools/*.cpp")
+    add_files("config.cpp", "replay.cpp", "archive/*.cpp", "chat/*.cpp", "feedback/*.cpp", "image/*.cpp", "learn/*.cpp", "memory/*.cpp", "net/*.cpp", "onebot/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "retrieval/*.cpp", "sticker/*.cpp", "store/*.cpp", "tools/*.cpp")
     add_packages("lighter", {public = true})
     add_packages("sqlite3", "stb")
     add_packages("ngcpp-proxy", {public = true})

@@ -16,8 +16,9 @@ namespace {
 // (rebuilt), expression_reviews, jargon. 12: embeddings in their own table
 // (keyed by profile and text hash), memory_chunks.search_text. 13:
 // stickers.modified_by. 14: sticker usage (stickers.usage and its counts,
-// sticker_evidence). 15: planner_turns.
-constexpr int k_schema_version = 15;
+// sticker_evidence). 15: planner_turns. 16: hindsight feedback (stickers.reward,
+// addressee_labels, reply_effects, addressee_models, feedback_progress).
+constexpr int k_schema_version = 16;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -207,7 +208,8 @@ CREATE TABLE IF NOT EXISTS stickers (
     usage TEXT NOT NULL DEFAULT '',
     usage_count INTEGER NOT NULL DEFAULT 0,
     usage_inferred_count INTEGER NOT NULL DEFAULT 0,
-    tags_by TEXT NOT NULL DEFAULT 'VISION'
+    tags_by TEXT NOT NULL DEFAULT 'VISION',
+    reward REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS stickers_by_status ON stickers (status, seen);
 
@@ -241,6 +243,58 @@ CREATE TABLE IF NOT EXISTS planner_turns (
     hint TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS planner_turns_by_chat ON planner_turns (chat_type, chat_id, time);
+
+CREATE TABLE IF NOT EXISTS addressee_labels (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    row_id INTEGER NOT NULL,
+    time INTEGER NOT NULL,
+    feature_version INTEGER NOT NULL,
+    features TEXT NOT NULL,
+    label INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    prior REAL NOT NULL DEFAULT -1,
+    UNIQUE (chat_type, chat_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS reply_effects (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    her_message_id INTEGER NOT NULL,
+    target_message_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    sticker_id INTEGER NOT NULL DEFAULT 0,
+    to_her TEXT NOT NULL DEFAULT '',
+    for_her TEXT NOT NULL,
+    answered_by_other TEXT NOT NULL,
+    stance TEXT NOT NULL,
+    contribution TEXT NOT NULL,
+    reward REAL NOT NULL,
+    time INTEGER NOT NULL,
+    UNIQUE (chat_type, chat_id, her_message_id)
+);
+
+CREATE TABLE IF NOT EXISTS addressee_models (
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    feature_version INTEGER NOT NULL,
+    weights TEXT NOT NULL,
+    rows INTEGER NOT NULL,
+    positives INTEGER NOT NULL,
+    log_loss REAL NOT NULL,
+    fitted_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_type, chat_id)
+);
+
+CREATE TABLE IF NOT EXISTS feedback_progress (
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    through_row INTEGER NOT NULL,
+    PRIMARY KEY (chat_type, chat_id)
+);
 
 CREATE TABLE IF NOT EXISTS embeddings (
     profile TEXT NOT NULL,
@@ -348,12 +402,13 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
         if (*present > 0) return {};
         return store.database.execute(std::format("ALTER TABLE {} ADD COLUMN {} {}", table_name, column, declaration));
     };
-    for (const auto &[column, declaration] : std::array<std::pair<std::string_view, std::string_view>, 5>{{
+    for (const auto &[column, declaration] : std::array<std::pair<std::string_view, std::string_view>, 6>{{
              {"modified_by", "TEXT NOT NULL DEFAULT 'AI'"},
              {"usage", "TEXT NOT NULL DEFAULT ''"},
              {"usage_count", "INTEGER NOT NULL DEFAULT 0"},
              {"usage_inferred_count", "INTEGER NOT NULL DEFAULT 0"},
              {"tags_by", "TEXT NOT NULL DEFAULT 'VISION'"},
+             {"reward", "REAL NOT NULL DEFAULT 0"},
          }}) {
         if (auto added = ensure_column("stickers", column, declaration); added.has_error()) {
             return lighter::outcome_error(std::move(added).error());
@@ -560,7 +615,7 @@ namespace {
 
 constexpr std::string_view k_sticker_columns = "id, sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, "
                                                "last_seen, last_used, modified_by, usage, usage_count, "
-                                               "usage_inferred_count, tags_by";
+                                               "usage_inferred_count, tags_by, reward";
 
 Sticker read_sticker(const Statement &statement) {
     return {
@@ -582,6 +637,7 @@ Sticker read_sticker(const Statement &statement) {
         .usage_count = statement.column_int(15),
         .usage_inferred_count = statement.column_int(16),
         .tags_by = statement.column_text(17),
+        .reward = statement.column_double(18),
     };
 }
 
@@ -1029,6 +1085,193 @@ Result<i64> Store::prune_planner_turns(i64 before) {
     statement->bind(1, before);
     if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
     return static_cast<i64>(sqlite3_changes(database.value));
+}
+
+Result<std::vector<StoredMessage>> Store::messages_before(const ChatKey &chat, i64 before_row, usize limit) {
+    auto statement = database.prepare("SELECT message_id, sender_id, sender_name, time, segments, text, from_self, id FROM (SELECT * FROM "
+                                      "messages WHERE chat_type = ?1 AND chat_id = ?2 AND id < ?3 ORDER BY id DESC LIMIT ?4) ORDER BY id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, before_row);
+    statement->bind(4, static_cast<i64>(limit));
+    std::vector<StoredMessage> messages;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        messages.push_back({
+            .chat = chat,
+            .message_id = statement->column_int(0),
+            .sender_id = statement->column_int(1),
+            .sender_name = statement->column_text(2),
+            .time = statement->column_int(3),
+            .segments_json = statement->column_text(4),
+            .text = statement->column_text(5),
+            .from_self = statement->column_int(6) != 0,
+            .row_id = statement->column_int(7),
+        });
+    }
+    return messages;
+}
+
+Result<i64> Store::feedback_progress(const ChatKey &chat) {
+    auto statement = database.prepare("SELECT through_row FROM feedback_progress WHERE chat_type = ?1 AND chat_id = ?2");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    return *row ? statement->column_int(0) : i64{0};
+}
+
+Result<void> Store::set_feedback_progress(const ChatKey &chat, i64 through_row) {
+    auto statement = database.prepare("INSERT INTO feedback_progress (chat_type, chat_id, through_row) VALUES (?1, ?2, ?3) "
+                                      "ON CONFLICT (chat_type, chat_id) DO UPDATE SET through_row = excluded.through_row");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, through_row);
+    return statement->run();
+}
+
+Result<void> Store::add_addressee_label(const AddresseeLabel &label) {
+    // A person's label replaces the judge's; the judge never replaces anything.
+    auto statement = database.prepare(
+        "INSERT INTO addressee_labels (chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source, prior) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT (chat_type, chat_id, message_id) DO UPDATE SET "
+        "label = excluded.label, source = excluded.source WHERE excluded.source = 'manual'");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, label.chat.type);
+    statement->bind(2, label.chat.id);
+    statement->bind(3, label.message_id);
+    statement->bind(4, label.row_id);
+    statement->bind(5, label.time);
+    statement->bind(6, label.feature_version);
+    statement->bind(7, label.features);
+    statement->bind(8, i64{label.label ? 1 : 0});
+    statement->bind(9, label.source);
+    statement->bind_double(10, label.prior);
+    return statement->run();
+}
+
+Result<std::vector<AddresseeLabel>> Store::addressee_labels(i64 feature_version, std::string_view source) {
+    auto statement =
+        database.prepare("SELECT chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source, prior "
+                         "FROM addressee_labels WHERE feature_version = ?1 AND (?2 = '' OR source = ?2) ORDER BY time, id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, feature_version);
+    statement->bind(2, source);
+    std::vector<AddresseeLabel> out;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        out.push_back({.chat = {.type = statement->column_text(0), .id = statement->column_int(1)},
+                       .message_id = statement->column_int(2),
+                       .row_id = statement->column_int(3),
+                       .time = statement->column_int(4),
+                       .feature_version = statement->column_int(5),
+                       .features = statement->column_text(6),
+                       .label = statement->column_int(7) != 0,
+                       .source = statement->column_text(8),
+                       .prior = statement->column_double(9)});
+    }
+    return out;
+}
+
+Result<void> Store::add_reply_effect(const ReplyEffect &effect) {
+    auto statement = database.prepare(
+        "INSERT OR REPLACE INTO reply_effects (chat_type, chat_id, her_message_id, target_message_id, kind, sticker_id, to_her, for_her, "
+        "answered_by_other, stance, contribution, reward, time) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, effect.chat.type);
+    statement->bind(2, effect.chat.id);
+    statement->bind(3, effect.her_message_id);
+    statement->bind(4, effect.target_message_id);
+    statement->bind(5, effect.kind);
+    statement->bind(6, effect.sticker_id);
+    statement->bind(7, effect.to_her);
+    statement->bind(8, effect.for_her);
+    statement->bind(9, effect.answered_by_other);
+    statement->bind(10, effect.stance);
+    statement->bind(11, effect.contribution);
+    statement->bind_double(12, effect.reward);
+    statement->bind(13, effect.time);
+    return statement->run();
+}
+
+Result<std::vector<ReplyEffect>> Store::reply_effects(const ChatKey &chat, i64 since) {
+    auto statement = database.prepare("SELECT her_message_id, target_message_id, kind, sticker_id, to_her, for_her, answered_by_other, "
+                                      "stance, contribution, reward, time FROM reply_effects WHERE chat_type = ?1 AND chat_id = ?2 AND "
+                                      "time >= ?3 ORDER BY time, id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, since);
+    std::vector<ReplyEffect> out;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        out.push_back({.chat = chat,
+                       .her_message_id = statement->column_int(0),
+                       .target_message_id = statement->column_int(1),
+                       .kind = statement->column_text(2),
+                       .sticker_id = statement->column_int(3),
+                       .to_her = statement->column_text(4),
+                       .for_her = statement->column_text(5),
+                       .answered_by_other = statement->column_text(6),
+                       .stance = statement->column_text(7),
+                       .contribution = statement->column_text(8),
+                       .reward = statement->column_double(9),
+                       .time = statement->column_int(10)});
+    }
+    return out;
+}
+
+Result<void> Store::save_addressee_model(const AddresseeModel &model) {
+    auto statement = database.prepare(
+        "INSERT OR REPLACE INTO addressee_models (chat_type, chat_id, feature_version, weights, rows, positives, log_loss, fitted_at) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, model.chat.type);
+    statement->bind(2, model.chat.id);
+    statement->bind(3, model.feature_version);
+    statement->bind(4, model.weights);
+    statement->bind(5, model.rows);
+    statement->bind(6, model.positives);
+    statement->bind_double(7, model.log_loss);
+    statement->bind(8, model.fitted_at);
+    return statement->run();
+}
+
+Result<std::vector<AddresseeModel>> Store::addressee_models() {
+    auto statement =
+        database.prepare("SELECT chat_type, chat_id, feature_version, weights, rows, positives, log_loss, fitted_at FROM addressee_models");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    std::vector<AddresseeModel> out;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        out.push_back({.chat = {.type = statement->column_text(0), .id = statement->column_int(1)},
+                       .feature_version = statement->column_int(2),
+                       .weights = statement->column_text(3),
+                       .rows = statement->column_int(4),
+                       .positives = statement->column_int(5),
+                       .log_loss = statement->column_double(6),
+                       .fitted_at = statement->column_int(7)});
+    }
+    return out;
+}
+
+Result<void> Store::add_sticker_reward(i64 id, double reward) {
+    auto statement = database.prepare("UPDATE stickers SET reward = reward + ?2 WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind_double(2, reward);
+    return statement->run();
 }
 
 Result<void> Store::add_llm_call(const LlmCall &call) {

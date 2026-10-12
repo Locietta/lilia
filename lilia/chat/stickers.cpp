@@ -32,7 +32,9 @@ Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feelin
         documents.push_back({.id = sticker.id,
                              .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images,
                                                                 r->config.stickers.usage_in_search),
-                             .lexical = sticker::lexical_text(sticker, r->config.stickers.usage_in_search)});
+                             .lexical = sticker::lexical_text(sticker, r->config.stickers.usage_in_search),
+                             // How her sends of it went down (hindsight feedback).
+                             .boost = r->config.feedback.reward_weight * std::clamp(sticker.reward, -3.0, 3.0)});
     }
     const auto matches = co_await r->memory->retriever.search(
         retrieval::k_sticker_task, std::move(feeling), documents,

@@ -58,6 +58,8 @@ void print_usage(FILE *output) {
                "       lilia retrieval [--query <text>]... [--labels <labels.json>] [--db <lilia.db>] [--config <path>]\n"
                "       lilia stickers --db <copy.db> [--retag [--gifs] [--[no-]frames] [--prompt <sticker.md>] [--limit <n>]]\n"
                "                      [--apply-from <retagged.db>] [--learn-usage] [--forget-group <id>] [--config <path>]\n"
+               "       lilia feedback [--backfill [--days <n>]] [--eval] [--report [--days <n>]] [--import-manual <labels.json>]\n"
+               "                      [--db <lilia.db>] [--config <path>]\n"
                "       lilia segment [--terms | --count <n> | --bench | --pieces | --homophones] < lines.txt\n"
                "       lilia --version | --help\n",
                output);
@@ -411,6 +413,231 @@ Task<int> run_stickers(const Config &config, std::optional<std::filesystem::path
     co_return failed == todo.size() && !todo.empty() ? 1 : 0;
 }
 
+/// `lilia feedback`: hindsight judging of stored history, the addressee
+/// models' evaluation, a report of how her replies went down, and hand
+/// labels. Works on the given database.
+struct FeedbackTool {
+    bool backfill = false;
+    i64 days = 14;
+    bool eval = false;
+    bool report = false;
+    std::optional<std::filesystem::path> import_manual;
+};
+
+/// Her QQ id, from her stored messages; 0 when she never spoke.
+i64 self_id_of(store::Store &store, const std::vector<i64> &groups) {
+    for (const auto group : groups) {
+        auto recent = store.recent_messages({.type = "group", .id = group}, 500);
+        if (!recent.has_value()) continue;
+        for (const auto &message : *recent) {
+            if (message.from_self) return message.sender_id;
+        }
+    }
+    return 0;
+}
+
+double auc(const std::vector<std::pair<double, double>> &scored) {
+    // Probability that a random positive outranks a random negative.
+    double positives = 0;
+    double negatives = 0;
+    double wins = 0;
+    for (const auto &[p, label] : scored) (label > 0.5 ? positives : negatives) += 1;
+    for (const auto &[p, label] : scored) {
+        if (label < 0.5) continue;
+        for (const auto &[q, other] : scored) {
+            if (other > 0.5) continue;
+            wins += p > q ? 1 : p == q ? 0.5 : 0;
+        }
+    }
+    return positives > 0 && negatives > 0 ? wins / (positives * negatives) : 0;
+}
+
+Task<int> run_feedback(const Config &config, std::filesystem::path database, FeedbackTool tool) {
+    auto store = store::Store::open(database);
+    if (store.has_error()) {
+        log::error("{}", store.error().message());
+        co_return 1;
+    }
+    const i64 now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    lighter::TaskGroup tasks(lighter::EventLoop::current());
+    feedback::Feedback feedback(config.feedback, config.chat, *store, make_learner(config.model),
+                                [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    feedback.judge_model_name = config.model.helper();
+    feedback.load();
+    const i64 self_id = self_id_of(*store, config.chat.groups);
+
+    if (tool.import_manual) {
+        std::ifstream file(*tool.import_manual, std::ios::binary);
+        std::stringstream text;
+        text << file.rdbuf();
+        struct ManualLabel {
+            i64 chat_id = 0;
+            i64 message_id = 0;
+            bool to_her = false;
+        };
+        struct ManualLabels {
+            std::vector<ManualLabel> labels;
+        } manual;
+        if (!file || glz::read<glz::opts{.null_terminated = false, .error_on_unknown_keys = false}>(manual, text.str())) {
+            log::error("cannot read labels from {}", tool.import_manual->string());
+            co_return 1;
+        }
+        // The judge's labels first: hand labels replace them.
+        std::map<std::pair<i64, i64>, bool> judged;
+        if (auto existing = store->addressee_labels(chat::k_feature_version, "judge"); existing.has_value()) {
+            for (const auto &label : *existing) judged[{label.chat.id, label.message_id}] = label.label;
+        }
+        usize stored = 0;
+        usize compared = 0;
+        usize agreed = 0;
+        for (const auto &label : manual.labels) {
+            const store::ChatKey chat{.type = "group", .id = label.chat_id};
+            if (const auto it = judged.find({label.chat_id, label.message_id}); it != judged.end()) {
+                ++compared;
+                agreed += it->second == label.to_her;
+            }
+            auto message = store->message(chat, label.message_id);
+            if (!message.has_value() || !*message) continue;
+            auto rows = store->messages_before(chat, (*message)->row_id, 40);
+            if (!rows.has_value()) continue;
+            rows->push_back(**message);
+            const auto lookup = [&](i64 id) -> std::optional<store::StoredMessage> {
+                auto found = store->message(chat, id);
+                return found.has_value() && *found ? std::optional<store::StoredMessage>(**found) : std::nullopt;
+            };
+            const auto name_of = [&](i64 user) {
+                auto name = store->sender_name(chat, user);
+                return name.has_value() ? *name : std::string();
+            };
+            std::vector<chat::LineEdges> edges;
+            for (const auto &row : *rows)
+                edges.push_back(chat::line_edges(row, self_id, config.chat.name, config.chat.aliases, lookup, name_of));
+            const auto x = chat::line_features(*rows, edges, rows->size() - 1);
+            const std::vector<double> values(x.begin(), x.end());
+            std::ignore = store->add_addressee_label({.chat = chat,
+                                                      .message_id = label.message_id,
+                                                      .row_id = (*message)->row_id,
+                                                      .time = (*message)->time,
+                                                      .feature_version = chat::k_feature_version,
+                                                      .features = glz::write_json(values).value_or("[]"),
+                                                      .label = label.to_her,
+                                                      .source = "manual",
+                                                      .prior = feedback::predict(feedback.model_for(chat), x)});
+            ++stored;
+        }
+        std::printf("stored %zu hand labels; the judge had labelled %zu of them and agreed on %zu\n", stored, compared, agreed);
+        co_return 0;
+    }
+
+    if (tool.backfill) {
+        if (self_id == 0) log::warn("her QQ id is unknown (she never spoke): lines that @ her are not recognised");
+        for (const auto group : config.chat.groups) {
+            const store::ChatKey chat{.type = "group", .id = group};
+            // Start where the period begins, unless judging already got further.
+            auto through = store->feedback_progress(chat);
+            i64 start = through.has_value() ? *through : 0;
+            i64 cursor = 0;
+            for (;;) {
+                auto page = store->messages_after(chat, cursor, 500);
+                if (!page.has_value() || page->empty()) break;
+                const auto first_recent =
+                    std::ranges::find_if(*page, [&](const auto &row) { return row.time >= now - tool.days * 86'400; });
+                if (first_recent != page->end()) {
+                    start = std::max(start, first_recent == page->begin() ? cursor : (first_recent - 1)->row_id);
+                    break;
+                }
+                cursor = page->back().row_id;
+            }
+            std::ignore = store->set_feedback_progress(chat, start);
+            usize windows = 0;
+            while (co_await feedback.judge(chat, self_id, std::max<usize>(config.feedback.judge_window_lines, 1))) ++windows;
+            std::printf("group %lld: %zu windows judged\n", static_cast<long long>(group), windows);
+        }
+        feedback.refit();
+    }
+
+    if (tool.eval) {
+        auto labels = store->addressee_labels(chat::k_feature_version);
+        if (!labels.has_value() || labels->size() < 10) {
+            std::printf("too few labels (%zu)\n", labels.has_value() ? labels->size() : 0);
+            co_return 0;
+        }
+        std::vector<std::pair<store::ChatKey, feedback::Sample>> samples;
+        for (const auto &label : *labels) {
+            std::vector<double> values;
+            if (glz::read_json(values, label.features) || values.size() != chat::k_features) continue;
+            feedback::Sample sample{.label = label.label ? 1.0 : 0.0};
+            std::ranges::copy(values, sample.x.begin());
+            samples.emplace_back(label.chat, sample);
+        }
+        // Earlier labels train, later ones test.
+        const usize cut = samples.size() * 7 / 10;
+        std::vector<feedback::Sample> train;
+        std::map<store::ChatKey, std::vector<feedback::Sample>> train_by_chat;
+        for (usize i = 0; i < cut; ++i) {
+            train.push_back(samples[i].second);
+            train_by_chat[samples[i].first].push_back(samples[i].second);
+        }
+        const auto bootstrap = feedback::bootstrap_weights();
+        const auto global = feedback::fit_logistic(train, bootstrap, 1.0);
+        std::map<store::ChatKey, feedback::Weights> groups;
+        for (const auto &[chat, chat_samples] : train_by_chat) groups[chat] = feedback::fit_logistic(chat_samples, global, 3.0);
+        const auto score = [&](std::string_view name, const auto &weights_for) {
+            std::vector<feedback::Sample> test;
+            std::vector<std::pair<double, double>> scored;
+            double brier = 0;
+            for (usize i = cut; i < samples.size(); ++i) {
+                const auto &weights = weights_for(samples[i].first);
+                const double p = feedback::predict(weights, samples[i].second.x);
+                scored.emplace_back(p, samples[i].second.label);
+                brier += (p - samples[i].second.label) * (p - samples[i].second.label);
+                test.push_back(samples[i].second);
+            }
+            double loss = 0;
+            for (usize i = 0; i < test.size(); ++i) {
+                const double p = std::clamp(scored[i].first, 1e-9, 1 - 1e-9);
+                loss -= test[i].label * std::log(p) + (1 - test[i].label) * std::log(1 - p);
+            }
+            std::printf("%-10s log loss %.3f  Brier %.3f  AUC %.3f\n", std::string(name).c_str(), loss / static_cast<double>(test.size()),
+                        brier / static_cast<double>(test.size()), auc(scored));
+        };
+        usize positives = 0;
+        for (const auto &[chat, sample] : samples) positives += sample.label > 0.5;
+        std::printf("%zu labels (%zu to her); train %zu, test %zu\n", samples.size(), positives, cut, samples.size() - cut);
+        score("bootstrap", [&](const store::ChatKey &) -> const feedback::Weights & { return bootstrap; });
+        score("global", [&](const store::ChatKey &) -> const feedback::Weights & { return global; });
+        score("per group", [&](const store::ChatKey &chat) -> const feedback::Weights & {
+            const auto it = groups.find(chat);
+            return it == groups.end() ? global : it->second;
+        });
+    }
+
+    if (tool.report) {
+        for (const auto group : config.chat.groups) {
+            const store::ChatKey chat{.type = "group", .id = group};
+            auto effects = store->reply_effects(chat, now - tool.days * 86'400);
+            if (!effects.has_value() || effects->empty()) continue;
+            usize misreads = 0;
+            usize intrusions = 0;
+            double reward = 0;
+            std::map<std::string, usize> stances;
+            for (const auto &effect : *effects) {
+                misreads += effect.for_her == "no" && (effect.to_her == "called" || effect.to_her == "likely");
+                intrusions += effect.contribution == "intrusion" || effect.contribution == "wrong_push";
+                reward += effect.reward;
+                ++stances[effect.stance];
+            }
+            std::string mix;
+            for (const auto &[stance, count] : stances) mix += std::format(" {} {}", stance, count);
+            std::printf("group %lld: %zu messages judged; misread %zu, intrusion or wrong push %zu, mean reward %.2f;%s\n",
+                        static_cast<long long>(group), effects->size(), misreads, intrusions, reward / static_cast<double>(effects->size()),
+                        mix.c_str());
+        }
+    }
+    co_await tasks.join();
+    co_return 0;
+}
+
 Task<int> run_retrieval(const Config &config, std::filesystem::path database, std::vector<std::string> queries,
                         std::optional<std::filesystem::path> labels) {
     auto store = store::Store::open(database);
@@ -516,6 +743,14 @@ Task<int> run_app(const Config &config) {
         collector.background_budget = config.learning.daily_token_budget;
         responder.stickers = &collector;
     }
+    feedback::Feedback feedback(config.feedback, config.chat, *store, make_learner(config.model),
+                                [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    if (config.feedback.enabled) {
+        feedback.judge_model_name = config.model.helper();
+        feedback.background_budget = config.learning.daily_token_budget;
+        feedback.load();
+        responder.feedback = &feedback;
+    }
     retrieval::Retriever retriever(config.memory, *store);
     memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store, retriever);
     if (config.memory.enabled) {
@@ -572,6 +807,8 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> labels_path;
     bool sticker_tool = false;
     StickerTool stickers;
+    bool feedback_tool = false;
+    FeedbackTool feedback_options;
     if (argc >= 2 && std::string_view(argv[1]) == "segment") {
         // Debugging aids, one stdin line per message: jieba words of each
         // line joined by "/"; --terms: its meaningful terms; --count <n>: the
@@ -671,6 +908,9 @@ int main(int argc, char **argv) {
     } else if (argc > 1 && std::string_view(argv[1]) == "retrieval") {
         retrieval_check = true;
         first = 2;
+    } else if (argc > 1 && std::string_view(argv[1]) == "feedback") {
+        feedback_tool = true;
+        first = 2;
     } else if (argc > 1 && std::string_view(argv[1]) == "stickers") {
         sticker_tool = true;
         first = 2;
@@ -711,10 +951,20 @@ int main(int argc, char **argv) {
             continue_at = static_cast<usize>(std::max(0, std::atoi(argv[++i])));
         } else if (arg == "--query" && retrieval_check && i + 1 < argc) {
             queries.emplace_back(argv[++i]);
-        } else if (arg == "--db" && (retrieval_check || sticker_tool) && i + 1 < argc) {
+        } else if (arg == "--db" && (retrieval_check || sticker_tool || feedback_tool) && i + 1 < argc) {
             database_path = argv[++i];
         } else if (arg == "--labels" && retrieval_check && i + 1 < argc) {
             labels_path = argv[++i];
+        } else if (arg == "--backfill" && feedback_tool) {
+            feedback_options.backfill = true;
+        } else if (arg == "--days" && feedback_tool && i + 1 < argc) {
+            feedback_options.days = std::max(1, std::atoi(argv[++i]));
+        } else if (arg == "--eval" && feedback_tool) {
+            feedback_options.eval = true;
+        } else if (arg == "--report" && feedback_tool) {
+            feedback_options.report = true;
+        } else if (arg == "--import-manual" && feedback_tool && i + 1 < argc) {
+            feedback_options.import_manual = argv[++i];
         } else if (arg == "--retag" && sticker_tool) {
             stickers.retag = true;
         } else if (arg == "--gifs" && sticker_tool) {
@@ -764,7 +1014,9 @@ int main(int argc, char **argv) {
 
     const auto path = config_path.value_or(default_config_path());
     // Listing learned expressions reads the database only; no keys needed.
-    auto config = load_config(path, !(list_expressions || jargon || (sticker_tool && !stickers.retag && !stickers.learn_usage)) || review);
+    auto config = load_config(path, !(list_expressions || jargon || (sticker_tool && !stickers.retag && !stickers.learn_usage) ||
+                                      (feedback_tool && !feedback_options.backfill)) ||
+                                        review);
     if (config.has_error()) {
         log::error("{}: {}", path.string(), config.error().message());
         return 1;
