@@ -159,6 +159,11 @@ provider::Provider make_learner(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.helper(), 1'000, true);
 }
 
+provider::Provider make_judge(const ModelConfig &model) {
+    // A verdict for each of up to 60 lines does not fit the learner's 1000 tokens.
+    return make_client(model, model.base_url, model.api_key, model.helper(), 6'000, true);
+}
+
 provider::Provider make_searcher(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.helper(), 1'200);
 }

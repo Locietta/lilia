@@ -465,7 +465,7 @@ Task<int> run_feedback(const Config &config, std::optional<std::filesystem::path
     }
     const i64 now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     lighter::TaskGroup tasks(lighter::EventLoop::current());
-    feedback::Feedback feedback(config.feedback, config.chat, *store, make_learner(config.model),
+    feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
                                 [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     feedback.judge_model_name = config.model.helper();
     feedback.load();
@@ -748,7 +748,7 @@ Task<int> run_app(const Config &config) {
         collector.background_budget = config.learning.daily_token_budget;
         responder.stickers = &collector;
     }
-    feedback::Feedback feedback(config.feedback, config.chat, *store, make_learner(config.model),
+    feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
                                 [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (config.feedback.enabled) {
         feedback.judge_model_name = config.model.helper();

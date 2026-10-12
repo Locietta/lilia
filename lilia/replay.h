@@ -25,6 +25,8 @@ std::vector<chat::Responder::NamedProvider> make_planner_fallbacks(const ModelCo
 provider::Provider make_vision(const ModelConfig &model);
 /// Expression learner: the planner's model, must call record_expressions.
 provider::Provider make_learner(const ModelConfig &model);
+/// The hindsight judge: the helper model, tool forced, room for a verdict per line.
+provider::Provider make_judge(const ModelConfig &model);
 
 /// Feeds a JSONL chat log through the real gate, planner and writer (no
 /// NapCat, in-memory store, no delays) and prints every decision. Each line:
