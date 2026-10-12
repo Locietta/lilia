@@ -533,7 +533,9 @@ void Collector::file_into_pool(const store::Sticker &sticker) {
         std::ignore = store.set_sticker_status(sticker.id, "registered");
         return;
     }
-    // The weakest member: never sent, least seen, longest unseen.
+    // The weakest member: never sent, least seen, longest unseen. A sticker a
+    // person edited stays: someone cared about it.
+    std::erase_if(*registered, [](const store::Sticker &member) { return member.modified_by == "USER"; });
     const auto weakest = std::ranges::min_element(*registered, [](const store::Sticker &a, const store::Sticker &b) {
         return std::tuple(a.used, a.seen, a.last_seen) < std::tuple(b.used, b.seen, b.last_seen);
     });

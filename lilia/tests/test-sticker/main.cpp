@@ -476,6 +476,14 @@ void test_store_and_pool() {
     auto registered = db->stickers("registered");
     require(registered->size() == 2 && registered->front().sha1 == "h2", "a sticker seen more replaces the weakest unsent one");
     require(db->stickers("spare")->front().sha1 == "h0", "the weakest becomes a spare");
+    // A sticker a person edited is never displaced.
+    require(db->edit_sticker(ids[1], "人工", "人工").has_value(), "edit");
+    auto newcomer = db->add_sticker({.sha1 = "h3", .path = "stickers/x", .media_type = "image/png", .seen = 9});
+    collector.file_into_pool(**db->sticker_by_hash("h3"));
+    registered = db->stickers("registered");
+    require(registered->size() == 2 && std::ranges::any_of(*registered, [&](const auto &s) { return s.id == ids[1]; }) &&
+                std::ranges::any_of(*registered, [&](const auto &s) { return s.id == *newcomer; }),
+            "an edited sticker stays; the other unsent one makes room");
     require(db->sticker_seen(ids[0], 99).has_value() && (*db->sticker_by_hash("h0"))->seen == 2, "sightings count");
     require(db->sticker_used(ids[2], 100).has_value() && (*db->sticker_by_hash("h2"))->used == 1, "uses count");
     require(db->describe_sticker(ids[0], "猫", "无语", "rejected").has_value() && (*db->sticker_by_hash("h0"))->status == "rejected",
