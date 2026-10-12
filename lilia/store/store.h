@@ -119,6 +119,24 @@ struct Sticker {
     i64 last_seen = 0;
     i64 last_used = 0;
     std::string modified_by = "AI";
+    /// What people send it for, learned from the chats it turns up in
+    /// (sticker_evidence); usage_count snippets so far, the last inference at
+    /// usage_inferred_count. tags_by: "VISION" or "USAGE".
+    std::string usage;
+    i64 usage_count = 0;
+    i64 usage_inferred_count = 0;
+    std::string tags_by = "VISION";
+};
+
+/// An anonymised snippet of a chat a sticker turned up in; `own` when lilia
+/// sent it.
+struct StickerEvidence {
+    i64 id = 0;
+    i64 sticker_id = 0;
+    ChatKey chat;
+    std::string snippet;
+    bool own = false;
+    i64 time = 0;
 };
 
 /// A stable fact about a person, quoted from their own message. `fact` is
@@ -342,6 +360,16 @@ struct Store {
     Result<void> describe_sticker(i64 id, std::string_view description, std::string_view tags, std::string_view status);
     /// A person's tags and description, kept from then on.
     Result<void> edit_sticker(i64 id, std::string_view tags, std::string_view description);
+    /// Adds a sighting's snippet (only the newest `keep` stay) and counts it;
+    /// returns the sticker as it is now.
+    Result<Sticker> add_sticker_evidence(i64 id, const ChatKey &chat, std::string_view snippet, bool own, i64 time, usize keep);
+    /// The newest `limit` snippets of a sticker, oldest first.
+    Result<std::vector<StickerEvidence>> sticker_evidence(i64 id, usize limit);
+    /// The usage inferred at `at_count` snippets (nullopt: unchanged), and its
+    /// tags unless a person edited them.
+    Result<void> set_sticker_usage(i64 id, std::optional<std::string_view> usage, std::optional<std::string_view> tags, i64 at_count);
+    /// Forgets a group's snippets; returns how many went.
+    Result<i64> delete_sticker_evidence_of_group(i64 chat_id);
     Result<void> set_sticker_status(i64 id, std::string_view status);
     Result<void> sticker_used(i64 id, i64 time);
     /// Stickers with this status, most seen first.

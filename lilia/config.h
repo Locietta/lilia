@@ -294,6 +294,15 @@ struct StickerConfig {
     /// Stickers find_sticker shows the planner, and the pause between hers.
     usize candidates = 8;
     i64 cooldown_seconds = 60;
+    /// Learn what stickers are used for from the lines around them: snippets
+    /// kept per sticker, lines on each side, how long to wait for the lines
+    /// after, inference calls per hour, and whether searches use the usage.
+    bool usage = true;
+    usize usage_evidence = 12;
+    usize usage_context_lines = 3;
+    i64 usage_after_seconds = 180;
+    usize usage_inferences_per_hour = 20;
+    bool usage_in_search = true;
 };
 
 struct Config {

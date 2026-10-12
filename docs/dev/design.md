@@ -202,7 +202,21 @@ Model calls (2026-10-11):
 4. **Stickers.**
    - Learn stickers from every group the account is in (`sticker/`): the
      image (deduplicated by hash), a vision model's description and tags,
-     a capped pool of the fit ones; other groups' text is never stored.
+     a capped pool of the fit ones.
+   - Usage (2026-10-12, after MaiBot's jargon cycle; MaiBot itself freezes
+     sticker tags): each sighting, hers included, keeps an anonymised snippet
+     of up to 3 lines before and 3 after (within 3 minutes) in
+     `sticker_evidence`. At 3, 6, 12, 24, 48 and 96 snippets the helper model
+     infers what the sticker is sent for (`prompts/sticker_usage.md`, the
+     previous usage as a prior, `no_info` when unclear); the usage and its
+     tags are searched and shown to the planner (`｜常用于：…`). A person's
+     tags stay; the usage is still learned.
+   - Privacy: like jargon evidence, snippets come from every group not
+     excluded. Speakers become 群友N (hers [SELF]); their names, typed
+     @mentions, numbers of 5+ digits and links are scrubbed; lines are cut at
+     80 code points; only the newest 12 per sticker stay, and a rejected
+     sticker loses them. `lilia stickers --forget-group <id>` purges a group.
+     No other text from other groups is stored.
    - Tagging (2026-10-12): the prompt asks for the action (for a GIF, the
      motion) and the situations it is sent in, with no example tags (the old
      list primed 无语 onto 44% of the pool; now 16%). Animated stickers can go

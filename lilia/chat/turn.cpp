@@ -368,9 +368,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             const auto feeling = argument("feeling");
             const auto found = co_await find_stickers(this, feeling);
             log::info("{} looks for stickers for \"{}\": {} found", describe(chat), feeling, found.size());
-            keep(found.empty() ?
-                     std::string("没找到能发的表情包。") :
-                     std::format("找到这些：\n{}要发就用 send_sticker 填编号；都不贴切就别发。", sticker::render_candidates(found, now())));
+            keep(found.empty() ? std::string("没找到能发的表情包。") :
+                                 std::format("找到这些：\n{}要发就用 send_sticker 填编号；都不贴切就别发。",
+                                             sticker::render_candidates(found, now(), config.stickers.usage_in_search)));
             ++sticker_finds;
             continue;
         }

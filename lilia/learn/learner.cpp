@@ -56,6 +56,8 @@ std::string_view trim(std::string_view text) {
     return text.substr(first, last - first + 1);
 }
 
+} // namespace
+
 const glz::generic *field(const glz::generic &object, std::string_view key) {
     if (!object.is_object()) return nullptr;
     const auto &map = object.get_object();
@@ -78,6 +80,8 @@ bool bool_field(const glz::generic &object, std::string_view key) {
     return value->is_string() && (value->get_string() == "true" || value->get_string() == "是");
 }
 
+namespace {
+
 /// "3", 3 or "#3" -> 3; 0 when it is not a number.
 usize number_value(const glz::generic &value) {
     if (value.is_number()) return static_cast<usize>(value.get_number());
@@ -94,6 +98,8 @@ usize number_field(const glz::generic &object, std::string_view key) {
     return value ? number_value(*value) : 0;
 }
 
+} // namespace
+
 const glz::generic *tool_input(const std::vector<provider::OutputItem> &items, std::string_view tool) {
     for (const auto &item : items) {
         const auto *call = std::get_if<provider::ToolCallItem>(&item);
@@ -101,6 +107,8 @@ const glz::generic *tool_input(const std::vector<provider::OutputItem> &items, s
     }
     return nullptr;
 }
+
+namespace {
 
 /// "被问具体内容时" -> "被问具体内容"; the template adds "当…时".
 std::string strip_time_suffix(std::string text) {

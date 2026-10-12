@@ -30,8 +30,9 @@ Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feelin
     std::vector<retrieval::Document> documents;
     for (const auto &sticker : *pool) {
         documents.push_back({.id = sticker.id,
-                             .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images),
-                             .lexical = sticker.tags + " " + sticker.description});
+                             .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images,
+                                                                r->config.stickers.usage_in_search),
+                             .lexical = sticker::lexical_text(sticker, r->config.stickers.usage_in_search)});
     }
     const auto matches = co_await r->memory->retriever.search(
         retrieval::k_sticker_task, std::move(feeling), documents,
@@ -64,6 +65,8 @@ Task<bool> send_sticker(Responder *r, store::ChatKey chat, store::Sticker sticke
     if (stored.has_error()) log::error("cannot record sent sticker: {}", stored.error().message());
     std::ignore = r->store.sticker_used(sticker.id, r->now());
     r->chats[chat].last_sticker = r->now();
+    // How the group takes it is evidence of what the sticker is for.
+    if (r->stickers && chat.type == "group") r->stickers->observe_own(chat.id, sticker.id);
     log::info("{} sent sticker {}: [{}] {}", describe(chat), sticker::handle(sticker), sticker.tags, sticker.description);
     co_return true;
 }

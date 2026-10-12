@@ -75,7 +75,9 @@ Task<std::optional<i64>> send_and_record(Responder *r, const store::ChatKey &cha
         .from_self = true,
     });
     if (stored.has_error()) log::error("cannot record sent message: {}", stored.error().message());
-    // Her own lines join the next learning batch as [SELF] context.
+    // Her own lines join the next learning batch as [SELF] context, and the
+    // lines around stickers.
+    if (r->stickers && chat.type == "group") r->stickers->observe_own_text(chat.id, plain);
     if (r->learner && chat.type == "group") r->learner->observe_own(chat.id, std::move(plain));
     co_return id;
 }

@@ -258,6 +258,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             sticker.path = (stickers->parent_path() / sticker.path).string(); // absolute: read from the live data dir
             std::ignore = store->add_sticker(sticker);
             hashes.push_back(retrieval::text_hash(sticker::embedding_text(sticker)));
+            if (!sticker.usage.empty()) hashes.push_back(retrieval::text_hash(sticker::usage_text(sticker)));
         }
         // Their vectors too, so a replay does not embed the pool again.
         const auto profile = retrieval::profile_of(config.memory);

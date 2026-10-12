@@ -191,6 +191,151 @@ void test_frames() {
     }
 }
 
+void test_usage_helpers() {
+    using sticker::ContextLine;
+    const std::vector<ContextLine> lines{
+        {.sender = 1, .name = "小明同学", .text = "小红你看 https://b23.tv/abc 这个"},
+        {.sender = 2, .name = "小红", .text = "@小明同学 笑死 我的号是 123456789"},
+        {.sender = 1, .name = "小明同学", .text = ""},
+        {.text = "草", .self = true},
+        {.sender = 3, .name = "阿", .text = std::string(100, 'x')},
+    };
+    const auto snippet = sticker::usage_snippet(lines, 2, "莉莉娅");
+    require(snippet == "群友1: 群友2你看 [链接] 这个\n群友2: @某人 笑死 我的号是 [数字]\n群友1: [这张表情包]\n[SELF] 莉莉娅: 草\n群友3: " +
+                           std::string(80, 'x') + "…\n",
+            "speakers anonymised, names, links, mentions and numbers scrubbed, the sticker marked, long lines cut");
+
+    require(!sticker::usage_due(2, 0) && sticker::usage_due(3, 0) && !sticker::usage_due(5, 3) && sticker::usage_due(6, 3) &&
+                sticker::usage_due(30, 6) && !sticker::usage_due(200, 96),
+            "inference at 3, 6, 12, 24, 48 and 96 snippets");
+
+    auto usage = sticker::parse_usage(
+        {test::tool_call("record_sticker_usage",
+                         R"({"usage": "当被说中时发，表示心虚", "tags": "心虚，被戳穿,尴尬、装傻、无语、多余", "no_info": false})")});
+    require(usage && usage->usage == "当被说中时发，表示心虚" && usage->tags == "心虚、被戳穿、尴尬、装傻、无语" && !usage->no_info,
+            "the usage, at most five tags, one separator");
+    usage = sticker::parse_usage({test::tool_call("record_sticker_usage", R"({"usage": "", "tags": "", "no_info": false})")});
+    require(usage && usage->no_info, "an empty usage is no information");
+    require(!sticker::parse_usage({test::text_answer("当……时发")}), "no tool call, no answer");
+
+    store::Sticker known{.id = 5, .description = "猫摇头", .tags = "摇头", .usage = "当拒绝时发"};
+    const std::vector<store::StickerEvidence> evidence{{.snippet = "群友1: 去吗\n群友2: [这张表情包]\n"},
+                                                       {.snippet = "[SELF] 莉莉娅: [这张表情包]\n群友1: 啥意思\n", .own = true}};
+    const auto request = sticker::build_usage_request("画面{description}标签{tags}{previous}群{groups}{contexts}{previous_instruction}",
+                                                      known, evidence, 2, "莉莉娅");
+    const auto *text = std::get_if<provider::TextPart>(&request.history.back().parts.front());
+    require(text && text->text.contains("画面猫摇头") && text->text.contains("上一次总结的用法（仅供参考）：当拒绝时发") &&
+                text->text.contains("群2") && text->text.contains("【片段 2（她自己发的）】") && text->text.contains("以多数片段为准") &&
+                request.tools.size() == 1 && request.tools[0].name == "record_sticker_usage",
+            "the request carries the picture, the previous usage and the snippets");
+
+    require(sticker::render_candidates({known}, 0) == "s5 标签：摇头｜画面：猫摇头｜常用于：当拒绝时发\n" &&
+                sticker::render_candidates({known}, 0, false) == "s5 标签：摇头｜画面：猫摇头\n",
+            "candidates show the usage, unless it is switched off");
+    require(sticker::embedding_inputs(known, "data", false, true) == std::vector<std::string>({"摇头：猫摇头", "用法：当拒绝时发"}) &&
+                sticker::embedding_inputs(known, "data", false, false).size() == 1 &&
+                sticker::lexical_text(known, true) == "摇头 猫摇头 当拒绝时发",
+            "searches can use the usage");
+}
+
+void test_usage_store() {
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    auto id = db->add_sticker({.sha1 = "u", .path = "stickers/u.png", .media_type = "image/png", .tags = "猫", .status = "registered"});
+    require(id.has_value(), "add");
+    for (int i = 0; i < 5; ++i) {
+        auto after = db->add_sticker_evidence(*id, {.type = "group", .id = 7 + i % 2}, "片段" + std::to_string(i), i == 4, 100 + i, 3);
+        require(after.has_value() && after->usage_count == i + 1, "snippets are counted");
+    }
+    auto kept = db->sticker_evidence(*id, 10);
+    require(kept.has_value() && kept->size() == 3 && kept->front().snippet == "片段2" && kept->back().own && kept->back().chat.id == 7,
+            "only the newest snippets stay, oldest first");
+    require(db->set_sticker_usage(*id, "当……时发", "摇头、拒绝", 5).has_value(), "set usage");
+    auto sticker = **db->sticker_by_id(*id);
+    require(sticker.usage == "当……时发" && sticker.tags == "摇头、拒绝" && sticker.tags_by == "USAGE" && sticker.usage_inferred_count == 5,
+            "usage and its tags are stored");
+    require(db->set_sticker_usage(*id, std::nullopt, std::nullopt, 6).has_value(), "no information");
+    sticker = **db->sticker_by_id(*id);
+    require(sticker.usage == "当……时发" && sticker.usage_inferred_count == 6, "no information keeps the usage, counts the inference");
+    require(db->edit_sticker(*id, "人工", "人工描述").has_value() && db->set_sticker_usage(*id, "新用法", "机器标签", 7).has_value(),
+            "edit");
+    sticker = **db->sticker_by_id(*id);
+    require(sticker.tags == "人工" && sticker.usage == "新用法", "a person's tags stay; the usage is still learned");
+    auto forgotten = db->delete_sticker_evidence_of_group(8);
+    require(forgotten.has_value() && *forgotten == 1 && db->sticker_evidence(*id, 10)->size() == 2, "forget a group");
+    require(db->describe_sticker(*id, "x", "y", "rejected").has_value() && db->sticker_evidence(*id, 10)->empty(),
+            "a rejected sticker loses its snippets");
+}
+
+onebot::MessageEvent group_message(i64 group, i64 user, std::string name, onebot::Message message) {
+    return {.message_type = "group",
+            .user_id = user,
+            .group_id = group,
+            .sender = {.user_id = user, .nickname = std::move(name)},
+            .message = std::move(message)};
+}
+
+lighter::Task<> test_sightings() {
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    StickerConfig config{.enabled = true, .exclude_groups = {99}};
+    std::vector<lighter::Task<>> spawned;
+    sticker::Collector collector(config, "data", *db, [&spawned](lighter::Task<> task) { spawned.push_back(std::move(task)); });
+    i64 clock = 1'000;
+    collector.now = [&clock] { return clock; };
+    collector.self_name = "莉莉娅";
+    auto state = std::make_shared<test::FakeProvider::State>();
+    state->answer = [](const provider::History &, const std::vector<provider::ToolDefinition> &) {
+        return std::optional<std::vector<provider::OutputItem>>{
+            {test::tool_call("record_sticker_usage", R"({"usage": "当拒绝别人时发", "tags": "拒绝、不要", "no_info": false})")}};
+    };
+    collector.helper = test::fake_provider(state);
+    auto id = db->add_sticker({.sha1 = "s", .path = "stickers/s.png", .media_type = "image/png", .tags = "猫", .status = "registered"});
+    require(id.has_value(), "add");
+
+    onebot::Segment sticker{.type = "image"};
+    sticker.data["url"] = "https://multimedia.nt.qq.com.cn/s";
+    sticker.data["sub_type"] = i64{1};
+    for (int round = 0; round < 3; ++round) {
+        clock += 700; // older lines have left the group's recent ones
+        collector.observe(group_message(7, 2001, "阿明", {onebot::text_segment("一起去吃饭吗")}), 10);
+        ++clock;
+        collector.observe(group_message(7, 2002, "小红", {sticker}), 10);
+        require(collector.sightings.size() == 1 && collector.sightings.back().before.size() == 1, "a sighting opens with the line before");
+        // collect() would download it and fill in the id.
+        *collector.sightings.back().sticker_id = *id;
+        collector.observe(group_message(7, 2001, "阿明", {onebot::text_segment("好吧")}), 10);
+        collector.observe(group_message(99, 2003, "外人", {onebot::text_segment("别的群")}), 10);
+        ++clock;
+        require(collector.sightings.size() == 1, "it waits for more lines after it (excluded groups do not count)");
+        clock += 200;
+        collector.observe(group_message(8, 2004, "路人", {onebot::text_segment("另一个群")}), 10);
+        require(collector.sightings.empty(), "after its window any group's message closes it");
+    }
+    auto evidence = db->sticker_evidence(*id, 20);
+    require(evidence.has_value() && evidence->size() == 3 &&
+                evidence->front().snippet == "群友1: 一起去吃饭吗\n群友2: [这张表情包]\n群友1: 好吧\n",
+            "each sighting leaves an anonymised snippet");
+    require(spawned.size() == 4, "three downloads, then one inference at three snippets");
+    co_await std::move(spawned.back());
+    auto learned = **db->sticker_by_id(*id);
+    require(learned.usage == "当拒绝别人时发" && learned.tags == "拒绝、不要" && learned.usage_inferred_count == 3 &&
+                state->requests.size() == 1,
+            "the usage is learned from the snippets");
+
+    // Her own sticker: the reactions after it are its evidence.
+    clock += 700;
+    collector.observe_own_text(7, "我不去");
+    collector.observe_own(7, *id);
+    collector.observe(group_message(7, 2001, "阿明", {onebot::text_segment("啥意思")}), 10);
+    clock += 200;
+    collector.observe(group_message(8, 2004, "路人", {onebot::text_segment("嗯")}), 10);
+    evidence = db->sticker_evidence(*id, 20);
+    require(evidence->size() == 4 && evidence->back().own &&
+                evidence->back().snippet.contains("[SELF] 莉莉娅: 我不去\n[SELF] 莉莉娅: [这张表情包]\n群友1: 啥意思"),
+            "her own sticker is a sighting with the reactions to it");
+}
+
 lighter::Task<> test_describe() {
     auto db = store::Store::open_memory();
     require(db.has_value(), "open");
@@ -349,10 +494,16 @@ int main() {
         test_store_and_pool();
         test_frames();
         lighter::EventLoop loop;
+        test_usage_helpers();
+        test_usage_store();
         auto task = test_describe();
         loop.schedule(task);
         loop.run();
         std::ignore = task.value();
+        auto sightings = test_sightings();
+        loop.schedule(sightings);
+        loop.run();
+        std::ignore = sightings.value();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);

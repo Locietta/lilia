@@ -56,7 +56,7 @@ void print_usage(FILE *output) {
                "       lilia jargon [--limit <n>] | --set <term> <meaning> | --delete <term>\n"
                "       lilia retrieval [--query <text>]... [--labels <labels.json>] [--db <lilia.db>] [--config <path>]\n"
                "       lilia stickers --db <copy.db> [--retag [--gifs] [--[no-]frames] [--prompt <sticker.md>] [--limit <n>]]\n"
-               "                      [--apply-from <retagged.db>] [--config <path>]\n"
+               "                      [--apply-from <retagged.db>] [--learn-usage] [--forget-group <id>] [--config <path>]\n"
                "       lilia segment [--terms | --count <n> | --bench | --pieces | --homophones] < lines.txt\n"
                "       lilia --version | --help\n",
                output);
@@ -125,8 +125,9 @@ std::vector<std::string> embedded_texts(const Config &config, store::Store &stor
     if (config.stickers.enabled) {
         if (auto pool = store.stickers("registered"); pool.has_value()) {
             for (const auto &sticker : *pool) {
-                std::ranges::move(sticker::embedding_inputs(sticker, config.data_dir, config.memory.embed_images),
-                                  std::back_inserter(texts));
+                std::ranges::move(
+                    sticker::embedding_inputs(sticker, config.data_dir, config.memory.embed_images, config.stickers.usage_in_search),
+                    std::back_inserter(texts));
             }
         }
     }
@@ -258,6 +259,10 @@ struct StickerTool {
     usize limit = 0;
     std::optional<std::filesystem::path> prompt;
     std::optional<std::filesystem::path> apply_from;
+    /// Infers the usage of every registered sticker with enough snippets.
+    bool learn_usage = false;
+    /// Forgets one group's usage snippets.
+    std::optional<i64> forget_group;
 };
 
 /// "无语 97 (49%)、无奈 34 (17%)…": the most common tags of the pool.
@@ -297,6 +302,29 @@ Task<int> run_stickers(const Config &config, std::optional<std::filesystem::path
         auto pool = store->stickers("registered");
         return pool.has_value() ? *std::move(pool) : std::vector<store::Sticker>{};
     };
+    if (tool.forget_group) {
+        auto forgotten = store->delete_sticker_evidence_of_group(*tool.forget_group);
+        if (forgotten.has_error()) {
+            log::error("{}", forgotten.error().message());
+            co_return 1;
+        }
+        std::printf("forgot %lld snippets of group %lld\n", static_cast<long long>(*forgotten), static_cast<long long>(*tool.forget_group));
+        co_return 0;
+    }
+    if (tool.learn_usage) {
+        sticker::Collector collector(config.stickers, config.data_dir, *store, [](Task<>) {});
+        collector.helper = make_learner(config.model);
+        collector.helper_model = config.model.helper();
+        collector.self_name = config.chat.name;
+        usize learned = 0;
+        for (const auto &sticker : registered()) {
+            if (sticker.usage_count < 3) continue;
+            co_await collector.infer_usage(sticker);
+            ++learned;
+        }
+        std::printf("inferred the usage of %zu stickers\n", learned);
+        co_return 0;
+    }
     std::printf("tags before: %s\n", top_tags(registered()).c_str());
 
     if (tool.apply_from) {
@@ -398,9 +426,10 @@ Task<int> run_retrieval(const Config &config, std::filesystem::path database, st
     auto pool = store->stickers("registered");
     std::vector<retrieval::Document> stickers;
     for (const auto &sticker : pool.has_value() ? *pool : std::vector<store::Sticker>{}) {
-        stickers.push_back({.id = sticker.id,
-                            .texts = sticker::embedding_inputs(sticker, config.data_dir, config.memory.embed_images),
-                            .lexical = sticker.tags + " " + sticker.description});
+        stickers.push_back(
+            {.id = sticker.id,
+             .texts = sticker::embedding_inputs(sticker, config.data_dir, config.memory.embed_images, config.stickers.usage_in_search),
+             .lexical = sticker::lexical_text(sticker, config.stickers.usage_in_search)});
     }
     if (labels) co_return co_await evaluate_stickers(config, retriever, stickers, *labels);
     std::vector<retrieval::Document> expressions;
@@ -475,6 +504,9 @@ Task<int> run_app(const Config &config) {
             collector.vision_model = config.model.vision_model;
             collector.frames = config.model.vision_gif_frames;
         }
+        collector.helper = make_learner(config.model);
+        collector.helper_model = config.model.helper();
+        collector.self_name = config.chat.name;
         collector.background_budget = config.learning.daily_token_budget;
         responder.stickers = &collector;
     }
@@ -676,6 +708,10 @@ int main(int argc, char **argv) {
             stickers.frames = arg == "--frames";
         } else if (arg == "--prompt" && sticker_tool && i + 1 < argc) {
             stickers.prompt = argv[++i];
+        } else if (arg == "--learn-usage" && sticker_tool) {
+            stickers.learn_usage = true;
+        } else if (arg == "--forget-group" && sticker_tool && i + 1 < argc) {
+            stickers.forget_group = std::atoll(argv[++i]);
         } else if (arg == "--apply-from" && sticker_tool && i + 1 < argc) {
             stickers.apply_from = argv[++i];
         } else if (arg == "--limit" && sticker_tool && i + 1 < argc) {
@@ -713,7 +749,7 @@ int main(int argc, char **argv) {
 
     const auto path = config_path.value_or(default_config_path());
     // Listing learned expressions reads the database only; no keys needed.
-    auto config = load_config(path, !(list_expressions || jargon || (sticker_tool && !stickers.retag)) || review);
+    auto config = load_config(path, !(list_expressions || jargon || (sticker_tool && !stickers.retag && !stickers.learn_usage)) || review);
     if (config.has_error()) {
         log::error("{}: {}", path.string(), config.error().message());
         return 1;

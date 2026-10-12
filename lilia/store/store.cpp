@@ -15,8 +15,9 @@ namespace {
 // 6: person_facts. 7: chat_summaries. 8: stickers. 9: expressions per chat
 // (rebuilt), expression_reviews, jargon. 12: embeddings in their own table
 // (keyed by profile and text hash), memory_chunks.search_text. 13:
-// stickers.modified_by.
-constexpr int k_schema_version = 13;
+// stickers.modified_by. 14: sticker usage (stickers.usage and its counts,
+// sticker_evidence).
+constexpr int k_schema_version = 14;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -202,9 +203,24 @@ CREATE TABLE IF NOT EXISTS stickers (
     first_seen INTEGER NOT NULL,
     last_seen INTEGER NOT NULL,
     last_used INTEGER NOT NULL DEFAULT 0,
-    modified_by TEXT NOT NULL DEFAULT 'AI'
+    modified_by TEXT NOT NULL DEFAULT 'AI',
+    usage TEXT NOT NULL DEFAULT '',
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    usage_inferred_count INTEGER NOT NULL DEFAULT 0,
+    tags_by TEXT NOT NULL DEFAULT 'VISION'
 );
 CREATE INDEX IF NOT EXISTS stickers_by_status ON stickers (status, seen);
+
+CREATE TABLE IF NOT EXISTS sticker_evidence (
+    id INTEGER PRIMARY KEY,
+    sticker_id INTEGER NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    snippet TEXT NOT NULL,
+    own INTEGER NOT NULL DEFAULT 0,
+    time INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sticker_evidence_by_sticker ON sticker_evidence (sticker_id, time);
 
 CREATE TABLE IF NOT EXISTS embeddings (
     profile TEXT NOT NULL,
@@ -312,8 +328,16 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
         if (*present > 0) return {};
         return store.database.execute(std::format("ALTER TABLE {} ADD COLUMN {} {}", table_name, column, declaration));
     };
-    if (auto added = ensure_column("stickers", "modified_by", "TEXT NOT NULL DEFAULT 'AI'"); added.has_error()) {
-        return lighter::outcome_error(std::move(added).error());
+    for (const auto &[column, declaration] : std::array<std::pair<std::string_view, std::string_view>, 5>{{
+             {"modified_by", "TEXT NOT NULL DEFAULT 'AI'"},
+             {"usage", "TEXT NOT NULL DEFAULT ''"},
+             {"usage_count", "INTEGER NOT NULL DEFAULT 0"},
+             {"usage_inferred_count", "INTEGER NOT NULL DEFAULT 0"},
+             {"tags_by", "TEXT NOT NULL DEFAULT 'VISION'"},
+         }}) {
+        if (auto added = ensure_column("stickers", column, declaration); added.has_error()) {
+            return lighter::outcome_error(std::move(added).error());
+        }
     }
     // The media table predates its description column in versions 2 and 3.
     if (current == 2 || current == 3) {
@@ -514,8 +538,9 @@ Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize lim
 
 namespace {
 
-constexpr std::string_view k_sticker_columns =
-    "id, sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, last_seen, last_used, modified_by";
+constexpr std::string_view k_sticker_columns = "id, sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, "
+                                               "last_seen, last_used, modified_by, usage, usage_count, "
+                                               "usage_inferred_count, tags_by";
 
 Sticker read_sticker(const Statement &statement) {
     return {
@@ -533,6 +558,10 @@ Sticker read_sticker(const Statement &statement) {
         .last_seen = statement.column_int(11),
         .last_used = statement.column_int(12),
         .modified_by = statement.column_text(13),
+        .usage = statement.column_text(14),
+        .usage_count = statement.column_int(15),
+        .usage_inferred_count = statement.column_int(16),
+        .tags_by = statement.column_text(17),
     };
 }
 
@@ -597,7 +626,13 @@ Result<void> Store::describe_sticker(i64 id, std::string_view description, std::
     statement->bind(2, description);
     statement->bind(3, tags);
     statement->bind(4, status);
-    return statement->run();
+    if (auto ran = statement->run(); ran.has_error()) return ran;
+    // A rejected sticker is never sent: its usage snippets go too.
+    if (status != "rejected") return {};
+    auto evidence = database.prepare("DELETE FROM sticker_evidence WHERE sticker_id = ?1");
+    if (evidence.has_error()) return lighter::outcome_error(std::move(evidence).error());
+    evidence->bind(1, id);
+    return evidence->run();
 }
 
 Result<void> Store::edit_sticker(i64 id, std::string_view tags, std::string_view description) {
@@ -607,6 +642,74 @@ Result<void> Store::edit_sticker(i64 id, std::string_view tags, std::string_view
     statement->bind(2, tags);
     statement->bind(3, description);
     return statement->run();
+}
+
+Result<Sticker> Store::add_sticker_evidence(i64 id, const ChatKey &chat, std::string_view snippet, bool own, i64 time, usize keep) {
+    auto statement = database.prepare("INSERT INTO sticker_evidence (sticker_id, chat_type, chat_id, snippet, own, time) "
+                                      "VALUES (?1, ?2, ?3, ?4, ?5, ?6)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, chat.type);
+    statement->bind(3, chat.id);
+    statement->bind(4, snippet);
+    statement->bind(5, i64{own ? 1 : 0});
+    statement->bind(6, time);
+    if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
+    auto pruned = database.prepare("DELETE FROM sticker_evidence WHERE sticker_id = ?1 AND id NOT IN "
+                                   "(SELECT id FROM sticker_evidence WHERE sticker_id = ?1 ORDER BY time DESC, id DESC LIMIT ?2)");
+    if (pruned.has_error()) return lighter::outcome_error(std::move(pruned).error());
+    pruned->bind(1, id);
+    pruned->bind(2, static_cast<i64>(std::max<usize>(keep, 1)));
+    if (auto ran = pruned->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
+    auto counted = database.prepare("UPDATE stickers SET usage_count = usage_count + 1 WHERE id = ?1");
+    if (counted.has_error()) return lighter::outcome_error(std::move(counted).error());
+    counted->bind(1, id);
+    if (auto ran = counted->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
+    auto sticker = sticker_by_id(id);
+    if (sticker.has_error()) return lighter::outcome_error(std::move(sticker).error());
+    if (!*sticker) return lighter::outcome_error(Error::storage("no sticker " + std::to_string(id)));
+    return **sticker;
+}
+
+Result<std::vector<StickerEvidence>> Store::sticker_evidence(i64 id, usize limit) {
+    auto statement = database.prepare("SELECT id, sticker_id, chat_type, chat_id, snippet, own, time FROM (SELECT * FROM sticker_evidence "
+                                      "WHERE sticker_id = ?1 ORDER BY time DESC, id DESC LIMIT ?2) ORDER BY time, id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, static_cast<i64>(limit));
+    std::vector<StickerEvidence> out;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        out.push_back({.id = statement->column_int(0),
+                       .sticker_id = statement->column_int(1),
+                       .chat = {.type = statement->column_text(2), .id = statement->column_int(3)},
+                       .snippet = statement->column_text(4),
+                       .own = statement->column_int(5) != 0,
+                       .time = statement->column_int(6)});
+    }
+    return out;
+}
+
+Result<void> Store::set_sticker_usage(i64 id, std::optional<std::string_view> usage, std::optional<std::string_view> tags, i64 at_count) {
+    auto statement = database.prepare("UPDATE stickers SET usage = coalesce(?2, usage), usage_inferred_count = ?4, "
+                                      "tags = iif(?3 IS NULL OR modified_by = 'USER', tags, ?3), "
+                                      "tags_by = iif(?3 IS NULL OR modified_by = 'USER', tags_by, 'USAGE') WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    if (usage) statement->bind(2, *usage);
+    if (tags) statement->bind(3, *tags);
+    statement->bind(4, at_count);
+    return statement->run();
+}
+
+Result<i64> Store::delete_sticker_evidence_of_group(i64 chat_id) {
+    auto statement = database.prepare("DELETE FROM sticker_evidence WHERE chat_type = 'group' AND chat_id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat_id);
+    if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
+    return static_cast<i64>(sqlite3_changes(database.value));
 }
 
 Result<void> Store::set_sticker_status(i64 id, std::string_view status) {

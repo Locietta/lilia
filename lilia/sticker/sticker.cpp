@@ -14,11 +14,13 @@
 #include <lighter/http/bound_client.h>
 
 #include <xmake/bin2obj/sticker_md.hpp>
+#include <xmake/bin2obj/sticker_usage_md.hpp>
 
 #include <lilia/archive/archiver.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/image/frames.h>
+#include <lilia/learn/learner.h>
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
@@ -32,7 +34,13 @@ namespace {
 
 /// The line before a sticker, shown to the tagging call (memory only).
 constexpr usize k_context_code_points = 60;
+constexpr i64 k_context_seconds = 120;
 constexpr std::chrono::seconds k_vision_deadline{60};
+/// Recent lines per group kept for sightings, and how old they may be.
+constexpr usize k_recent_lines = 8;
+constexpr i64 k_recent_seconds = 600;
+/// A sighting whose sticker never got an id (not downloaded) is dropped.
+constexpr i64 k_unknown_sticker_seconds = 600;
 
 /// with_timeout takes lighter's error type; hand the outcome through as a value.
 Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
@@ -81,6 +89,36 @@ std::string sha1_hex(std::string_view bytes) {
     return out;
 }
 
+/// One model call about a sticker with a deadline, recorded as chat type
+/// "sticker" (the background budget); nullopt when it failed.
+Task<std::optional<std::vector<provider::OutputItem>>>
+call_model(Collector &collector, provider::Provider &provider, const std::string &model, i64 sticker_id, const provider::History &history,
+           const std::vector<provider::ToolDefinition> &tools, std::string_view purpose) {
+    std::vector<provider::OutputItem> items;
+    const provider::StreamCallbacks callbacks{
+        .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
+    };
+    const i64 started = collector.now();
+    auto settled = co_await lighter::with_timeout(settle(provider->complete(history, tools, callbacks)), k_vision_deadline);
+    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
+                                                Error::api("timeout", std::format("{} exceeded its deadline", purpose), "", true))) :
+                                            *std::move(settled);
+    store::LlmCall call{.time = started, .chat = {.type = "sticker", .id = sticker_id}, .model = model};
+    if (completion.has_error()) {
+        call.error = completion.error().message();
+    } else {
+        call.input_tokens = completion->usage.input_tokens;
+        call.output_tokens = completion->usage.output_tokens;
+        call.request_id = completion->request_id;
+    }
+    std::ignore = collector.store.add_llm_call(call);
+    if (completion.has_error()) {
+        log::warn("sticker: {} failed: {}", purpose, call.error);
+        co_return std::nullopt;
+    }
+    co_return std::move(items);
+}
+
 } // namespace
 
 std::optional<Tagged> parse_tagging(std::string_view answer) {
@@ -119,10 +157,19 @@ std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count
 
 std::string embedding_text(const store::Sticker &sticker) { return std::format("{}：{}", sticker.tags, sticker.description); }
 
-std::vector<std::string> embedding_inputs(const store::Sticker &sticker, const std::filesystem::path &data_dir, bool images) {
+std::string usage_text(const store::Sticker &sticker) { return sticker.usage.empty() ? std::string() : "用法：" + sticker.usage; }
+
+std::vector<std::string> embedding_inputs(const store::Sticker &sticker, const std::filesystem::path &data_dir, bool images, bool usage) {
     std::vector<std::string> out{embedding_text(sticker)};
+    if (usage && !sticker.usage.empty()) out.push_back(usage_text(sticker));
     if (images) out.push_back(retrieval::image_input(data_dir / sticker.path));
     return out;
+}
+
+std::string lexical_text(const store::Sticker &sticker, bool usage) {
+    auto text = sticker.tags + " " + sticker.description;
+    if (usage && !sticker.usage.empty()) text += " " + sticker.usage;
+    return text;
 }
 
 std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng) {
@@ -174,11 +221,12 @@ std::optional<i64> parse_handle(std::string_view text) {
     return id;
 }
 
-std::string render_candidates(const std::vector<store::Sticker> &candidates, i64 now) {
+std::string render_candidates(const std::vector<store::Sticker> &candidates, i64 now, bool usage) {
     constexpr i64 k_recent_seconds = 86'400;
     std::string out;
     for (const auto &sticker : candidates) {
-        out += std::format("{} 标签：{}｜画面：{}{}\n", handle(sticker), sticker.tags, sticker.description,
+        out += std::format("{} 标签：{}｜画面：{}{}{}\n", handle(sticker), sticker.tags, sticker.description,
+                           !usage || sticker.usage.empty() ? std::string() : "｜常用于：" + sticker.usage,
                            sticker.last_used > 0 && now - sticker.last_used < k_recent_seconds ? "（她一天内发过）" : "");
     }
     return out;
@@ -200,26 +248,174 @@ std::optional<onebot::Segment> resend_segment(const onebot::Message &message) {
 
 Collector::Collector(const StickerConfig &config, std::filesystem::path data_dir, store::Store &store, Spawn spawn)
     : now([] { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }),
-      config(config), data_dir(std::move(data_dir)), store(store), spawn(std::move(spawn)) {}
+      config(config), data_dir(std::move(data_dir)), store(store), spawn(std::move(spawn)),
+      usage_prompt(reinterpret_cast<const char *>(xmake::sticker_usage_md.data()), xmake::sticker_usage_md.size()) {}
+
+void Collector::roll_hour() {
+    const i64 current_hour = now() / 3600;
+    if (current_hour == hour) return;
+    hour = current_hour;
+    downloads_this_hour = 0;
+    descriptions_this_hour = 0;
+    inferences_this_hour = 0;
+}
+
+bool Collector::within_budget() {
+    if (background_budget == 0) return true;
+    auto used = store.tokens_since(now() - 86'400, store::TokenScope::BACKGROUND);
+    return !used.has_value() || *used < background_budget;
+}
 
 void Collector::observe(const onebot::MessageEvent &message, i64 self_id) {
     if (!config.enabled || !message.is_group() || message.user_id == self_id) return;
     const i64 group = *message.group_id;
     if (std::ranges::contains(config.exclude_groups, group)) return;
-    for (auto &url : sticker_urls(message.message)) spawn(collect(std::move(url), last_text[group]));
-    // Remember the line (memory only) as context for a sticker that follows.
-    if (auto text = std::string(trim(onebot::text_only(message.message))); !text.empty()) {
-        last_text[group] = chat::count_code_points(text) > k_context_code_points ? std::string() : std::move(text);
+    const auto urls = sticker_urls(message.message);
+    ContextLine line{.sender = message.user_id,
+                     .name = message.sender.card.empty() ? message.sender.nickname : message.sender.card,
+                     .text = learn::learnable_text(message.message),
+                     .time = now()};
+    // The line before, for the tagging call: recent, short, not media.
+    std::string context;
+    if (const auto &lines = recent[group]; !lines.empty()) {
+        const auto &last = lines.back();
+        if (!last.self && now() - last.time <= k_context_seconds && !last.text.starts_with('[') &&
+            chat::count_code_points(last.text) <= k_context_code_points) {
+            context = last.text;
+        }
+    }
+    // Earlier sightings take this line as one after theirs; its own come next.
+    auto shown = line;
+    if (shown.text.empty()) {
+        const bool image = std::ranges::any_of(message.message, [](const onebot::Segment &segment) { return segment.type == "image"; });
+        shown.text = !urls.empty() ? "[表情]" : image ? "[图片]" : "";
+    }
+    remember(group, shown);
+    for (auto url : urls) {
+        auto found = std::make_shared<std::optional<i64>>();
+        if (config.usage) {
+            Sighting sighting{.group = group, .time = now(), .line = line, .sticker_id = found};
+            const auto &lines = recent[group];
+            // The ring already holds this line; take the ones before it.
+            const usize available = lines.empty() ? 0 : lines.size() - 1;
+            for (usize i = available > config.usage_context_lines ? available - config.usage_context_lines : 0; i < available; ++i) {
+                sighting.before.push_back(lines[i]);
+            }
+            sightings.push_back(std::move(sighting));
+        }
+        spawn(collect(std::move(url), context, std::move(found)));
+    }
+    settle_sightings();
+}
+
+void Collector::observe_own_text(i64 group, std::string text) {
+    if (!config.enabled || text.empty() || std::ranges::contains(config.exclude_groups, group)) return;
+    remember(group, {.text = std::move(text), .time = now(), .self = true});
+    settle_sightings();
+}
+
+void Collector::observe_own(i64 group, i64 sticker_id) {
+    if (!config.enabled || !config.usage || std::ranges::contains(config.exclude_groups, group)) return;
+    Sighting sighting{.group = group,
+                      .time = now(),
+                      .own = true,
+                      .line = {.time = now(), .self = true},
+                      .sticker_id = std::make_shared<std::optional<i64>>(sticker_id)};
+    const auto &lines = recent[group];
+    for (usize i = lines.size() > config.usage_context_lines ? lines.size() - config.usage_context_lines : 0; i < lines.size(); ++i) {
+        sighting.before.push_back(lines[i]);
+    }
+    remember(group, {.text = "[表情]", .time = now(), .self = true});
+    sightings.push_back(std::move(sighting));
+    settle_sightings();
+}
+
+void Collector::remember(i64 group, ContextLine line) {
+    if (line.text.empty()) return;
+    for (auto &sighting : sightings) {
+        if (sighting.group == group && sighting.after.size() < config.usage_context_lines) sighting.after.push_back(line);
+    }
+    auto &lines = recent[group];
+    lines.push_back(std::move(line));
+    while (lines.size() > k_recent_lines || (!lines.empty() && now() - lines.front().time > k_recent_seconds)) lines.pop_front();
+}
+
+void Collector::settle_sightings() {
+    std::vector<Sighting> open;
+    std::vector<Sighting> done;
+    for (auto &sighting : sightings) {
+        const bool known = sighting.sticker_id && sighting.sticker_id->has_value();
+        const bool complete = sighting.after.size() >= config.usage_context_lines || now() - sighting.time >= config.usage_after_seconds;
+        if (complete && known) {
+            done.push_back(std::move(sighting));
+        } else if (!known && now() - sighting.time >= k_unknown_sticker_seconds) {
+            // Never downloaded (hourly cap, too large, gone): nothing to file it under.
+        } else {
+            open.push_back(std::move(sighting));
+        }
+    }
+    sightings = std::move(open);
+    for (const auto &sighting : done) close(sighting);
+}
+
+void Collector::close(const Sighting &sighting) {
+    const i64 id = **sighting.sticker_id;
+    auto sticker = store.sticker_by_id(id);
+    if (!sticker.has_value() || !*sticker || (*sticker)->status == "rejected") return;
+    auto lines = sighting.before;
+    lines.push_back(sighting.line);
+    lines.insert(lines.end(), sighting.after.begin(), sighting.after.end());
+    const auto snippet = usage_snippet(lines, sighting.before.size(), self_name);
+    auto updated = store.add_sticker_evidence(id, {.type = "group", .id = sighting.group}, snippet, sighting.own, now(),
+                                              std::max<usize>(config.usage_evidence, 1));
+    if (updated.has_error()) {
+        log::error("cannot store sticker evidence: {}", updated.error().message());
+        return;
+    }
+    consider_inference(*updated);
+}
+
+void Collector::consider_inference(const store::Sticker &sticker) {
+    if (!helper || !usage_due(sticker.usage_count, sticker.usage_inferred_count)) return;
+    if ((sticker.status != "registered" && sticker.status != "spare") || inferring.contains(sticker.id)) return;
+    roll_hour();
+    // Over a limit it waits for its next snippet, still due then.
+    if (inferences_this_hour >= config.usage_inferences_per_hour || !within_budget()) return;
+    ++inferences_this_hour;
+    inferring.insert(sticker.id);
+    spawn(infer_usage(sticker));
+}
+
+Task<> Collector::infer_usage(store::Sticker sticker) {
+    auto evidence = store.sticker_evidence(sticker.id, std::max<usize>(config.usage_evidence, 1));
+    if (evidence.has_error() || evidence->empty() || !helper) {
+        inferring.erase(sticker.id);
+        co_return;
+    }
+    std::set<i64> groups;
+    for (const auto &snippet : *evidence) groups.insert(snippet.chat.id);
+    const auto request = build_usage_request(usage_prompt, sticker, *evidence, groups.size(), self_name);
+    const auto items = co_await call_model(*this, *helper, helper_model, sticker.id, request.history, request.tools, "sticker usage");
+    inferring.erase(sticker.id);
+    if (!items) co_return;
+    const auto usage = parse_usage(*items);
+    if (!usage) {
+        log::warn("sticker: no usage answer for {}", handle(sticker));
+        co_return;
+    }
+    if (usage->no_info) {
+        std::ignore = store.set_sticker_usage(sticker.id, std::nullopt, std::nullopt, sticker.usage_count);
+        log::info("sticker: {} has no fixed use yet ({} snippets)", handle(sticker), sticker.usage_count);
+    } else {
+        std::ignore =
+            store.set_sticker_usage(sticker.id, usage->usage,
+                                    usage->tags.empty() ? std::nullopt : std::optional<std::string_view>(usage->tags), sticker.usage_count);
+        log::info("sticker: {} [{}] {} ({} snippets)", handle(sticker), usage->tags, usage->usage, sticker.usage_count);
     }
 }
 
-Task<> Collector::collect(std::string url, std::string context) {
-    const i64 current_hour = now() / 3600;
-    if (current_hour != hour) {
-        hour = current_hour;
-        downloads_this_hour = 0;
-        descriptions_this_hour = 0;
-    }
+Task<> Collector::collect(std::string url, std::string context, std::shared_ptr<std::optional<i64>> found) {
+    roll_hour();
     if (downloads_this_hour >= config.downloads_per_hour) co_return;
     ++downloads_this_hour;
 
@@ -236,6 +432,7 @@ Task<> Collector::collect(std::string url, std::string context) {
     if (known.has_error()) co_return;
     if (*known) {
         auto sticker = **known;
+        if (found) *found = sticker.id;
         std::ignore = store.sticker_seen(sticker.id, now());
         ++sticker.seen;
         if (sticker.status == "pending") {
@@ -268,6 +465,7 @@ Task<> Collector::collect(std::string url, std::string context) {
     auto id = store.add_sticker(sticker);
     if (id.has_error()) co_return;
     sticker.id = *id;
+    if (found) *found = sticker.id;
     co_await tag(std::move(sticker), std::move(bytes), std::move(context));
 }
 
@@ -288,32 +486,13 @@ Task<std::optional<Tagged>> Collector::describe(const store::Sticker &sticker, c
     parts.push_back(provider::TextPart{.text = text});
     provider::History history;
     history.push_back({.role = provider::Role::USER, .parts = std::move(parts)});
+    const auto items = co_await call_model(*this, *vision, vision_model, sticker.id, history, {}, "sticker tagging");
+    if (!items) co_return std::nullopt;
     std::string answer;
-    const provider::StreamCallbacks callbacks{
-        .on_item_completed =
-            [&answer](const provider::OutputItem &item) {
-                if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
-                    for (const auto &part : message->parts) answer += part.text;
-                }
-            },
-    };
-    const i64 started = now();
-    auto settled = co_await lighter::with_timeout(settle((*vision)->complete(history, {}, callbacks)), k_vision_deadline);
-    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
-                                                Error::api("timeout", "sticker tagging exceeded its deadline", "", true))) :
-                                            *std::move(settled);
-    store::LlmCall call{.time = started, .chat = {.type = "sticker", .id = sticker.id}, .model = vision_model};
-    if (completion.has_error()) {
-        call.error = completion.error().message();
-    } else {
-        call.input_tokens = completion->usage.input_tokens;
-        call.output_tokens = completion->usage.output_tokens;
-        call.request_id = completion->request_id;
-    }
-    std::ignore = store.add_llm_call(call);
-    if (completion.has_error()) {
-        log::warn("sticker: tagging failed: {}", call.error);
-        co_return std::nullopt;
+    for (const auto &item : *items) {
+        if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
+            for (const auto &part : message->parts) answer += part.text;
+        }
     }
     auto tagged = parse_tagging(answer);
     if (!tagged) log::warn("sticker: unexpected tagging answer: {}", answer);

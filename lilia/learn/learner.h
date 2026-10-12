@@ -65,6 +65,13 @@ struct LearnerRequest {
     std::vector<provider::ToolDefinition> tools;
 };
 
+/// Tool answers: the input of the first call of `tool`, a field of it (text
+/// trimmed, numbers as text; booleans also from "true"/"是").
+const glz::generic *tool_input(const std::vector<provider::OutputItem> &items, std::string_view tool);
+const glz::generic *field(const glz::generic &object, std::string_view key);
+std::string text_field(const glz::generic &object, std::string_view key);
+bool bool_field(const glz::generic &object, std::string_view key);
+
 /// Speakers become 群友1, 群友2 ... in order of appearance, lilia's lines
 /// "[SELF] 名字"; lines are numbered from 1.
 std::string render_lines(const std::vector<Line> &lines, std::string_view self_name);
