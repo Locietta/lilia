@@ -452,8 +452,13 @@ double auc(const std::vector<std::pair<double, double>> &scored) {
     return positives > 0 && negatives > 0 ? wins / (positives * negatives) : 0;
 }
 
-Task<int> run_feedback(const Config &config, std::filesystem::path database, FeedbackTool tool) {
-    auto store = store::Store::open(database);
+Task<int> run_feedback(const Config &config, std::optional<std::filesystem::path> explicit_database, std::filesystem::path live,
+                       FeedbackTool tool) {
+    if ((tool.backfill || tool.import_manual) && !explicit_database) {
+        log::error("lilia feedback --backfill/--import-manual write: name the database with --db");
+        co_return 2;
+    }
+    auto store = store::Store::open(explicit_database.value_or(live));
     if (store.has_error()) {
         log::error("{}", store.error().message());
         co_return 1;
@@ -1031,6 +1036,16 @@ int main(int argc, char **argv) {
     if (list_expressions && !manage.action.empty()) return manage_expressions(database, manage);
     if (list_expressions && !review) return print_expressions(database, limit);
 
+    // Only a plain `lilia [--config]` runs the bot: a subcommand must never
+    // fall through to it (a tool run with the live config would join the
+    // groups and migrate the live database).
+    const bool subcommand = argc > 1 && !std::string_view(argv[1]).starts_with('-');
+    const bool tool = replay_log || learn_log || learn_history || review || retrieval_check || sticker_tool || feedback_tool;
+    if (subcommand && !tool) {
+        log::error("unhandled subcommand {}", argv[1]);
+        return 2;
+    }
+
     lighter::EventLoop loop;
     auto interrupts = lighter::InterruptSource::create(loop);
     if (!interrupts) {
@@ -1045,6 +1060,7 @@ int main(int argc, char **argv) {
         review              ? review_expressions(*config, apply, keep) :
         retrieval_check     ? run_retrieval(*config, database_path.value_or(database), queries, labels_path) :
         sticker_tool        ? run_stickers(*config, database_path, stickers) :
+        feedback_tool       ? run_feedback(*config, database_path, database, feedback_options) :
                               run_app(*config),
         interrupts->token());
     loop.schedule(app);
