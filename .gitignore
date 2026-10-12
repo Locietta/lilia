@@ -19,3 +19,6 @@ compile_commands.json
 /AGENTS.local.md
 /CLAUDE.local.md
 /ops/
+
+# working notes (reviews, investigation reports): read once, then thrown away
+/notes/

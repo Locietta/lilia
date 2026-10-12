@@ -1,5 +1,7 @@
 This is "lilia", a QQ chat bot for a small group of friends. It runs next to NapCat (OneBot 11) and answers through an Anthropic-compatible model API. Notes about a particular deployment stay out of the tree: if present, read the untracked `AGENTS.local.md`.
 
+Working notes (reviews, investigation reports, task logs) are read once and thrown away; keep them in the git-ignored `notes/`, never in the tree. What lasts goes into `docs/dev/` itself.
+
 This project is built with C++26 and xmake, on the same toolchain and conventions as liminal. Check the coding style guide at `docs/dev/code-style-guide.md`; the architecture and roadmap are in `docs/dev/design.md`.
 
 Compiler toolchain, C dependencies and python packages are managed by pixi:
