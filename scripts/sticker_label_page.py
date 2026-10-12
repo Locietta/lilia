@@ -57,17 +57,34 @@ FEELINGS = [
 ]
 
 THUMB = 128
+MAX_FRAMES = 64
+
+
+def flatten(frame):
+    """A thumbnail of the frame over white, as lilia shows pictures to models."""
+    copy = frame.convert("RGBA")
+    copy.thumbnail((THUMB, THUMB))
+    flat = Image.new("RGB", copy.size, "white")
+    flat.paste(copy, mask=copy.getchannel("A"))
+    return flat
 
 
 def thumbnail(path):
     with Image.open(path) as image:
         if getattr(image, "is_animated", False) and image.n_frames > 1:
+            # The iterator seeks one image in place: copy each frame as it
+            # comes. Long animations keep every step-th frame, at the same pace.
+            # Frames are opaque: Pillow loses the transparency of some RGBA
+            # frames and paints it black.
+            step = -(-image.n_frames // MAX_FRAMES)
             frames, durations = [], []
-            for frame in list(ImageSequence.Iterator(image))[:48]:
-                copy = frame.convert("RGBA")
-                copy.thumbnail((THUMB, THUMB))
-                frames.append(copy)
-                durations.append(frame.info.get("duration", 80))
+            for index, frame in enumerate(ImageSequence.Iterator(image)):
+                duration = frame.info.get("duration") or 100
+                if index % step:
+                    durations[-1] += duration
+                    continue
+                frames.append(flatten(frame))
+                durations.append(duration)
             out = io.BytesIO()
             frames[0].save(
                 out,
@@ -76,15 +93,11 @@ def thumbnail(path):
                 append_images=frames[1:],
                 duration=durations,
                 loop=0,
-                disposal=2,
+                disposal=1,
             )
             return "image/gif", out.getvalue()
-        copy = image.convert("RGBA")
-        copy.thumbnail((THUMB, THUMB))
-        flat = Image.new("RGB", copy.size, "white")
-        flat.paste(copy, mask=copy.getchannel("A"))
         out = io.BytesIO()
-        flat.save(out, "JPEG", quality=85)
+        flatten(image).save(out, "JPEG", quality=85)
         return "image/jpeg", out.getvalue()
 
 
