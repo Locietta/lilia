@@ -1,17 +1,21 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
 
+#include <glaze/json.hpp>
 #include <xmake/version/lilia.hpp>
 
 #include <lighter/async/async.h>
@@ -49,7 +53,7 @@ void print_usage(FILE *output) {
                "       lilia expressions --review [--apply] [--keep <text>]... [--config <path>]\n"
                "       lilia expressions --rejected | --rescue <review id> | --check <id> | --uncheck <id>\n"
                "       lilia jargon [--limit <n>] | --set <term> <meaning> | --delete <term>\n"
-               "       lilia retrieval [--query <text>]... [--db <lilia.db>] [--config <path>]\n"
+               "       lilia retrieval [--query <text>]... [--labels <labels.json>] [--db <lilia.db>] [--config <path>]\n"
                "       lilia segment [--terms | --count <n> | --bench | --pieces | --homophones] < lines.txt\n"
                "       lilia --version | --help\n",
                output);
@@ -148,7 +152,101 @@ Task<usize> backfill(retrieval::Retriever &retriever, store::Store &store, std::
 /// start, then times a sticker search, a search of each allowed chat and an
 /// expression search for each query. Prints scores and sticker tags only,
 /// never chat text.
-Task<int> run_retrieval(const Config &config, std::filesystem::path database, std::vector<std::string> queries) {
+struct LabelQuery {
+    std::string query;
+    std::vector<i64> good;
+    std::vector<i64> ok;
+};
+
+struct LabelFile {
+    std::vector<LabelQuery> queries;
+};
+
+/// `lilia retrieval --labels`: scores sticker search against hand labels
+/// (scripts/sticker_label_page.py): nDCG@k with gains good 2 / ok 1, recall@k
+/// of the good ones, MRR and precision@1 of good-or-ok, fused and reranked.
+Task<int> evaluate_stickers(const Config &config, retrieval::Retriever &retriever, const std::vector<retrieval::Document> &stickers,
+                            const std::filesystem::path &labels_path) {
+    std::ifstream file(labels_path, std::ios::binary);
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    LabelFile labels;
+    if (!file || glz::read<glz::opts{.null_terminated = false, .error_on_unknown_keys = false}>(labels, buffer.str())) {
+        log::error("cannot read labels from {}", labels_path.string());
+        co_return 1;
+    }
+    const usize k = std::max<usize>(config.stickers.candidates, 1);
+    struct Score {
+        double ndcg = 0, recall = 0, mrr = 0, p1 = 0, ms = 0;
+    };
+    const auto score = [&](const std::vector<retrieval::Match> &matches, const LabelQuery &label) {
+        const auto gain = [&](i64 id) {
+            return std::ranges::contains(label.good, id) ? 2.0 : std::ranges::contains(label.ok, id) ? 1.0 : 0.0;
+        };
+        Score out;
+        double dcg = 0;
+        usize good_found = 0;
+        for (usize r = 0; r < matches.size() && r < k; ++r) {
+            const auto id = stickers[matches[r].index].id;
+            const double g = gain(id);
+            dcg += g / std::log2(static_cast<double>(r) + 2);
+            good_found += g == 2.0;
+            if (g > 0 && out.mrr == 0) out.mrr = 1.0 / static_cast<double>(r + 1);
+            if (r == 0) out.p1 = g > 0;
+        }
+        std::vector<double> ideal(label.good.size(), 2.0);
+        ideal.insert(ideal.end(), label.ok.size(), 1.0);
+        double idcg = 0;
+        for (usize r = 0; r < ideal.size() && r < k; ++r) idcg += ideal[r] / std::log2(static_cast<double>(r) + 2);
+        out.ndcg = idcg > 0 ? dcg / idcg : 0;
+        out.recall = label.good.empty() ? 0 : static_cast<double>(good_found) / static_cast<double>(std::min(label.good.size(), k));
+        return out;
+    };
+    const bool rerank = retriever.can_rerank() && config.memory.rerank_stickers > 0;
+    Score fused_total, reranked_total;
+    usize counted = 0;
+    std::printf("%-12s %-30s %s\n", "query", "fused nDCG/recall/MRR/P@1", rerank ? "reranked nDCG/recall/MRR/P@1 (ms)" : "");
+    for (const auto &label : labels.queries) {
+        if (label.good.empty() && label.ok.empty()) continue;
+        ++counted;
+        auto started = std::chrono::steady_clock::now();
+        const auto fused =
+            score(co_await retriever.search(retrieval::k_sticker_task, label.query, stickers, {.top_k = k, .lexical = true}), label);
+        std::string line = std::format("{:<12} {:.2f}/{:.2f}/{:.2f}/{:.0f}", label.query, fused.ndcg, fused.recall, fused.mrr, fused.p1);
+        fused_total.ndcg += fused.ndcg, fused_total.recall += fused.recall, fused_total.mrr += fused.mrr, fused_total.p1 += fused.p1;
+        if (rerank) {
+            started = std::chrono::steady_clock::now();
+            auto reranked = score(co_await retriever.search(retrieval::k_sticker_task, label.query, stickers,
+                                                            {.top_k = k,
+                                                             .lexical = true,
+                                                             .rerank = config.memory.rerank_stickers,
+                                                             .rerank_task = retrieval::k_sticker_rerank_task}),
+                                  label);
+            reranked.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            line += std::format("            {:.2f}/{:.2f}/{:.2f}/{:.0f} ({:.0f})", reranked.ndcg, reranked.recall, reranked.mrr,
+                                reranked.p1, reranked.ms);
+            reranked_total.ndcg += reranked.ndcg, reranked_total.recall += reranked.recall, reranked_total.mrr += reranked.mrr,
+                reranked_total.p1 += reranked.p1, reranked_total.ms += reranked.ms;
+        }
+        std::printf("%s\n", line.c_str());
+    }
+    if (counted == 0) {
+        std::printf("no labelled queries\n");
+        co_return 1;
+    }
+    const auto n = static_cast<double>(counted);
+    std::printf("mean over %zu queries, k=%zu: fused nDCG %.3f recall %.3f MRR %.3f P@1 %.3f\n", counted, k, fused_total.ndcg / n,
+                fused_total.recall / n, fused_total.mrr / n, fused_total.p1 / n);
+    if (rerank) {
+        std::printf("reranked from %zu (pictures %s): nDCG %.3f recall %.3f MRR %.3f P@1 %.3f, %.0f ms per search\n",
+                    config.memory.rerank_stickers, config.memory.rerank_images ? "on" : "off", reranked_total.ndcg / n,
+                    reranked_total.recall / n, reranked_total.mrr / n, reranked_total.p1 / n, reranked_total.ms / n);
+    }
+    co_return 0;
+}
+
+Task<int> run_retrieval(const Config &config, std::filesystem::path database, std::vector<std::string> queries,
+                        std::optional<std::filesystem::path> labels) {
     auto store = store::Store::open(database);
     if (store.has_error()) {
         log::error("{}", store.error().message());
@@ -167,6 +265,7 @@ Task<int> run_retrieval(const Config &config, std::filesystem::path database, st
                             .texts = sticker::embedding_inputs(sticker, config.data_dir, config.memory.embed_images),
                             .lexical = sticker.tags + " " + sticker.description});
     }
+    if (labels) co_return co_await evaluate_stickers(config, retriever, stickers, *labels);
     std::vector<retrieval::Document> expressions;
     for (auto &text : learn::embedded_texts(*store)) expressions.push_back({.texts = {std::move(text)}});
     for (const auto &query : queries) {
@@ -289,6 +388,7 @@ int main(int argc, char **argv) {
     bool retrieval_check = false;
     std::vector<std::string> queries;
     std::optional<std::filesystem::path> database_path;
+    std::optional<std::filesystem::path> labels_path;
     if (argc >= 2 && std::string_view(argv[1]) == "segment") {
         // Debugging aids, one stdin line per message: jieba words of each
         // line joined by "/"; --terms: its meaningful terms; --count <n>: the
@@ -421,6 +521,8 @@ int main(int argc, char **argv) {
             queries.emplace_back(argv[++i]);
         } else if (arg == "--db" && retrieval_check && i + 1 < argc) {
             database_path = argv[++i];
+        } else if (arg == "--labels" && retrieval_check && i + 1 < argc) {
+            labels_path = argv[++i];
         } else if (arg == "--group" && learn_history && i + 1 < argc) {
             history_groups.push_back(std::atoll(argv[++i]));
         } else if (arg == "--count" && learn_history && i + 1 < argc) {
@@ -480,7 +582,7 @@ int main(int argc, char **argv) {
                                    learn_log       ? run_learn(*config, *learn_log) :
                                    learn_history   ? run_learn_history(*config, history_groups, history_count) :
                                    review          ? review_expressions(*config, apply, keep) :
-                                   retrieval_check ? run_retrieval(*config, database_path.value_or(database), queries) :
+                                   retrieval_check ? run_retrieval(*config, database_path.value_or(database), queries, labels_path) :
                                                      run_app(*config),
                                    interrupts->token());
     loop.schedule(app);
