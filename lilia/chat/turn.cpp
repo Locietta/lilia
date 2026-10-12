@@ -44,6 +44,18 @@ constexpr usize k_max_replies = 3;
 constexpr usize k_max_web_searches = 2;
 constexpr usize k_max_look_ups = 3;
 constexpr usize k_max_sticker_finds = 3;
+/// Who-talks-to-whom in the tail covers the last quarter hour.
+constexpr i64 k_interaction_seconds = 900;
+/// A round's analysis as logged in planner_turns.
+constexpr usize k_logged_analysis_bytes = 400;
+
+/// At most `limit` bytes of `text`, cut at a code point boundary.
+std::string first_bytes(std::string_view text, usize limit) {
+    if (text.size() <= limit) return std::string(text);
+    usize end = limit;
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
+    return std::string(text.substr(0, end));
+}
 
 /// A message that is a single sticker, ready to send again (复读).
 std::optional<onebot::Segment> sticker_again(const store::StoredMessage &message) {
@@ -188,12 +200,13 @@ Task<> Responder::run_turn(store::ChatKey chat) {
     const bool knows_people = memory && config.memory.facts;
     const bool has_stickers = stickers_ready(this);
     const auto rule = memory_rule(memory != nullptr, knows_people);
-    const auto prompt = fill_template(embedded(xmake::planner_md), {{"name", settings.name},
-                                                                    {"persona", persona},
-                                                                    {"handoff", handoff_rule(settings.handoff == "reference")},
-                                                                    {"memory_rule", rule},
-                                                                    {"search_rule", search_rule(config.model.web_search)},
-                                                                    {"sticker_rule", sticker_rule(has_stickers)}});
+    const auto prompt = fill_template(planner_prompt.empty() ? embedded(xmake::planner_md) : std::string_view(planner_prompt),
+                                      {{"name", settings.name},
+                                       {"persona", persona},
+                                       {"handoff", handoff_rule(settings.handoff == "reference")},
+                                       {"memory_rule", rule},
+                                       {"search_rule", search_rule(config.model.web_search)},
+                                       {"sticker_rule", sticker_rule(has_stickers)}});
     const auto tools = planner_tools({.reference_handoff = settings.handoff == "reference",
                                       .memory = memory != nullptr,
                                       .people = knows_people,
@@ -221,15 +234,64 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         const auto it = std::ranges::find(rows, message_id, &store::StoredMessage::message_id);
         return it == rows.end() ? 0 : it->row_id;
     };
+    // Whom each line is said to, from its @s, quotes and her name; computed
+    // once per row, so the rendered history stays a cacheable prefix.
+    const auto edges_of = [&](const std::vector<store::StoredMessage> &lines) {
+        const auto lookup = [&](i64 message_id) -> std::optional<store::StoredMessage> {
+            if (const auto it = std::ranges::find(lines, message_id, &store::StoredMessage::message_id); it != lines.end()) return *it;
+            auto stored = store.message(chat, message_id);
+            return stored.has_value() && *stored ? std::optional<store::StoredMessage>(**stored) : std::nullopt;
+        };
+        const auto name_of = [&](i64 user) { return person(this, chat, user); };
+        std::vector<LineEdges> out;
+        for (const auto &line : lines) {
+            auto it = state.edges.find(line.row_id);
+            if (it == state.edges.end()) {
+                it = state.edges.emplace(line.row_id, line_edges(line, self.user_id, info.self_name, settings.aliases, lookup, name_of))
+                         .first;
+            }
+            out.push_back(it->second);
+        }
+        // Rows before the window are not shown again.
+        if (!lines.empty()) std::erase_if(state.edges, [&](const auto &entry) { return entry.first < lines.front().row_id; });
+        return out;
+    };
     // Facts about the lines new to this round, not instructions: the planner decides.
-    const auto facts = [&](const std::optional<i64> &called, const std::optional<i64> &mentioned) {
+    const auto facts = [&](const std::optional<i64> &called, i64 from_row, const std::vector<LineEdges> &edges) {
         std::vector<std::string> out;
         if (chat.type != "group") return out;
-        if (const auto it = called ? std::ranges::find(rows, *called, &store::StoredMessage::message_id) : rows.end(); it != rows.end()) {
-            out.push_back(is_notice(*it) ? std::format("#{} 有人戳了戳她。", it->row_id) :
-                                           std::format("#{} 是叫她的（@ 了她或者回复了她的消息）。", it->row_id));
+        if (const auto it = called ? std::ranges::find(rows, *called, &store::StoredMessage::message_id) : rows.end();
+            it != rows.end() && is_notice(*it)) {
+            out.push_back(std::format("#{} 有人戳了戳她。", it->row_id));
         }
-        if (const i64 row = mentioned ? row_of(*mentioned) : 0) out.push_back(std::format("#{} 提到了她的名字。", row));
+        const auto join = [](const std::vector<std::string> &items) {
+            std::string joined;
+            for (const auto &item : items) joined += (joined.empty() ? "" : "、") + item;
+            return joined;
+        };
+        std::vector<std::string> to_her;
+        std::vector<std::string> named;
+        std::vector<std::string> to_all;
+        std::vector<std::pair<std::string, std::vector<std::string>>> to_others;
+        for (usize i = 0; from_row > 0 && i < rows.size() && i < edges.size(); ++i) {
+            if (rows[i].row_id < from_row || rows[i].from_self || is_notice(rows[i])) continue;
+            const auto row = std::format("#{}", rows[i].row_id);
+            if (edges[i].to_her) {
+                to_her.push_back(row);
+            } else if (edges[i].names_her) {
+                named.push_back(row);
+            }
+            if (edges[i].to_all) to_all.push_back(row);
+            for (const auto &name : edges[i].to) {
+                auto it = std::ranges::find(to_others, name, &std::pair<std::string, std::vector<std::string>>::first);
+                if (it == to_others.end()) it = to_others.insert(to_others.end(), {name, {}});
+                it->second.push_back(row);
+            }
+        }
+        if (!to_her.empty()) out.push_back(std::format("新消息里 {} 是对她说的（@ 了她或者引用了她的话）。", join(to_her)));
+        if (!named.empty()) out.push_back(std::format("{} 提到了她的名字。", join(named)));
+        for (const auto &[name, lines] : to_others) out.push_back(std::format("{} 是对{}说的（@ 或引用）。", join(lines), name));
+        if (!to_all.empty()) out.push_back(std::format("{} @ 了全体成员。", join(to_all)));
         // QQ's 复读: what people are doing, for the planner to join or not.
         if (const auto chain = repeat_chain(rows); chain && chain->people >= 2)
             out.push_back(std::format("最后 {} 个人在复读「{}」。", chain->people, chain->text));
@@ -273,8 +335,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             log::info("{}: {} was recalled; not answering it", describe(chat), plan.target);
             co_return Delivered{.refused = "那条消息已经被撤回了，没有回。"};
         }
-        log::info("{} replies to {} ({}, quote {}): {}", describe(chat), plan.target, style_name(plan.style), plan.quote,
-                  plan.intent.empty() ? plan.brief : plan.intent);
+        log::info("{} replies to {} ({}, to her {}, quote {}): {}", describe(chat), plan.target, style_name(plan.style),
+                  plan.to_her.empty() ? "?" : plan.to_her, plan.quote, plan.intent.empty() ? plan.brief : plan.intent);
         co_return co_await deliver(this, chat, plan, rows, *target, info, now(), remembered, online, notes.self_notes, notes.presence);
     };
 
@@ -300,10 +362,13 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                 }
             }
         }
-        tail.facts = facts(addressed, named);
+        const auto edges = edges_of(rows);
+        tail.facts = facts(addressed, tail.first_new_row, edges);
         tail.now = now();
+        if (chat.type == "group") tail.interactions = interaction_summary(rows, edges, tail.now, k_interaction_seconds);
         const i64 shown = rows.back().row_id;
-        const auto planned = co_await call_planner(this, "planner", chat, render_session(prompt, info, rows, state.records, tail), tools);
+        const auto planned =
+            co_await call_planner(this, "planner", chat, render_session(prompt, info, rows, state.records, tail, edges), tools);
         if (!planned) break;
         seen_row = shown;
         addressed.reset();
@@ -320,6 +385,27 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             }
             return std::string();
         };
+        // Every round goes on record (planner_turns): what it saw and did.
+        i64 turn_id = 0;
+        {
+            const auto early = parse_plan(*planned, rows);
+            auto what = argument("feeling");
+            if (what.empty()) what = argument("query");
+            if (what.empty()) what = argument("sticker");
+            auto logged = store.add_planner_turn({.time = now(),
+                                                  .chat = chat,
+                                                  .cycle = cycle,
+                                                  .round = static_cast<i64>(round),
+                                                  .first_new_row = tail.first_new_row,
+                                                  .shown_row = shown,
+                                                  .tool = tool,
+                                                  .argument = std::move(what),
+                                                  .target_message_id = early.target,
+                                                  .to_her = early.to_her,
+                                                  .analysis = first_bytes(analysis, k_logged_analysis_bytes),
+                                                  .reason = early.reason});
+            if (logged.has_value()) turn_id = *logged;
+        }
         // The round stays in the history with its result.
         const auto keep = [&](std::string receipt) {
             PlannerRecord record{.after_row = shown, .cycle = cycle, .output = *planned};
@@ -514,6 +600,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             break;
         }
         ++replies;
+        if (turn_id > 0) {
+            std::string ids;
+            for (const auto id : delivered.message_ids) ids += (ids.empty() ? "" : ",") + std::to_string(id);
+            std::ignore = store.set_planner_turn_sent(turn_id, ids);
+        }
         std::string receipt = std::format("她回复了 #{}，说的话在上面的聊天记录里。", row_of(plan.target));
         keep(std::move(receipt));
         if (replies >= k_max_replies) {

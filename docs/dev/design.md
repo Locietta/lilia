@@ -39,11 +39,17 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
   - The planner (`prompts/planner.md`, `planner_model`, thinking off) keeps
     one history per chat, as MaiBot's does (`chat/session.*`, 2026-10-11).
     - It is rendered each round from the stored lines after the window's
-      anchor (`#<row id> [HH:MM] name(qq): text`) with the planner's own
-      rounds among them: its analysis, its tool call and the result. New lines
-      simply follow. Between trims it only grows, so it is a cached prefix.
+      anchor (`#<row id> [HH:MM] name(qq)→addressee: text`) with the planner's
+      own rounds among them: its analysis, its tool call and the result. New
+      lines simply follow. Between trims it only grows, so it is a cached prefix.
+    - Who a line is said to (`chat/addressee`, 2026-10-12): `→她` / `→小明` /
+      `→全体` from its @s and quotes, quotes as `[回复 #row 小明: …]` (hers
+      restored from her stored segments), computed once per row. An @ without a
+      name is named when stored. LLMs find the addressee of a group-chat line
+      far better with this structure than from text (Tan et al. 2023; Penzo et
+      al. 2024): in a four-person group, friends say 你 to each other.
     - Each round it writes a short analysis, then calls one tool:
-      `reply(target, quote, style, intent)`, `find_sticker(feeling)`,
+      `reply(target, to_her, quote, style, intent)`, `find_sticker(feeling)`,
       `send_sticker(sticker)`, `repeat` (text or a sticker),
       `wait(seconds)`, `poke(target)`, `search_history(query)`,
       `look_up_person(target)` (the facts she noted about whoever wrote it),
@@ -52,10 +58,19 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       her bubbles show up as her own lines. Side actions are its calls too:
       it is told that people are repeating a line or that someone poked her,
       and decides whether to join or poke back.
-    - Per round only a tail changes: the first new line, facts ("#n 是叫她
-      的"), presence, self notes, slang (MaiBot's matcher, first sentence of
-      each meaning), recall, the time. What she knows about people comes on
-      request, through `look_up_person`.
+    - Per round only a tail changes: the first new line, facts about the new
+      lines ("新消息里 #n 是对她说的", "#m 是对小明说的", a poke, her name),
+      who has talked to whom in the last 15 minutes and a run between two
+      people ("阿明和小红在一来一回地聊"), presence, self notes, slang (MaiBot's
+      matcher, first sentence of each meaning), recall, the time. What she
+      knows about people comes on request, through `look_up_person`.
+    - `to_her` is the planner's reading of the reply's target (called,
+      likely, unsure, no); for `no` the writer is told it is chipping in.
+      Every round is logged in `planner_turns` (tool, argument, target,
+      to_her, her messages, a short analysis), kept 180 days.
+    - `lilia replay <probes.jsonl> --probe` runs one turn per expected line
+      of a synthetic set (`tests/replay/addressee.jsonl`: quotes, @s, her
+      earlier lines) and counts intrusions, misses and to_her agreement.
     - Past twice `context_messages` / `context_bytes` the anchor moves to
       keep 1×; rounds about lines no longer shown go, older turns keep their
       calls but lose their analyses. After a restart the history is the

@@ -43,6 +43,16 @@ lighter::Task<int> run_replay(Config config, std::filesystem::path log, std::opt
                               std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt = {},
                               std::optional<std::filesystem::path> stickers = {}, std::optional<usize> continue_at = {});
 
+/// `lilia replay <log> --probe`: for every line with an `expect`, a fresh chat
+/// of its scenario's lines up to it (the last three new) and one turn, then
+/// what she did against what was expected; last the tallies: intrusions
+/// (spoke where she should not), misses, and how often the planner's to_her
+/// agrees with the expected addressee. Lines may quote (`reply_to`), @ (`at`)
+/// and be hers (`self`). `repeat`: runs per probe; `planner_prompt` replaces
+/// prompts/planner.md, for comparing prompts.
+lighter::Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona, usize repeat,
+                              std::optional<std::filesystem::path> planner_prompt = {});
+
 /// Runs the expression learner over a JSONL log (same format as replay) in
 /// batches of `learning.batch_messages` and prints what it would learn.
 lighter::Task<int> run_learn(Config config, std::filesystem::path log);

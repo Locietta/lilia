@@ -188,6 +188,21 @@ Task<> turn_worker(Responder *r, store::ChatKey chat) {
 /// its enrichment; `replies_to_self` tells whether it quotes her.
 store::StoredMessage record_event(Responder *r, const onebot::MessageEvent &message, bool &replies_to_self) {
     auto stored = to_stored(message);
+    // An @ without a name would read as a QQ number: hers shows as the
+    // "@名字" the prompts describe, others' as the name stored for them.
+    if (std::ranges::any_of(message.message, [](const onebot::Segment &segment) {
+            return segment.type == "at" && onebot::data_string(segment, "name").value_or("").empty();
+        })) {
+        auto named = message;
+        for (auto &segment : named.message) {
+            const i64 user = segment.type == "at" ? onebot::data_integer(segment, "qq").value_or(0) : 0;
+            if (user == 0 || !onebot::data_string(segment, "name").value_or("").empty()) continue;
+            auto known = user == r->self.user_id ? Result<std::string>(r->self_name(stored.chat)) : r->store.sender_name(stored.chat, user);
+            auto name = known.has_value() ? *std::move(known) : std::string();
+            if (!name.empty()) segment.data["name"] = std::move(name);
+        }
+        stored = to_stored(named);
+    }
     // A quote is part of what was said: "[回复 小明: …] 内容".
     std::string quote;
     replies_to_self = false;

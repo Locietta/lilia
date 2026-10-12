@@ -48,6 +48,7 @@ void print_usage(FILE *output) {
     std::fputs("usage: lilia [--config <path>] [--check-config]\n"
                "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
                "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>] [--continue-at <line>]\n"
+               "       lilia replay <probes.jsonl> --probe [--repeat <n>] [--planner-prompt <planner.md>] [--config <path>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia learn-history [--group <id>]... [--count <n>] [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
@@ -479,6 +480,11 @@ Task<int> run_app(const Config &config) {
         log::error("{}", store.error().message());
         co_return 1;
     }
+    // The planner's decision log keeps half a year.
+    constexpr i64 k_planner_turn_seconds = 180 * 86'400;
+    std::ignore = store->prune_planner_turns(
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count() -
+        k_planner_turn_seconds);
 
     lighter::TaskGroup tasks(lighter::EventLoop::current());
     chat::Responder responder(config, *store, make_planner(config.model), make_searcher(config.model), make_writer(config.model),
@@ -545,6 +551,9 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> writer_prompt;
     std::optional<std::filesystem::path> stickers_db;
     std::optional<usize> continue_at;
+    bool probe = false;
+    std::optional<std::filesystem::path> planner_prompt;
+    usize probe_repeat = 1;
     std::optional<std::filesystem::path> learn_log;
     bool learn_history = false;
     std::vector<i64> history_groups;
@@ -692,6 +701,12 @@ int main(int argc, char **argv) {
             writer_prompt = argv[++i];
         } else if (arg == "--stickers" && replay_log && i + 1 < argc) {
             stickers_db = argv[++i];
+        } else if (arg == "--probe" && replay_log) {
+            probe = true;
+        } else if (arg == "--planner-prompt" && replay_log && i + 1 < argc) {
+            planner_prompt = argv[++i];
+        } else if (arg == "--repeat" && replay_log && i + 1 < argc) {
+            probe_repeat = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else if (arg == "--continue-at" && replay_log && i + 1 < argc) {
             continue_at = static_cast<usize>(std::max(0, std::atoi(argv[++i])));
         } else if (arg == "--query" && retrieval_check && i + 1 < argc) {
@@ -770,15 +785,16 @@ int main(int argc, char **argv) {
         log::error("cannot watch process signals: {}", interrupts.error().message());
         return 1;
     }
-    auto app = lighter::with_token(replay_log ?
-                                       run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at) :
-                                   learn_log       ? run_learn(*config, *learn_log) :
-                                   learn_history   ? run_learn_history(*config, history_groups, history_count) :
-                                   review          ? review_expressions(*config, apply, keep) :
-                                   retrieval_check ? run_retrieval(*config, database_path.value_or(database), queries, labels_path) :
-                                   sticker_tool    ? run_stickers(*config, database_path, stickers) :
-                                                     run_app(*config),
-                                   interrupts->token());
+    auto app = lighter::with_token(
+        replay_log && probe ? run_probes(*config, *replay_log, persona_path, probe_repeat, planner_prompt) :
+        replay_log          ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at) :
+        learn_log           ? run_learn(*config, *learn_log) :
+        learn_history       ? run_learn_history(*config, history_groups, history_count) :
+        review              ? review_expressions(*config, apply, keep) :
+        retrieval_check     ? run_retrieval(*config, database_path.value_or(database), queries, labels_path) :
+        sticker_tool        ? run_stickers(*config, database_path, stickers) :
+                              run_app(*config),
+        interrupts->token());
     loop.schedule(app);
     loop.run();
 

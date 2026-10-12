@@ -139,6 +139,27 @@ struct StickerEvidence {
     i64 time = 0;
 };
 
+/// One planner round: what it saw and did. `to_her` is its reading of the
+/// reply's target; `sent_message_ids` (comma-separated) what her reply sent;
+/// `hint` what the addressee prior said (feedback/).
+struct PlannerTurn {
+    i64 id = 0;
+    i64 time = 0;
+    ChatKey chat;
+    u64 cycle = 0;
+    i64 round = 0;
+    i64 first_new_row = 0;
+    i64 shown_row = 0;
+    std::string tool;
+    std::string argument; ///< feeling, query or sticker
+    i64 target_message_id = 0;
+    std::string to_her;
+    std::string sent_message_ids;
+    std::string analysis;
+    std::string reason;
+    std::string hint;
+};
+
 /// A stable fact about a person, quoted from their own message. `fact` is
 /// written about "TA".
 struct PersonFact {
@@ -251,6 +272,13 @@ struct Store {
     Result<std::string> sender_name(const ChatKey &chat, i64 user_id);
 
     Result<void> add_llm_call(const LlmCall &call);
+
+    Result<i64> add_planner_turn(const PlannerTurn &turn);
+    Result<void> set_planner_turn_sent(i64 id, std::string_view message_ids);
+    /// A chat's planner rounds since `since`, oldest first.
+    Result<std::vector<PlannerTurn>> planner_turns(const ChatKey &chat, i64 since);
+    /// Forgets rounds older than `before`; returns how many went.
+    Result<i64> prune_planner_turns(i64 before);
 
     /// Input plus output tokens of the calls at or after `since` (unix
     /// seconds): all of them, those made for chats (group and private), or

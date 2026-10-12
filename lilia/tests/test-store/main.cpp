@@ -146,7 +146,7 @@ PRAGMA user_version = 11;
             require(statement.has_value() && *statement->step(), "query");
             return statement->column_int(0);
         };
-        require(count("PRAGMA user_version") == 14, "now schema 14");
+        require(count("PRAGMA user_version") == 15, "now schema 15");
         auto sticker = db->sticker_by_hash("s");
         require(sticker.has_value() && *sticker && (*sticker)->modified_by == "AI" && (*sticker)->tags == "无语" &&
                     (*sticker)->usage.empty() && (*sticker)->usage_count == 0 && (*sticker)->tags_by == "VISION",

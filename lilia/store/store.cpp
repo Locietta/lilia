@@ -16,8 +16,8 @@ namespace {
 // (rebuilt), expression_reviews, jargon. 12: embeddings in their own table
 // (keyed by profile and text hash), memory_chunks.search_text. 13:
 // stickers.modified_by. 14: sticker usage (stickers.usage and its counts,
-// sticker_evidence).
-constexpr int k_schema_version = 14;
+// sticker_evidence). 15: planner_turns.
+constexpr int k_schema_version = 15;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -221,6 +221,26 @@ CREATE TABLE IF NOT EXISTS sticker_evidence (
     time INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sticker_evidence_by_sticker ON sticker_evidence (sticker_id, time);
+
+CREATE TABLE IF NOT EXISTS planner_turns (
+    id INTEGER PRIMARY KEY,
+    time INTEGER NOT NULL,
+    chat_type TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    round INTEGER NOT NULL,
+    first_new_row INTEGER NOT NULL,
+    shown_row INTEGER NOT NULL,
+    tool TEXT NOT NULL,
+    argument TEXT NOT NULL DEFAULT '',
+    target_message_id INTEGER NOT NULL DEFAULT 0,
+    to_her TEXT NOT NULL DEFAULT '',
+    sent_message_ids TEXT NOT NULL DEFAULT '',
+    analysis TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    hint TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS planner_turns_by_chat ON planner_turns (chat_type, chat_id, time);
 
 CREATE TABLE IF NOT EXISTS embeddings (
     profile TEXT NOT NULL,
@@ -937,6 +957,78 @@ Result<std::string> Store::sender_name(const ChatKey &chat, i64 user_id) {
     auto row = statement->step();
     if (row.has_error()) return lighter::outcome_error(std::move(row).error());
     return *row ? statement->column_text(0) : std::string();
+}
+
+Result<i64> Store::add_planner_turn(const PlannerTurn &turn) {
+    auto statement = database.prepare(
+        "INSERT INTO planner_turns (time, chat_type, chat_id, cycle, round, first_new_row, shown_row, tool, argument, target_message_id, "
+        "to_her, sent_message_ids, analysis, reason, hint) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, turn.time);
+    statement->bind(2, turn.chat.type);
+    statement->bind(3, turn.chat.id);
+    statement->bind(4, static_cast<i64>(turn.cycle));
+    statement->bind(5, turn.round);
+    statement->bind(6, turn.first_new_row);
+    statement->bind(7, turn.shown_row);
+    statement->bind(8, turn.tool);
+    statement->bind(9, turn.argument);
+    statement->bind(10, turn.target_message_id);
+    statement->bind(11, turn.to_her);
+    statement->bind(12, turn.sent_message_ids);
+    statement->bind(13, turn.analysis);
+    statement->bind(14, turn.reason);
+    statement->bind(15, turn.hint);
+    if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
+    return sqlite3_last_insert_rowid(database.value);
+}
+
+Result<void> Store::set_planner_turn_sent(i64 id, std::string_view message_ids) {
+    auto statement = database.prepare("UPDATE planner_turns SET sent_message_ids = ?2 WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, message_ids);
+    return statement->run();
+}
+
+Result<std::vector<PlannerTurn>> Store::planner_turns(const ChatKey &chat, i64 since) {
+    auto statement = database.prepare("SELECT id, time, cycle, round, first_new_row, shown_row, tool, argument, target_message_id, to_her, "
+                                      "sent_message_ids, analysis, reason, hint FROM planner_turns WHERE chat_type = ?1 AND chat_id = ?2 "
+                                      "AND time >= ?3 ORDER BY id");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, chat.type);
+    statement->bind(2, chat.id);
+    statement->bind(3, since);
+    std::vector<PlannerTurn> out;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        out.push_back({.id = statement->column_int(0),
+                       .time = statement->column_int(1),
+                       .chat = chat,
+                       .cycle = static_cast<u64>(statement->column_int(2)),
+                       .round = statement->column_int(3),
+                       .first_new_row = statement->column_int(4),
+                       .shown_row = statement->column_int(5),
+                       .tool = statement->column_text(6),
+                       .argument = statement->column_text(7),
+                       .target_message_id = statement->column_int(8),
+                       .to_her = statement->column_text(9),
+                       .sent_message_ids = statement->column_text(10),
+                       .analysis = statement->column_text(11),
+                       .reason = statement->column_text(12),
+                       .hint = statement->column_text(13)});
+    }
+    return out;
+}
+
+Result<i64> Store::prune_planner_turns(i64 before) {
+    auto statement = database.prepare("DELETE FROM planner_turns WHERE time < ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, before);
+    if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
+    return static_cast<i64>(sqlite3_changes(database.value));
 }
 
 Result<void> Store::add_llm_call(const LlmCall &call) {

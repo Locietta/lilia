@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include <lilia/chat/addressee.h>
 #include <lilia/chat/context.h>
 #include <lilia/provider/common.h>
 #include <lilia/provider/history.h>
@@ -34,7 +35,8 @@ struct PlannerRecord {
 /// notes, facts about the new messages, the time.
 struct PlannerTail {
     i64 first_new_row = 0;          ///< 0: nothing new since it last looked
-    std::vector<std::string> facts; ///< "#18345 @ 了她" and the like
+    std::vector<std::string> facts; ///< "新消息里 #18345 是对她说的" and the like
+    std::string interactions;       ///< who has been talking to whom (interaction_summary)
     std::string presence;           ///< just woke up, was busy, back online
     std::string self_notes;         ///< what she said about herself before
     std::string jargon;             ///< slang in the recent lines
@@ -43,16 +45,19 @@ struct PlannerTail {
     i32 utc_offset_minutes = 480;
 };
 
-/// "#18345 [21:05] 小明(20001): 内容": a line of the planner's history; the
-/// number is the row id, stable for as long as the line is shown.
-std::string session_line(const store::StoredMessage &message, i32 utc_offset_minutes);
+/// "#18345 [21:05] 小明(20001)→小红: [回复 #18340 小红: …] 内容": a line of the
+/// planner's history, with whom it is explicitly said to (`edges`, when
+/// known). The number is the row id, stable for as long as the line is shown.
+std::string session_line(const store::StoredMessage &message, i32 utc_offset_minutes, const LineEdges *edges = nullptr);
 
 /// The planner request: the system prompt, then `rows` and `records` merged
 /// by row (a record closes the lines before it; its results open the next
 /// user message, followed by the lines that came after), the last line ending
-/// a cached prefix, then `tail` as a final part.
+/// a cached prefix, then `tail` as a final part. `edges` are the rows'
+/// (aligned with them; empty: none shown).
 provider::History render_session(std::string_view prompt, const ChatInfo &info, const std::vector<store::StoredMessage> &rows,
-                                 const std::deque<PlannerRecord> &records, const PlannerTail &tail);
+                                 const std::deque<PlannerRecord> &records, const PlannerTail &tail,
+                                 const std::vector<LineEdges> &edges = {});
 
 /// After the window's anchor moved to `anchor_row`: records about lines no
 /// longer shown go, and all but the newest `keep_cycles` turns lose their

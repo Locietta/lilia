@@ -1,0 +1,66 @@
+{"scenario": "dyad-1", "t": 0, "uid": 2001, "name": "阿明", "text": "周六去不去漫展"}
+{"scenario": "dyad-1", "t": 20, "uid": 2002, "name": "小红", "text": "去啊 你几点出发"}
+{"scenario": "dyad-1", "t": 40, "uid": 2001, "name": "阿明", "text": "十点吧 你呢"}
+{"scenario": "dyad-1", "t": 60, "uid": 2002, "name": "小红", "text": "我可能晚点 你等我一下", "expect": {"to_her": "other", "speak": false, "note": "两人之间的你"}}
+{"scenario": "dyad-2", "t": 0, "uid": 2003, "name": "老王", "text": "你那个显卡到了没"}
+{"scenario": "dyad-2", "t": 15, "uid": 2004, "name": "阿紫", "text": "到了 今天装"}
+{"scenario": "dyad-2", "t": 30, "uid": 2003, "name": "老王", "text": "你电源够吗", "expect": {"to_her": "other", "speak": false}}
+{"scenario": "after-her-1", "t": 0, "uid": 2001, "name": "阿明", "text": "有人玩原神吗"}
+{"scenario": "after-her-1", "t": 20, "self": true, "text": "我玩 最近在肝新地图"}
+{"scenario": "after-her-1", "t": 40, "uid": 2001, "name": "阿明", "text": "你几级了", "expect": {"to_her": "her", "speak": true, "note": "紧接她的话"}}
+{"scenario": "after-her-2", "t": 0, "uid": 2002, "name": "小红", "text": "推荐个番"}
+{"scenario": "after-her-2", "t": 20, "self": true, "text": "可以看看葬送的芙莉莲"}
+{"scenario": "after-her-2", "t": 45, "uid": 2002, "name": "小红", "text": "你觉得好看在哪", "expect": {"to_her": "her", "speak": true}}
+{"scenario": "quote-other-1", "t": 0, "uid": 2001, "name": "阿明", "text": "这游戏平衡做得一般", "id": "a1"}
+{"scenario": "quote-other-1", "t": 20, "self": true, "text": "我觉得还行"}
+{"scenario": "quote-other-1", "t": 40, "uid": 2002, "name": "小红", "text": "主要是后期数值膨胀", "reply_to": "a1", "id": "b1"}
+{"scenario": "quote-other-1", "t": 60, "uid": 2001, "name": "阿明", "text": "你说得对", "reply_to": "b1", "expect": {"to_her": "other", "speak": false, "note": "引用了别人"}}
+{"scenario": "quote-other-2", "t": 0, "uid": 2003, "name": "老王", "text": "明天下雨吗"}
+{"scenario": "quote-other-2", "t": 20, "uid": 2004, "name": "阿紫", "text": "好像有雨", "id": "z1"}
+{"scenario": "quote-other-2", "t": 40, "uid": 2003, "name": "老王", "text": "你带伞了吗", "reply_to": "z1", "expect": {"to_her": "other", "speak": false}}
+{"scenario": "quote-her-1", "t": 0, "self": true, "text": "我今天吃了火锅", "id": "h1"}
+{"scenario": "quote-her-1", "t": 30, "uid": 2001, "name": "阿明", "text": "哪家 好吃吗", "reply_to": "h1", "expect": {"to_her": "her", "speak": true, "note": "引用了她"}}
+{"scenario": "quote-her-2", "t": 0, "self": true, "text": "这周末打算补番", "id": "h2"}
+{"scenario": "quote-her-2", "t": 30, "uid": 2002, "name": "小红", "text": "你补哪部", "reply_to": "h2", "expect": {"to_her": "her", "speak": true}}
+{"scenario": "at-other-1", "t": 0, "uid": 2001, "name": "阿明", "text": "你看这个 笑死", "at": ["小红"], "expect": {"to_her": "other", "speak": false, "note": "@ 了别人"}}
+{"scenario": "at-other-2", "t": 0, "self": true, "text": "今天好困"}
+{"scenario": "at-other-2", "t": 30, "uid": 2003, "name": "老王", "text": "你昨天说的那个店在哪", "at": ["阿紫"], "expect": {"to_her": "other", "speak": false}}
+{"scenario": "group-1", "t": 0, "uid": 2002, "name": "小红", "text": "你们谁周六有空", "expect": {"to_her": "group", "note": "问大家，说不说都行"}}
+{"scenario": "group-2", "t": 0, "uid": 2001, "name": "阿明", "text": "你们有人用过这个键盘吗", "expect": {"to_her": "group"}}
+{"scenario": "name-1", "t": 0, "uid": 2001, "name": "阿明", "text": "这个结局我有点没看懂"}
+{"scenario": "name-1", "t": 20, "uid": 2002, "name": "小红", "text": "我也是"}
+{"scenario": "name-1", "t": 40, "uid": 2001, "name": "阿明", "text": "莉莉娅你觉得呢", "expect": {"to_her": "her", "speak": true, "note": "叫她名字"}}
+{"scenario": "name-2", "t": 0, "uid": 2002, "name": "小红", "text": "莉莉娅 你会做饭吗", "expect": {"to_her": "her", "speak": true}}
+{"scenario": "mention-1", "t": 0, "uid": 2001, "name": "阿明", "text": "最近在补番"}
+{"scenario": "mention-1", "t": 20, "uid": 2002, "name": "小红", "text": "补的啥"}
+{"scenario": "mention-1", "t": 40, "uid": 2001, "name": "阿明", "text": "莉莉娅昨天说的那部 你看了吗", "at": ["小红"], "expect": {"to_her": "other", "note": "提到她，但在问小红"}}
+{"scenario": "mention-2", "t": 0, "uid": 2003, "name": "老王", "text": "那事咋办啊"}
+{"scenario": "mention-2", "t": 20, "uid": 2002, "name": "小红", "text": "我跟莉莉娅说过了 你别担心", "expect": {"to_her": "other", "speak": false}}
+{"scenario": "old-partner-1", "t": 0, "uid": 2001, "name": "阿明", "text": "莉莉娅 推荐个耳机"}
+{"scenario": "old-partner-1", "t": 20, "self": true, "text": "预算多少"}
+{"scenario": "old-partner-1", "t": 40, "uid": 2002, "name": "小红", "text": "我也想换耳机"}
+{"scenario": "old-partner-1", "t": 55, "uid": 2003, "name": "老王", "text": "小红你预算多少"}
+{"scenario": "old-partner-1", "t": 70, "uid": 2001, "name": "阿明", "text": "那你呢", "expect": {"to_her": "unsure", "note": "中间别人插了话"}}
+{"scenario": "old-partner-2", "t": 0, "uid": 2004, "name": "阿紫", "text": "莉莉娅在吗"}
+{"scenario": "old-partner-2", "t": 15, "self": true, "text": "在"}
+{"scenario": "old-partner-2", "t": 30, "uid": 2003, "name": "老王", "text": "阿紫你作业写完没"}
+{"scenario": "old-partner-2", "t": 45, "uid": 2004, "name": "阿紫", "text": "还没 你呢", "expect": {"to_her": "other", "speak": false, "note": "在回老王"}}
+{"scenario": "open-1", "t": 0, "uid": 2003, "name": "老王", "text": "有人知道这个报错啥意思吗 ModuleNotFoundError", "expect": {"to_her": "group"}}
+{"scenario": "open-2", "t": 0, "uid": 2004, "name": "阿紫", "text": "谁知道附近有啥好吃的", "expect": {"to_her": "group"}}
+{"scenario": "banter-1", "t": 0, "uid": 2001, "name": "阿明", "text": "你又迟到"}
+{"scenario": "banter-1", "t": 10, "uid": 2002, "name": "小红", "text": "你管我"}
+{"scenario": "banter-1", "t": 20, "uid": 2003, "name": "老王", "text": "你俩别吵"}
+{"scenario": "banter-1", "t": 30, "uid": 2004, "name": "阿紫", "text": "你们好吵"}
+{"scenario": "banter-1", "t": 40, "uid": 2001, "name": "阿明", "text": "你才吵", "expect": {"to_her": "other", "speak": false, "note": "四个人互相说你"}}
+{"scenario": "banter-2", "t": 0, "uid": 2002, "name": "小红", "text": "你这操作太菜了"}
+{"scenario": "banter-2", "t": 10, "uid": 2003, "name": "老王", "text": "你行你上"}
+{"scenario": "banter-2", "t": 20, "uid": 2001, "name": "阿明", "text": "你们打得都一般"}
+{"scenario": "banter-2", "t": 30, "uid": 2002, "name": "小红", "text": "你别说话", "expect": {"to_her": "other", "speak": false}}
+{"scenario": "reaction-1", "t": 0, "uid": 2001, "name": "阿明", "text": "今天好热"}
+{"scenario": "reaction-1", "t": 20, "self": true, "text": "是啊 空调都顶不住了"}
+{"scenario": "reaction-1", "t": 40, "uid": 2001, "name": "阿明", "text": "草", "expect": {"to_her": "her", "speak": false, "note": "只是个反应"}}
+{"scenario": "reaction-2", "t": 0, "uid": 2002, "name": "小红", "text": "这图好好笑"}
+{"scenario": "reaction-2", "t": 20, "self": true, "text": "哈哈哈 猫猫好可爱"}
+{"scenario": "reaction-2", "t": 40, "uid": 2002, "name": "小红", "text": "确实", "expect": {"to_her": "her", "speak": false}}
+{"scenario": "at-her-1", "t": 0, "uid": 2004, "name": "阿紫", "text": "你在干嘛", "at": ["她"], "expect": {"to_her": "her", "speak": true, "note": "@ 了她"}}
+{"scenario": "at-her-2", "t": 0, "uid": 2003, "name": "老王", "text": "你帮我看看这个", "at": ["她"], "expect": {"to_her": "her", "speak": true}}

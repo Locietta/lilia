@@ -30,9 +30,13 @@ std::string offset_label(i32 utc_offset_minutes) {
     return std::format("UTC{}{}:{:02}", sign, magnitude / 60, magnitude % 60);
 }
 
+} // namespace
+
 std::string display_name(const store::StoredMessage &message) {
     return message.sender_name.empty() ? std::to_string(message.sender_id) : message.sender_name;
 }
+
+namespace {
 
 /// Newest-first walk that keeps whole lines within `budget` bytes, returned
 /// oldest first.
@@ -273,6 +277,7 @@ provider::History build_writer_history(const WriterInput &input) {
                             resolve_rows(input.plan.analysis, input.recent));
     }
     note += std::format("\n【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
+    if (input.plan.to_her == "no") note += "（这条不是对你说的，你是插一句：别装作对方在问你）";
     if (!input.plan.brief.empty()) {
         note += std::format("】\n【回复信息参考：{}\n可以参考，但视情况而定，不用完全遵守】", resolve_rows(input.plan.brief, input.recent));
     } else {

@@ -282,7 +282,9 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     for (usize i = 0; i < sent; ++i) said += (said.empty() ? "" : " ") + bubbles[i];
     state.replied.emplace_back(plan.target, said);
     if (state.replied.size() > k_replied_memory) state.replied.pop_front();
-    co_return Delivered{.sent = true, .said = std::move(said)};
+    std::vector<i64> ids;
+    for (const auto &message : own) ids.push_back(message.message_id);
+    co_return Delivered{.sent = true, .said = std::move(said), .message_ids = std::move(ids)};
 }
 
 } // namespace detail

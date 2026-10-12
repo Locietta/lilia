@@ -127,6 +127,8 @@ struct Responder {
         /// The log turns show starts after this row (messages.id); nullopt:
         /// not set yet. See log_window().
         std::optional<i64> log_anchor;
+        /// Whom each shown row is said to, by row; a row's never change.
+        std::map<i64, LineEdges> edges;
     };
 
     /// The chat log a turn shows, oldest first: everything after the chat's
@@ -157,6 +159,8 @@ struct Responder {
     std::string persona;
     /// The writer's rules (writer.md); replays may swap in a variant.
     std::string writer_rules;
+    /// Replaces prompts/planner.md when set (replays comparing prompts).
+    std::string planner_prompt;
     Spawn spawn;
     /// Archives media of allowed chats; null when archiving is disabled.
     archive::Archiver *archiver = nullptr;

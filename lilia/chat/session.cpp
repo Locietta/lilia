@@ -57,6 +57,7 @@ std::string render_tail(const PlannerTail &tail, const ChatInfo &info) {
     std::string text;
     if (tail.first_new_row > 0) text += std::format("#{} 起是新消息。\n", tail.first_new_row);
     for (const auto &fact : tail.facts) text += fact + "\n";
+    if (!tail.interactions.empty()) text += tail.interactions + "\n";
     if (!tail.presence.empty()) text += tail.presence + "\n";
     if (!tail.self_notes.empty()) {
         text +=
@@ -71,12 +72,21 @@ std::string render_tail(const PlannerTail &tail, const ChatInfo &info) {
 
 } // namespace
 
-std::string session_line(const store::StoredMessage &message, i32 utc_offset_minutes) {
-    return std::format("#{} {}\n", message.row_id, render_line(message, utc_offset_minutes));
+std::string session_line(const store::StoredMessage &message, i32 utc_offset_minutes, const LineEdges *edges) {
+    if (!edges || is_notice(message)) return std::format("#{} {}\n", message.row_id, render_line(message, utc_offset_minutes));
+    // "[21:05] 小明(20001): " with the addressee after the speaker.
+    auto bare = message;
+    bare.text.clear();
+    auto speaker = render_line(bare, utc_offset_minutes);
+    if (speaker.ends_with(": ")) speaker.resize(speaker.size() - 2);
+    return std::format("#{} {}{}: {}\n", message.row_id, speaker, edge_label(*edges), text_with_quote(message, *edges));
 }
 
 provider::History render_session(std::string_view prompt, const ChatInfo &info, const std::vector<store::StoredMessage> &rows,
-                                 const std::deque<PlannerRecord> &records, const PlannerTail &tail) {
+                                 const std::deque<PlannerRecord> &records, const PlannerTail &tail, const std::vector<LineEdges> &edges) {
+    const auto line = [&](usize index) {
+        return session_line(rows[index], tail.utc_offset_minutes, index < edges.size() ? &edges[index] : nullptr);
+    };
     provider::History history;
     provider::append_system(history, std::string(prompt));
 
@@ -93,13 +103,13 @@ provider::History render_session(std::string_view prompt, const ChatInfo &info, 
 
     usize next = 0;
     for (const auto &record : records) {
-        while (next < rows.size() && rows[next].row_id <= record.after_row) lines += session_line(rows[next++], tail.utc_offset_minutes);
+        while (next < rows.size() && rows[next].row_id <= record.after_row) lines += line(next++);
         flush_user();
         for (const auto &item : record.output) provider::append_output_item(history, item);
         // The results first: Anthropic wants them right after the calls.
         for (const auto &outcome : record.outcomes) user.parts.push_back(outcome);
     }
-    while (next < rows.size()) lines += session_line(rows[next++], tail.utc_offset_minutes);
+    while (next < rows.size()) lines += line(next++);
     flush_lines();
     // Everything so far is the stable part; the tail changes every round.
     if (!user.parts.empty()) {
@@ -131,12 +141,13 @@ std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
         .name = "reply",
         .description = "让她说话，回应其中一条消息",
         .input_schema = {.properties = {{"target", property("string", "要回应的消息编号，例如 \"#18345\"")},
+                                        {"to_her", property("string", "那条消息是不是在对她说：called | likely | unsure | no")},
                                         {"quote", property("boolean", "是否引用那条消息")},
                                         {"style", property("string", "short | normal | long")},
                                         {reference_handoff ? "brief" : "intent",
                                          reference_handoff ? property("string", "给她的参考信息，不是台词，也不规定她怎么说") :
                                                              property("string", "一句话描述她想表达的意思，不是台词")}},
-                         .required = {"target", "style", reference_handoff ? "brief" : "intent"}},
+                         .required = {"target", "to_her", "style", reference_handoff ? "brief" : "intent"}},
     });
     if (set.stickers) {
         // Tools of their own, like MaiBot's send_emoji: buried in reply, a
@@ -252,9 +263,12 @@ Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vecto
         const auto *target = find_target(string_field(input, "target"), rows);
         if (!target) return {.reason = "invalid target " + string_field(input, "target")};
         const auto style = string_field(input, "style");
+        auto to_her = std::string(trim(string_field(input, "to_her")));
+        if (to_her != "called" && to_her != "likely" && to_her != "unsure" && to_her != "no") to_her.clear();
         return {
             .reply = true,
             .target = target->message_id,
+            .to_her = std::move(to_her),
             .quote = bool_field(input, "quote"),
             .style = style == "long"   ? ReplyStyle::LONG :
                      style == "normal" ? ReplyStyle::NORMAL :

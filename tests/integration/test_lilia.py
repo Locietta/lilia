@@ -711,7 +711,10 @@ def test_reply_and_reconnect(tmp_path):
         "the turn waits for the description and sees it"
     )
     assert "别理我" not in log
-    assert "[回复 魔王: 早] 早啊" in log, "a quote is shown with what it quotes"
+    assert "[回复 #2 魔王: 早] 早啊" in log, (
+        "a quote is shown with what it quotes, by message number"
+    )
+    assert "魔王(20002)→她: @lilia" in log, "an @ of her is marked on the line"
     assert "魔王(20002): [已撤回]" in log, "a recalled line is shown as recalled"
     assert napcat.member_requests[0]["params"] == {
         "group_id": GROUP,

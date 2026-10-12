@@ -28,6 +28,9 @@ enum struct ReplyStyle {
 struct Plan {
     bool reply = false;
     i64 target = 0; ///< message id lilia answers
+    /// Whether the target was said to her: "called" (@, quote, her name),
+    /// "likely", "unsure" or "no" (to others; she chips in); empty: not given.
+    std::string to_her;
     bool quote = false;
     ReplyStyle style = ReplyStyle::SHORT;
     std::string intent;
@@ -112,6 +115,9 @@ provider::History build_writer_history(const WriterInput &input);
 /// "[HH:MM] name(qq): text", with "(她自己)" marking lilia's own lines (the
 /// planner is told it is not her); group notices as "[HH:MM] （群通知）text".
 std::string render_line(const store::StoredMessage &message, i32 utc_offset_minutes);
+
+/// The sender's name as stored (card or nickname), else the QQ number.
+std::string display_name(const store::StoredMessage &message);
 
 /// Sender name of the group notice lines lilia stores (sender_id 0).
 inline constexpr std::string_view k_notice_sender = "群通知";

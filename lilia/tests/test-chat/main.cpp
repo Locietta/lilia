@@ -4,6 +4,7 @@
 #include <variant>
 #include <vector>
 
+#include <lilia/chat/addressee.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/chat/flow.h>
@@ -114,6 +115,73 @@ store::StoredMessage row(i64 id, i64 time, std::string name, std::string text, b
 
 const provider::TextPart &text_part(const provider::Part &part) { return std::get<provider::TextPart>(part); }
 
+void test_addressee() {
+    using provider::OutputItem;
+    const i64 t = 1'791'032'700;
+    const auto line = [&](i64 id, i64 sender, std::string name, std::string text, std::string segments, bool self = false) {
+        auto message = row(id, t + id, std::move(name), std::move(text), self);
+        message.sender_id = self ? k_self : sender;
+        message.segments_json = std::move(segments);
+        return message;
+    };
+    std::vector<store::StoredMessage> rows{
+        line(1, 20001, "小明", "打吗", R"([{"type":"text","data":{"text":"打吗"}}])"),
+        line(2, 20002, "小红", "[回复 小明: 打吗] 打", R"([{"type":"reply","data":{"id":"10"}},{"type":"text","data":{"text":"打"}}])"),
+        line(3, 20001, "小明", "@莉莉娅 你呢",
+             R"([{"type":"at","data":{"qq":"10001","name":"莉莉娅"}},{"type":"text","data":{"text":" 你呢"}}])"),
+        line(4, 0, "闭锁", "我也打", R"([{"type":"reply","data":{"id":"30"}},{"type":"text","data":{"text":"我也打"}}])", true),
+        line(5, 20002, "小红", "@老王 你来吗", R"([{"type":"at","data":{"qq":"20003"}},{"type":"text","data":{"text":" 你来吗"}}])"),
+        line(6, 20003, "老王", "@全体成员 开黑", R"([{"type":"at","data":{"qq":"all"}},{"type":"text","data":{"text":" 开黑"}}])"),
+        line(7, 20001, "小明", "莉莉娅昨天说过 https://lilia.example",
+             R"([{"type":"text","data":{"text":"莉莉娅昨天说过 https://lilia.example"}}])"),
+        line(8, 20001, "小明", "[回复 闭锁: 我也打] 好", R"([{"type":"reply","data":{"id":"40"}},{"type":"text","data":{"text":"好"}}])"),
+    };
+    const auto lookup = [&](i64 id) -> std::optional<store::StoredMessage> {
+        const auto it = std::ranges::find(rows, id, &store::StoredMessage::message_id);
+        return it == rows.end() ? std::nullopt : std::optional<store::StoredMessage>(*it);
+    };
+    const auto name_of = [](i64 user) { return user == 20003 ? std::string("老王") : std::to_string(user); };
+    std::vector<chat::LineEdges> edges;
+    for (const auto &message : rows) edges.push_back(chat::line_edges(message, k_self, "闭锁", {"莉莉娅", "lilia"}, lookup, name_of));
+    require(edges[0].to.empty() && !edges[0].to_her && chat::edge_label(edges[0]).empty(), "a plain line points at no one");
+    require(edges[1].quoted_row == 1 && edges[1].to == std::vector<std::string>{"小明"} && chat::edge_label(edges[1]) == "→小明" &&
+                chat::text_with_quote(rows[1], edges[1]) == "[回复 #1 小明: 打吗] 打",
+            "a quote points at whoever said it, and shows its row");
+    require(edges[2].to_her && chat::edge_label(edges[2]) == "→她", "an @ of her");
+    require(edges[3].quoted_row == 3 && edges[3].to == std::vector<std::string>{"小明"} && !edges[3].to_her &&
+                chat::text_with_quote(rows[3], edges[3]) == "[回复 #3 小明: @莉莉娅 你呢] 我也打",
+            "her own quote is restored for the planner");
+    require(edges[4].to == std::vector<std::string>{"老王"}, "an @ without a name is named");
+    require(edges[5].to_all && chat::edge_label(edges[5]) == "→全体", "@全体成员");
+    require(edges[6].names_her && !edges[6].to_her && edges[6].to.empty(), "her name in the text; an alias in a link does not count");
+    require(edges[7].to_her && edges[7].quoted_row == 4, "a quote of her line is to her");
+
+    const auto session = chat::session_line(rows[1], 480, &edges[1]);
+    require(session.contains("小红(20002)→小明: [回复 #1 小明: 打吗] 打\n"), "the planner line: " + session);
+    require(chat::session_line(rows[0], 480, &edges[0]) == chat::session_line(rows[0], 480), "a line without edges reads as before");
+
+    const auto summary = chat::interaction_summary(rows, edges, t + 100, 900);
+    require(summary.starts_with("最近谁在对谁说（按 @ 和引用）：小明→她 2 次（最近 #8）") &&
+                summary.contains("小红→老王 1 次（最近 #5）") && summary.contains("她→小明 1 次"),
+            "who talks to whom: " + summary);
+    std::vector<store::StoredMessage> dyad;
+    std::vector<chat::LineEdges> plain;
+    for (i64 i = 0; i < 6; ++i) {
+        dyad.push_back(line(10 + i, i % 2 == 0 ? 20001 : 20002, i % 2 == 0 ? "小明" : "小红", "嗯", ""));
+        plain.emplace_back();
+    }
+    dyad.push_back(line(16, 20003, "老王", "？", ""));
+    plain.emplace_back();
+    require(chat::interaction_summary(dyad, plain, t + 100, 900) == "小明和小红在一来一回地聊（#10–#15）。", "a run between two people");
+    require(chat::interaction_summary(dyad, plain, t + 100'000, 900).empty(), "only the recent lines");
+
+    const auto reply =
+        chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#2","to_her":"no","style":"short","intent":"插一句"})"))}, rows);
+    require(reply.reply && reply.to_her == "no", "the planner says whether the line was to her");
+    require(chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#2","to_her":"maybe","style":"short","intent":"x"})"))}, rows)
+                .to_her.empty(),
+            "an unknown reading is dropped");
+}
 void test_planner() {
     using provider::OutputItem;
     const i64 t = 1'791'032'700;
@@ -554,6 +622,7 @@ int main() {
     try {
         test_triggers();
         test_planner();
+        test_addressee();
         test_writer();
         test_flow();
         test_bubbles();

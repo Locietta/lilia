@@ -35,11 +35,25 @@ constexpr i64 k_replay_self = 10'001;
 /// Expressions per review call in `lilia expressions --review`.
 constexpr usize k_review_batch = 20;
 
+/// What a probe line should get: whom it is said to ("her", "other", "group"
+/// or "unsure") and whether she should speak (unset: either is fine).
+struct ReplayExpect {
+    std::string to_her;
+    std::optional<bool> speak;
+    std::string note;
+};
+
 struct ReplayLine {
     i64 t = 0;
     i64 uid = 0;
     std::string name;
     std::string text;
+    std::string id;              ///< a label other lines can quote
+    std::string reply_to;        ///< the label (or "#n", 1-based) it quotes
+    std::vector<std::string> at; ///< names it @s; "她" is her
+    bool self = false;           ///< her own earlier line, stored as hers
+    std::string scenario;        ///< probes see only their scenario's lines
+    std::optional<ReplayExpect> expect;
 };
 
 void print(std::string_view line) {
@@ -61,6 +75,27 @@ onebot::Message to_segments(std::string_view text, const std::vector<std::string
         }
     }
     if (!text.empty()) message.push_back(onebot::text_segment(std::string(text)));
+    return message;
+}
+
+/// A replay line's segments: its quote and @s, then its text (to_segments).
+onebot::Message line_segments(const ReplayLine &line, const std::vector<std::string> &names, const std::map<std::string, i64> &ids,
+                              const std::map<std::string, i64> &uids) {
+    onebot::Message message;
+    if (const auto quoted = ids.find(line.reply_to); !line.reply_to.empty() && quoted != ids.end()) {
+        message.push_back(onebot::reply_segment(quoted->second));
+    }
+    for (const auto &name : line.at) {
+        if (name == "她") {
+            message.push_back(onebot::at_segment(k_replay_self));
+            continue;
+        }
+        const auto uid = uids.find(name);
+        auto mention = onebot::at_segment(uid == uids.end() ? 0 : uid->second);
+        mention.data["name"] = name;
+        message.push_back(std::move(mention));
+    }
+    for (auto &segment : to_segments(line.text, names)) message.push_back(std::move(segment));
     return message;
 }
 
@@ -311,25 +346,46 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     names.push_back(config.chat.name);
     i64 message_id = 0;
     usize next_line = 0;
-    // One line of the log arrives: printed, then ingested. Returns the chat
-    // when the planner should look.
-    const auto feed = [&](const auto &line) {
+    std::map<std::string, i64> ids; // quotable labels: "#n" and each line's id
+    usize fed = 0;
+    std::map<std::string, i64> uids;
+    for (const auto &line : lines) {
+        if (!line.self) uids.emplace(line.name, line.uid);
+    }
+    // One line of the log arrives: printed, then ingested (hers are stored as
+    // said before). Returns the chat when the planner should look.
+    const auto feed = [&](const ReplayLine &line) -> std::optional<store::ChatKey> {
         sim = std::max(sim, line.t);
+        const i64 id = ++message_id;
+        auto message = line_segments(line, names, ids, uids);
+        ids["#" + std::to_string(++fed)] = id;
+        if (!line.id.empty()) ids[line.id] = id;
+        if (line.self) {
+            print(std::format("[{}]   {}: {}", clock(line.t), config.chat.name, line.text));
+            std::ignore = store->add_message({.chat = {.type = "group", .id = k_replay_group},
+                                              .message_id = id,
+                                              .sender_id = k_replay_self,
+                                              .sender_name = config.chat.name,
+                                              .time = base + sim,
+                                              .segments_json = glz::write_json(message).value_or("[]"),
+                                              .text = onebot::render_plain(message),
+                                              .from_self = true});
+            return std::nullopt;
+        }
         print(std::format("[{}] {}: {}", clock(line.t), line.name, line.text));
         const onebot::MessageEvent event{
             .time = base + sim,
             .self_id = k_replay_self,
             .message_type = "group",
-            .message_id = ++message_id,
+            .message_id = id,
             .user_id = line.uid,
             .group_id = k_replay_group,
             .group_name = "回放群",
             .sender = {.user_id = line.uid, .nickname = line.name},
-            .message = to_segments(line.text, names),
+            .message = std::move(message),
         };
         return responder.ingest(event);
-    };
-    // A planner wait: the clock moves on, and the lines of that time arrive.
+    }; // A planner wait: the clock moves on, and the lines of that time arrive.
     responder.pause = [&](const store::ChatKey &, i64 seconds) -> Task<> {
         sim += seconds;
         while (next_line < lines.size() && lines[next_line].t <= sim) std::ignore = feed(lines[next_line++]);
@@ -399,6 +455,151 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     co_return 0;
 }
 
+Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona, usize repeat,
+                     std::optional<std::filesystem::path> planner_prompt) {
+    auto parsed = read_log(log);
+    if (!parsed) co_return 1;
+    std::string planner_text;
+    if (planner_prompt) {
+        std::ifstream input(*planner_prompt, std::ios::binary);
+        if (!input) {
+            std::fprintf(stderr, "cannot read %s\n", planner_prompt->string().c_str());
+            co_return 1;
+        }
+        planner_text.assign(std::istreambuf_iterator<char>(input), {});
+    }
+    const auto lines = *std::move(parsed);
+    config.chat.groups = {k_replay_group};
+    config.chat.private_users.clear();
+    config.chat.admins.clear();
+    std::vector<std::string> names = config.chat.aliases;
+    names.push_back(config.chat.name);
+    std::map<std::string, i64> uids;
+    for (const auto &line : lines) {
+        if (!line.self) uids.emplace(line.name, line.uid);
+    }
+    const store::ChatKey chat{.type = "group", .id = k_replay_group};
+    usize intrusions = 0;
+    usize should_be_silent = 0;
+    usize misses = 0;
+    usize should_speak = 0;
+    usize agreed = 0;
+    usize judged = 0;
+    for (usize probe = 0; probe < lines.size(); ++probe) {
+        if (!lines[probe].expect) continue;
+        const auto &expect = *lines[probe].expect;
+        std::vector<usize> scenario;
+        for (usize i = 0; i <= probe; ++i) {
+            if (lines[i].scenario == lines[probe].scenario) scenario.push_back(i);
+        }
+        for (usize run = 0; run < std::max<usize>(repeat, 1); ++run) {
+            auto store = store::Store::open_memory();
+            if (store.has_error()) co_return 1;
+            lighter::TaskGroup tasks(lighter::EventLoop::current());
+            chat::Responder responder(config, *store, make_planner(config.model), make_searcher(config.model), make_writer(config.model),
+                                      persona.value_or(std::filesystem::path(config.data_dir) / "persona.md"),
+                                      [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+            if (auto loaded = responder.reload_persona(); loaded.has_error()) {
+                std::fprintf(stderr, "%s\n", loaded.error().message().c_str());
+                co_return 1;
+            }
+            responder.writer_fallbacks = make_writer_fallbacks(config.model);
+            responder.planner_fallbacks = make_planner_fallbacks(config.model);
+            responder.planner_prompt = planner_text;
+            responder.self = {.user_id = k_replay_self, .nickname = config.chat.name};
+            responder.realtime = false;
+            const i64 base = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            i64 sim = 0;
+            responder.now = [&sim, base] { return base + sim; };
+            responder.pause = [&sim](const store::ChatKey &, i64 seconds) -> Task<> {
+                sim += seconds; // a wait reveals nothing: the probe ends at its line
+                co_return;
+            };
+            bool spoke = false;
+            std::string to_her;
+            std::string said;
+            i64 next_id = 1'000'000;
+            responder.outbox = [&](const store::ChatKey &, onebot::Message message) -> Task<std::optional<i64>> {
+                spoke = true;
+                said += (said.empty() ? "" : " / ") + onebot::render_plain(message);
+                co_return ++next_id;
+            };
+            responder.observer = [&](const store::ChatKey &, const chat::Plan &plan, const std::vector<std::string> &) {
+                if (plan.reply && to_her.empty()) to_her = plan.to_her;
+            };
+            std::map<std::string, i64> ids;
+            i64 message_id = 0;
+            usize fed = 0;
+            for (usize k = 0; k < scenario.size(); ++k) {
+                const auto &line = lines[scenario[k]];
+                // Only the last three lines are new to the turn.
+                if (k + 3 == scenario.size() || (scenario.size() < 3 && k == 0)) {
+                    auto &state = responder.chats[chat];
+                    state.flow.unseen.clear();
+                    state.flow.addressed.reset();
+                    state.flow.named.reset();
+                }
+                sim = std::max(sim, line.t);
+                const i64 id = ++message_id;
+                auto message = line_segments(line, names, ids, uids);
+                ids["#" + std::to_string(++fed)] = id;
+                if (!line.id.empty()) ids[line.id] = id;
+                if (line.self) {
+                    std::ignore = store->add_message({.chat = chat,
+                                                      .message_id = id,
+                                                      .sender_id = k_replay_self,
+                                                      .sender_name = config.chat.name,
+                                                      .time = base + sim,
+                                                      .segments_json = glz::write_json(message).value_or("[]"),
+                                                      .text = onebot::render_plain(message),
+                                                      .from_self = true});
+                    continue;
+                }
+                std::ignore = responder.ingest({.time = base + sim,
+                                                .self_id = k_replay_self,
+                                                .message_type = "group",
+                                                .message_id = id,
+                                                .user_id = line.uid,
+                                                .group_id = k_replay_group,
+                                                .group_name = "回放群",
+                                                .sender = {.user_id = line.uid, .nickname = line.name},
+                                                .message = std::move(message)});
+            }
+            if (!responder.chats[chat].flow.unseen.empty()) co_await responder.run_turn(chat);
+            co_await tasks.join();
+
+            const bool her = to_her == "called" || to_her == "likely";
+            std::string verdict;
+            if (expect.speak == false) {
+                ++should_be_silent;
+                if (spoke) {
+                    ++intrusions;
+                    verdict += " INTRUSION";
+                }
+            } else if (expect.speak == true) {
+                ++should_speak;
+                if (!spoke) {
+                    ++misses;
+                    verdict += " MISS";
+                }
+            }
+            if (spoke && !to_her.empty() && to_her != "unsure" && expect.to_her != "unsure" && !expect.to_her.empty()) {
+                ++judged;
+                if (her == (expect.to_her == "her")) {
+                    ++agreed;
+                } else {
+                    verdict += " ADDRESSEE";
+                }
+            }
+            print(std::format("PROBE {} line {}: expect {}/{}, got {}/{}{}{}", lines[probe].scenario, probe + 1, expect.to_her,
+                              expect.speak ? (*expect.speak ? "speak" : "silent") : "either", spoke ? "spoke" : "silent",
+                              to_her.empty() ? "-" : to_her, verdict, spoke ? "  「" + said + "」" : std::string()));
+        }
+    }
+    print(std::format("SUMMARY intrusions {}/{}, misses {}/{}, to_her agreement {}/{}", intrusions, should_be_silent, misses, should_speak,
+                      agreed, judged));
+    co_return 0;
+}
 Task<int> run_learn(Config config, std::filesystem::path log) {
     auto parsed = read_log(log);
     if (!parsed) co_return 1;
