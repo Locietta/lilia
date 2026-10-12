@@ -17,6 +17,7 @@
 #include <lighter/async/runtime/timeout.h>
 #include <lighter/http/bound_client.h>
 
+#include <lilia/image/frames.h>
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
@@ -58,6 +59,10 @@ constexpr usize k_max_description_code_points = 120;
 
 constexpr std::string_view k_vision_prompt =
     "用一两句中文描述这张图，像跟朋友转述一样简洁。是表情包的话说它表达的情绪或者梗；图上有文字就照写出来。不要用 Markdown，不要换行。";
+/// For a GIF, which the model sees as a grid of its frames (image/frames.h).
+constexpr std::string_view k_animation_prompt =
+    "这是一个动图，图里是从动图中按时间顺序抽出的几帧，从左到右、从上到下排列。用一两句中文描述它，像跟朋友转述一样简洁，"
+    "说清楚里面的动作或变化；是表情包的话说它表达的情绪或者梗；图上有文字就照写出来。不要用 Markdown，不要换行。";
 
 constexpr std::chrono::seconds k_vision_deadline{60};
 
@@ -218,10 +223,13 @@ Task<std::string> describe(Archiver &archiver, const store::ChatKey &chat, const
     if (media_type.empty() || bytes.size() > k_max_vision_bytes) co_return std::string();
     if (auto cached = archiver.store.media_description(sha1); cached.has_value() && !cached->empty()) co_return std::move(*cached);
 
+    // Vision models see only a GIF's first frame: show it as a grid of frames.
+    const auto grid = extension == ".gif" ? image::frame_grid(bytes) : std::nullopt;
     provider::History history;
     history.push_back({.role = provider::Role::USER,
-                       .parts = {provider::ImagePart{.media_type = std::string(media_type), .data = net::base64_encode(bytes)},
-                                 provider::TextPart{.text = std::string(k_vision_prompt)}}});
+                       .parts = {grid ? provider::ImagePart{.media_type = "image/jpeg", .data = net::base64_encode(grid->jpeg)} :
+                                        provider::ImagePart{.media_type = std::string(media_type), .data = net::base64_encode(bytes)},
+                                 provider::TextPart{.text = std::string(grid ? k_animation_prompt : k_vision_prompt)}}});
     std::string text;
     const provider::StreamCallbacks callbacks{
         .on_item_completed =

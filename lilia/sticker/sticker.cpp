@@ -18,6 +18,7 @@
 #include <lilia/archive/archiver.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
+#include <lilia/image/frames.h>
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
@@ -64,6 +65,10 @@ std::optional<std::string> line_value(std::string_view answer, std::string_view 
         return std::string(trim(line));
     }
     return std::nullopt;
+}
+
+std::string_view prompt_override_or(const std::string &override, std::string_view built_in) {
+    return override.empty() ? built_in : std::string_view(override);
 }
 
 std::string sha1_hex(std::string_view bytes) {
@@ -266,16 +271,25 @@ Task<> Collector::collect(std::string url, std::string context) {
     co_await tag(std::move(sticker), std::move(bytes), std::move(context));
 }
 
-Task<> Collector::tag(store::Sticker sticker, std::string bytes, std::string context) {
-    if (!vision || descriptions_this_hour >= config.descriptions_per_hour) co_return; // stays pending; tagged when seen again
-    ++descriptions_this_hour;
-    const auto prompt = chat::fill_template(
-        {reinterpret_cast<const char *>(xmake::sticker_md.data()), xmake::sticker_md.size()},
-        {{"context", context.empty() ? std::string() : std::format("它是在这句话之后发的：「{}」（只帮你理解用法）。", context)}});
+Task<std::optional<Tagged>> Collector::describe(const store::Sticker &sticker, const std::string &bytes, std::string context) {
+    if (!vision) co_return std::nullopt;
+    // Vision models see only a GIF's first frame: show it as a grid of frames.
+    const auto grid = frames && sticker.media_type == "image/gif" ? image::frame_grid(bytes) : std::nullopt;
+    const auto text = chat::fill_template(
+        prompt_override_or(prompt, {reinterpret_cast<const char *>(xmake::sticker_md.data()), xmake::sticker_md.size()}),
+        {{"frames", grid ?
+                        std::format("它是一个动图：这张图是从动图里按时间顺序抽出的 {} 帧，从左到右、从上到下排列，不是几张不同的表情包。",
+                                    grid->frames) :
+                        std::string()},
+         {"context", context.empty() ? std::string() : std::format("它是在这句话之后发的：「{}」（只帮你理解用法）。", context)}});
+    std::vector<provider::Part> parts;
+    if (!grid || config.frames_with_original) {
+        parts.push_back(provider::ImagePart{.media_type = sticker.media_type, .data = net::base64_encode(bytes)});
+    }
+    if (grid) parts.push_back(provider::ImagePart{.media_type = "image/jpeg", .data = net::base64_encode(grid->jpeg)});
+    parts.push_back(provider::TextPart{.text = text});
     provider::History history;
-    history.push_back({.role = provider::Role::USER,
-                       .parts = {provider::ImagePart{.media_type = sticker.media_type, .data = net::base64_encode(bytes)},
-                                 provider::TextPart{.text = prompt}}});
+    history.push_back({.role = provider::Role::USER, .parts = std::move(parts)});
     std::string answer;
     const provider::StreamCallbacks callbacks{
         .on_item_completed =
@@ -301,13 +315,22 @@ Task<> Collector::tag(store::Sticker sticker, std::string bytes, std::string con
     std::ignore = store.add_llm_call(call);
     if (completion.has_error()) {
         log::warn("sticker: tagging failed: {}", call.error);
-        co_return;
+        co_return std::nullopt;
     }
-    const auto tagged = parse_tagging(answer);
-    if (!tagged) {
-        log::warn("sticker: unexpected tagging answer: {}", answer);
-        co_return;
+    auto tagged = parse_tagging(answer);
+    if (!tagged) log::warn("sticker: unexpected tagging answer: {}", answer);
+    co_return tagged;
+}
+
+Task<> Collector::tag(store::Sticker sticker, std::string bytes, std::string context) {
+    if (!vision || descriptions_this_hour >= config.descriptions_per_hour) co_return; // stays pending; tagged when seen again
+    if (background_budget > 0) {
+        auto used = store.tokens_since(now() - 86'400, store::TokenScope::BACKGROUND);
+        if (used.has_value() && *used >= background_budget) co_return; // likewise
     }
+    ++descriptions_this_hour;
+    const auto tagged = co_await describe(sticker, bytes, std::move(context));
+    if (!tagged) co_return;
     sticker.description = tagged->description;
     sticker.tags = tagged->tags;
     sticker.status = tagged->usable ? "spare" : "rejected";

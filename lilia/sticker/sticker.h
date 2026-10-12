@@ -22,8 +22,8 @@ namespace lilia::sticker {
 
 // Sticker learning, after MaiBot's emoji system: stickers posted in any group
 // the account is in are downloaded, deduplicated by content hash and counted;
-// a vision model describes and tags each (within an hourly budget) and judges
-// whether it is fit to send. Fit stickers fill a capped pool; a popular spare
+// a vision model describes and tags each (within an hourly budget; animated
+// ones as a grid of their frames) and judges whether it is fit to send. Fit stickers fill a capped pool; a popular spare
 // takes the place of the weakest member. Other groups' text is never stored:
 // the line before a sticker only helps the tagging call, in memory.
 
@@ -81,7 +81,13 @@ struct Collector {
 
     lighter::Task<> collect(std::string url, std::string context);
 
-    /// Describes and tags `sticker`, then files it into the pool.
+    /// One vision call: the picture (an animated GIF as a grid of its frames)
+    /// and the tagging prompt; nullopt when the call fails or the answer is off
+    /// the format. Records the call.
+    lighter::Task<std::optional<Tagged>> describe(const store::Sticker &sticker, const std::string &bytes, std::string context);
+
+    /// Describes and tags `sticker` within the hourly and background budgets,
+    /// then files it into the pool.
     lighter::Task<> tag(store::Sticker sticker, std::string bytes, std::string context);
 
     /// Registers `sticker` if the pool has room; otherwise it becomes a spare
@@ -99,6 +105,12 @@ struct Collector {
     lighter::http::Client http;
     std::optional<provider::Provider> vision;
     std::string vision_model;
+    /// learning.daily_token_budget: background tokens in 24 h (0: no limit).
+    u64 background_budget = 0;
+    /// For experiments (`lilia stickers --retag`): GIFs as grids of frames,
+    /// and a tagging prompt in place of prompts/sticker.md.
+    bool frames = true;
+    std::string prompt;
     std::map<i64, std::string> last_text; ///< per group, never written anywhere
     i64 hour = 0;
     usize downloads_this_hour = 0;

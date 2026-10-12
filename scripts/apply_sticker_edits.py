@@ -3,8 +3,9 @@
     python scripts/apply_sticker_edits.py labels.json [--data-dir ~/.local/share/lilia] [--dry-run]
 
 Reads the "edits" of a labels.json exported by scripts/sticker_label_page.py
-({"<id>": {"tags", "description"}}) and rewrites those registered stickers.
-The database is backed up to --backup-dir first. lilia reads the pool on every
+({"<id>": {"tags", "description"}}) and rewrites those registered stickers,
+marking them modified_by = 'USER' so machine tagging leaves them alone (an
+edit already applied is only marked). The database is backed up to --backup-dir first. lilia reads the pool on every
 search and embeds the new text then, so the running bot needs no restart.
 Prints counts only.
 """
@@ -31,10 +32,15 @@ def main():
 
     db = sqlite3.connect(os.path.join(os.path.expanduser(args.data_dir), "lilia.db"))
     db.execute("PRAGMA busy_timeout = 5000")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(stickers)")}
+    if "modified_by" not in columns:
+        raise SystemExit(
+            "stickers.modified_by is missing: open the database with lilia (schema 13+) first"
+        )
     current = {
-        sticker_id: (tags, description)
-        for sticker_id, tags, description in db.execute(
-            "SELECT id, tags, description FROM stickers WHERE status = 'registered'"
+        sticker_id: (tags, description, modified_by)
+        for sticker_id, tags, description, modified_by in db.execute(
+            "SELECT id, tags, description, modified_by FROM stickers WHERE status = 'registered'"
         )
     }
     changes, unchanged, missing, invalid = [], 0, 0, 0
@@ -46,7 +52,7 @@ def main():
             invalid += 1
         elif sticker_id not in current:
             missing += 1
-        elif current[sticker_id] == (tags, description):
+        elif current[sticker_id] == (tags, description, "USER"):
             unchanged += 1
         else:
             changes.append((sticker_id, tags, description))
@@ -66,7 +72,8 @@ def main():
 
     with db:
         db.executemany(
-            "UPDATE stickers SET tags = ?2, description = ?3 WHERE id = ?1 AND status = 'registered'",
+            "UPDATE stickers SET tags = ?2, description = ?3, modified_by = 'USER' "
+            "WHERE id = ?1 AND status = 'registered'",
             changes,
         )
     print(f"updated {len(changes)} stickers")

@@ -290,6 +290,9 @@ struct StickerConfig {
     /// Stickers find_sticker shows the planner, and the pause between hers.
     usize candidates = 8;
     i64 cooldown_seconds = 60;
+    /// Tagging an animated sticker sends the original file before the grid of
+    /// its frames (text on the sticker stays sharp; costs a second image).
+    bool frames_with_original = false;
 };
 
 struct Config {

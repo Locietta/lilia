@@ -101,7 +101,9 @@ struct ChatSummary {
 
 /// A sticker seen in any group. `status`: "pending" (not described yet),
 /// "registered" (may be sent), "spare" (fine but outside the pool) or
-/// "rejected". `path` is relative to the data directory.
+/// "rejected". `path` is relative to the data directory. `modified_by` is
+/// "USER" once a person has edited the tags or description, which machine
+/// tagging then leaves alone.
 struct Sticker {
     i64 id = 0;
     std::string sha1;
@@ -116,6 +118,7 @@ struct Sticker {
     i64 first_seen = 0;
     i64 last_seen = 0;
     i64 last_used = 0;
+    std::string modified_by = "AI";
 };
 
 /// A stable fact about a person, quoted from their own message. `fact` is
@@ -330,10 +333,15 @@ struct Store {
 
     /// The sticker with this content hash, if known.
     Result<std::optional<Sticker>> sticker_by_hash(std::string_view sha1);
+    Result<std::optional<Sticker>> sticker_by_id(i64 id);
     Result<i64> add_sticker(const Sticker &sticker);
     /// Counts another sighting.
     Result<void> sticker_seen(i64 id, i64 time);
+    /// Machine tags and the status; the tags and description of a sticker a
+    /// person edited stay as they are.
     Result<void> describe_sticker(i64 id, std::string_view description, std::string_view tags, std::string_view status);
+    /// A person's tags and description, kept from then on.
+    Result<void> edit_sticker(i64 id, std::string_view tags, std::string_view description);
     Result<void> set_sticker_status(i64 id, std::string_view status);
     Result<void> sticker_used(i64 id, i64 time);
     /// Stickers with this status, most seen first.

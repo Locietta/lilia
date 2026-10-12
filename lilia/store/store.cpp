@@ -14,8 +14,9 @@ namespace {
 // 2: media table. 3: expressions table. 4: media.description. 5: memory_chunks.
 // 6: person_facts. 7: chat_summaries. 8: stickers. 9: expressions per chat
 // (rebuilt), expression_reviews, jargon. 12: embeddings in their own table
-// (keyed by profile and text hash), memory_chunks.search_text.
-constexpr int k_schema_version = 12;
+// (keyed by profile and text hash), memory_chunks.search_text. 13:
+// stickers.modified_by.
+constexpr int k_schema_version = 13;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -200,7 +201,8 @@ CREATE TABLE IF NOT EXISTS stickers (
     used INTEGER NOT NULL DEFAULT 0,
     first_seen INTEGER NOT NULL,
     last_seen INTEGER NOT NULL,
-    last_used INTEGER NOT NULL DEFAULT 0
+    last_used INTEGER NOT NULL DEFAULT 0,
+    modified_by TEXT NOT NULL DEFAULT 'AI'
 );
 CREATE INDEX IF NOT EXISTS stickers_by_status ON stickers (status, seen);
 
@@ -302,6 +304,16 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
             (void) store.database.execute("ROLLBACK");
             return lighter::outcome_error(std::move(migrated).error());
         }
+    }
+    // Columns added after their table, by shape: absent ones are added.
+    const auto ensure_column = [&](std::string_view table_name, std::string_view column, std::string_view declaration) -> Result<void> {
+        auto present = count_of(std::format("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'", table_name, column));
+        if (present.has_error()) return lighter::outcome_error(std::move(present).error());
+        if (*present > 0) return {};
+        return store.database.execute(std::format("ALTER TABLE {} ADD COLUMN {} {}", table_name, column, declaration));
+    };
+    if (auto added = ensure_column("stickers", "modified_by", "TEXT NOT NULL DEFAULT 'AI'"); added.has_error()) {
+        return lighter::outcome_error(std::move(added).error());
     }
     // The media table predates its description column in versions 2 and 3.
     if (current == 2 || current == 3) {
@@ -503,7 +515,7 @@ Result<std::vector<ChatSummary>> Store::summaries(const ChatKey &chat, usize lim
 namespace {
 
 constexpr std::string_view k_sticker_columns =
-    "id, sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, last_seen, last_used";
+    "id, sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, last_seen, last_used, modified_by";
 
 Sticker read_sticker(const Statement &statement) {
     return {
@@ -520,6 +532,7 @@ Sticker read_sticker(const Statement &statement) {
         .first_seen = statement.column_int(10),
         .last_seen = statement.column_int(11),
         .last_used = statement.column_int(12),
+        .modified_by = statement.column_text(13),
     };
 }
 
@@ -535,9 +548,20 @@ Result<std::optional<Sticker>> Store::sticker_by_hash(std::string_view sha1) {
     return std::optional<Sticker>{read_sticker(*statement)};
 }
 
+Result<std::optional<Sticker>> Store::sticker_by_id(i64 id) {
+    auto statement = database.prepare(std::format("SELECT {} FROM stickers WHERE id = ?1", k_sticker_columns));
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    auto row = statement->step();
+    if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+    if (!*row) return std::optional<Sticker>{};
+    return std::optional<Sticker>{read_sticker(*statement)};
+}
+
 Result<i64> Store::add_sticker(const Sticker &sticker) {
-    auto statement = database.prepare("INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, seen, used, "
-                                      "first_seen, last_seen, last_used) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)");
+    auto statement =
+        database.prepare("INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, seen, used, "
+                         "first_seen, last_seen, last_used, modified_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, sticker.sha1);
     statement->bind(2, sticker.path);
@@ -551,6 +575,7 @@ Result<i64> Store::add_sticker(const Sticker &sticker) {
     statement->bind(10, sticker.first_seen);
     statement->bind(11, sticker.last_seen);
     statement->bind(12, sticker.last_used);
+    statement->bind(13, sticker.modified_by);
     if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
     return sqlite3_last_insert_rowid(database.value);
 }
@@ -564,12 +589,23 @@ Result<void> Store::sticker_seen(i64 id, i64 time) {
 }
 
 Result<void> Store::describe_sticker(i64 id, std::string_view description, std::string_view tags, std::string_view status) {
-    auto statement = database.prepare("UPDATE stickers SET description = ?2, tags = ?3, status = ?4 WHERE id = ?1");
+    // A person's edit outlasts machine tagging; the status still moves.
+    auto statement = database.prepare("UPDATE stickers SET description = iif(modified_by = 'USER', description, ?2), "
+                                      "tags = iif(modified_by = 'USER', tags, ?3), status = ?4 WHERE id = ?1");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, id);
     statement->bind(2, description);
     statement->bind(3, tags);
     statement->bind(4, status);
+    return statement->run();
+}
+
+Result<void> Store::edit_sticker(i64 id, std::string_view tags, std::string_view description) {
+    auto statement = database.prepare("UPDATE stickers SET tags = ?2, description = ?3, modified_by = 'USER' WHERE id = ?1");
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, tags);
+    statement->bind(3, description);
     return statement->run();
 }
 

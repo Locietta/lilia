@@ -123,6 +123,12 @@ CREATE TABLE expressions (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL DEFAUL
     first_seen INTEGER NOT NULL, last_active INTEGER NOT NULL, checked INTEGER NOT NULL DEFAULT 0,
     modified_by TEXT NOT NULL DEFAULT 'AI', model TEXT NOT NULL DEFAULT '', vector BLOB NOT NULL DEFAULT x'',
     UNIQUE (chat_type, chat_id, style));
+CREATE TABLE stickers (id INTEGER PRIMARY KEY, sha1 TEXT NOT NULL UNIQUE, path TEXT NOT NULL, media_type TEXT NOT NULL,
+    bytes INTEGER NOT NULL, description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
+    seen INTEGER NOT NULL DEFAULT 1, used INTEGER NOT NULL DEFAULT 0, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+    last_used INTEGER NOT NULL DEFAULT 0);
+INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, first_seen, last_seen)
+    VALUES ('s', 'stickers/s.gif', 'image/gif', 9, '猫', '无语', 'registered', 1, 1);
 INSERT INTO memory_chunks VALUES (1, 'group', 1, 1, 2, 1, 2, 'x', 'm', x'00');
 INSERT INTO person_facts VALUES (1, 7, 'TA对芒果过敏', '芒果', 'group', 1, 1, 1, 'm', x'00');
 INSERT INTO chat_summaries VALUES (1, 'group', 1, 1, 2, 1, 2, '定了周六去成都', '聊到成都', 'm', x'00', x'00');
@@ -140,7 +146,10 @@ PRAGMA user_version = 11;
             require(statement.has_value() && *statement->step(), "query");
             return statement->column_int(0);
         };
-        require(count("PRAGMA user_version") == 12, "now schema 12");
+        require(count("PRAGMA user_version") == 13, "now schema 13");
+        auto sticker = db->sticker_by_hash("s");
+        require(sticker.has_value() && *sticker && (*sticker)->modified_by == "AI" && (*sticker)->tags == "无语",
+                "stickers gain modified_by, as machine-made");
         require(count("SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name IN ('model', 'vector')") == 0 &&
                     count("SELECT COUNT(*) FROM pragma_table_info('chat_summaries') WHERE name IN ('model', 'vector', 'cue_vectors')") ==
                         0 &&

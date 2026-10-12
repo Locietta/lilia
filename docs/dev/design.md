@@ -110,7 +110,9 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
   - **Image reading:** after a picture or sticker is stored, one
     `vision_model` call (DeepSeek, image block plus a short prompt) describes
     it in a sentence or two, including any text in it. Descriptions are cached
-    by content hash in `media.description`. The stored message text is then
+    by content hash in `media.description`. A GIF goes as one JPEG grid of up
+    to 9 distinct frames in time order (`image/frames`; vision models see only
+    a GIF's first frame). The stored message text is then
     re-rendered as `[图片: …]` / `[表情: …]`, and a turn waits up to
     `image_wait_seconds` for descriptions of its new messages before planning.
 - **`store/`**: SQLite in WAL mode. Only allow-listed chats are stored; the bot
@@ -200,6 +202,13 @@ Model calls (2026-10-11):
    - Learn stickers from every group the account is in (`sticker/`): the
      image (deduplicated by hash), a vision model's description and tags,
      a capped pool of the fit ones; other groups' text is never stored.
+   - Tagging (2026-10-12): an animated sticker goes as a grid of its frames,
+     and the prompt asks for the action and the situations it is sent in, with
+     no example tags (the old list primed 无语 onto half the pool). A person's
+     edits (`modified_by = 'USER'`, from `scripts/apply_sticker_edits.py`)
+     are never overwritten. `lilia stickers --retag --db <copy>` re-tags a copy
+     so a change can be scored with `lilia retrieval --labels` first, and
+     `--apply-from` copies the winning tags.
    - The planner sends them itself (2026-10-11): `find_sticker(feeling)`
      shows the closest few of the whole pool (`retrieval/` over tags and
      description; words alone without memory), marking ones

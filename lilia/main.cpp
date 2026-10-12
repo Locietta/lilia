@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -54,6 +55,8 @@ void print_usage(FILE *output) {
                "       lilia expressions --rejected | --rescue <review id> | --check <id> | --uncheck <id>\n"
                "       lilia jargon [--limit <n>] | --set <term> <meaning> | --delete <term>\n"
                "       lilia retrieval [--query <text>]... [--labels <labels.json>] [--db <lilia.db>] [--config <path>]\n"
+               "       lilia stickers --db <copy.db> [--retag [--gifs] [--no-frames] [--prompt <sticker.md>] [--limit <n>]]\n"
+               "                      [--apply-from <retagged.db>] [--config <path>]\n"
                "       lilia segment [--terms | --count <n> | --bench | --pieces | --homophones] < lines.txt\n"
                "       lilia --version | --help\n",
                output);
@@ -245,6 +248,140 @@ Task<int> evaluate_stickers(const Config &config, retrieval::Retriever &retrieve
     co_return 0;
 }
 
+/// `lilia stickers`: tags on a copy of the database, to score a tagging
+/// change with `retrieval --labels` before it goes live, and copying the
+/// winning tags over. Stickers a person edited are never touched.
+struct StickerTool {
+    bool retag = false;
+    bool gifs = false;
+    bool frames = true;
+    usize limit = 0;
+    std::optional<std::filesystem::path> prompt;
+    std::optional<std::filesystem::path> apply_from;
+};
+
+/// "无语 97 (49%)、无奈 34 (17%)…": the most common tags of the pool.
+std::string top_tags(const std::vector<store::Sticker> &stickers, usize count = 12) {
+    std::map<std::string, usize> tally;
+    for (const auto &sticker : stickers) {
+        std::string_view rest = sticker.tags;
+        while (!rest.empty()) {
+            const auto cut = rest.find("、");
+            const auto tag = rest.substr(0, cut);
+            if (!tag.empty()) ++tally[std::string(tag)];
+            rest = cut == std::string_view::npos ? std::string_view{} : rest.substr(cut + std::string_view("、").size());
+        }
+    }
+    std::vector<std::pair<std::string, usize>> sorted(tally.begin(), tally.end());
+    std::ranges::stable_sort(sorted, [](const auto &a, const auto &b) { return a.second > b.second; });
+    std::string out;
+    for (usize i = 0; i < std::min(count, sorted.size()); ++i) {
+        if (!out.empty()) out += "、";
+        out += std::format("{} {} ({:.0f}%)", sorted[i].first, sorted[i].second,
+                           100.0 * static_cast<double>(sorted[i].second) / static_cast<double>(std::max<usize>(1, stickers.size())));
+    }
+    return out;
+}
+
+Task<int> run_stickers(const Config &config, std::optional<std::filesystem::path> database, StickerTool tool) {
+    if (!database) {
+        log::error("lilia stickers needs --db <copy of lilia.db>; it never writes the live database by default");
+        co_return 2;
+    }
+    auto store = store::Store::open(*database);
+    if (store.has_error()) {
+        log::error("{}", store.error().message());
+        co_return 1;
+    }
+    const auto registered = [&] {
+        auto pool = store->stickers("registered");
+        return pool.has_value() ? *std::move(pool) : std::vector<store::Sticker>{};
+    };
+    std::printf("tags before: %s\n", top_tags(registered()).c_str());
+
+    if (tool.apply_from) {
+        auto source = store::Store::open_readonly(*tool.apply_from);
+        if (source.has_error()) {
+            log::error("{}", source.error().message());
+            co_return 1;
+        }
+        usize copied = 0;
+        usize kept = 0;
+        for (const auto status : {"registered", "spare"}) {
+            auto stickers = source->stickers(status);
+            for (const auto &sticker : stickers.has_value() ? *stickers : std::vector<store::Sticker>{}) {
+                auto target = store->sticker_by_hash(sticker.sha1);
+                if (!target.has_value() || !*target) continue;
+                const auto &current = **target;
+                if (current.modified_by == "USER" || sticker.modified_by == "USER") {
+                    ++kept;
+                } else if (current.tags != sticker.tags || current.description != sticker.description) {
+                    std::ignore = store->describe_sticker(current.id, sticker.description, sticker.tags, current.status);
+                    ++copied;
+                }
+            }
+        }
+        std::printf("copied the tags of %zu stickers; %zu edited by a person kept\ntags after: %s\n", copied, kept,
+                    top_tags(registered()).c_str());
+        co_return 0;
+    }
+    if (!tool.retag) co_return 0;
+
+    if (config.model.vision_model.empty()) {
+        log::error("model.vision_model is empty: nothing to tag with");
+        co_return 1;
+    }
+    sticker::Collector collector(config.stickers, config.data_dir, *store, [](Task<>) {});
+    collector.vision = make_vision(config.model);
+    collector.vision_model = config.model.vision_model;
+    collector.frames = tool.frames;
+    if (tool.prompt) {
+        std::ifstream file(*tool.prompt, std::ios::binary);
+        std::stringstream text;
+        text << file.rdbuf();
+        if (!file || text.str().empty()) {
+            log::error("cannot read {}", tool.prompt->string());
+            co_return 1;
+        }
+        collector.prompt = text.str();
+    }
+    std::vector<store::Sticker> todo;
+    for (const auto status : {"registered", "spare"}) {
+        auto stickers = store->stickers(status);
+        for (auto &sticker : stickers.has_value() ? *stickers : std::vector<store::Sticker>{}) {
+            if (sticker.modified_by == "USER" || (tool.gifs && sticker.media_type != "image/gif")) continue;
+            if (tool.limit > 0 && todo.size() >= tool.limit) break;
+            todo.push_back(std::move(sticker));
+        }
+    }
+    usize next = 0;
+    usize tagged = 0;
+    usize failed = 0;
+    usize unfit = 0;
+    // A few calls at a time; each takes seconds.
+    auto worker = [&]() -> Task<> {
+        while (next < todo.size()) {
+            const auto sticker = todo[next++];
+            const auto bytes = collector.read(sticker);
+            const auto answer = bytes ? co_await collector.describe(sticker, *bytes, "") : std::nullopt;
+            if (!answer) {
+                ++failed;
+                continue;
+            }
+            // The status stays: this measures tags, not the fitness verdict.
+            if (!answer->usable) ++unfit;
+            std::ignore = store->describe_sticker(sticker.id, answer->description, answer->tags, sticker.status);
+            if (++tagged % 20 == 0) log::info("tagged {} of {}", tagged, todo.size());
+        }
+    };
+    lighter::TaskGroup tasks(lighter::EventLoop::current());
+    for (int i = 0; i < 4; ++i) tasks.spawn(worker());
+    co_await tasks.join();
+    std::printf("tagged %zu of %zu (%zu failed; %zu would be rejected)\ntags after: %s\n", tagged, todo.size(), failed, unfit,
+                top_tags(registered()).c_str());
+    co_return failed == todo.size() && !todo.empty() ? 1 : 0;
+}
+
 Task<int> run_retrieval(const Config &config, std::filesystem::path database, std::vector<std::string> queries,
                         std::optional<std::filesystem::path> labels) {
     auto store = store::Store::open(database);
@@ -336,6 +473,7 @@ Task<int> run_app(const Config &config) {
             collector.vision = make_vision(config.model);
             collector.vision_model = config.model.vision_model;
         }
+        collector.background_budget = config.learning.daily_token_budget;
         responder.stickers = &collector;
     }
     retrieval::Retriever retriever(config.memory, *store);
@@ -389,6 +527,8 @@ int main(int argc, char **argv) {
     std::vector<std::string> queries;
     std::optional<std::filesystem::path> database_path;
     std::optional<std::filesystem::path> labels_path;
+    bool sticker_tool = false;
+    StickerTool stickers;
     if (argc >= 2 && std::string_view(argv[1]) == "segment") {
         // Debugging aids, one stdin line per message: jieba words of each
         // line joined by "/"; --terms: its meaningful terms; --count <n>: the
@@ -488,6 +628,9 @@ int main(int argc, char **argv) {
     } else if (argc > 1 && std::string_view(argv[1]) == "retrieval") {
         retrieval_check = true;
         first = 2;
+    } else if (argc > 1 && std::string_view(argv[1]) == "stickers") {
+        sticker_tool = true;
+        first = 2;
     } else if (argc > 1 && std::string_view(argv[1]) == "jargon") {
         jargon = true;
         manage.action = "list";
@@ -519,10 +662,22 @@ int main(int argc, char **argv) {
             continue_at = static_cast<usize>(std::max(0, std::atoi(argv[++i])));
         } else if (arg == "--query" && retrieval_check && i + 1 < argc) {
             queries.emplace_back(argv[++i]);
-        } else if (arg == "--db" && retrieval_check && i + 1 < argc) {
+        } else if (arg == "--db" && (retrieval_check || sticker_tool) && i + 1 < argc) {
             database_path = argv[++i];
         } else if (arg == "--labels" && retrieval_check && i + 1 < argc) {
             labels_path = argv[++i];
+        } else if (arg == "--retag" && sticker_tool) {
+            stickers.retag = true;
+        } else if (arg == "--gifs" && sticker_tool) {
+            stickers.gifs = true;
+        } else if (arg == "--no-frames" && sticker_tool) {
+            stickers.frames = false;
+        } else if (arg == "--prompt" && sticker_tool && i + 1 < argc) {
+            stickers.prompt = argv[++i];
+        } else if (arg == "--apply-from" && sticker_tool && i + 1 < argc) {
+            stickers.apply_from = argv[++i];
+        } else if (arg == "--limit" && sticker_tool && i + 1 < argc) {
+            stickers.limit = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else if (arg == "--group" && learn_history && i + 1 < argc) {
             history_groups.push_back(std::atoll(argv[++i]));
         } else if (arg == "--count" && learn_history && i + 1 < argc) {
@@ -556,7 +711,7 @@ int main(int argc, char **argv) {
 
     const auto path = config_path.value_or(default_config_path());
     // Listing learned expressions reads the database only; no keys needed.
-    auto config = load_config(path, !(list_expressions || jargon) || review);
+    auto config = load_config(path, !(list_expressions || jargon || (sticker_tool && !stickers.retag)) || review);
     if (config.has_error()) {
         log::error("{}: {}", path.string(), config.error().message());
         return 1;
@@ -583,6 +738,7 @@ int main(int argc, char **argv) {
                                    learn_history   ? run_learn_history(*config, history_groups, history_count) :
                                    review          ? review_expressions(*config, apply, keep) :
                                    retrieval_check ? run_retrieval(*config, database_path.value_or(database), queries, labels_path) :
+                                   sticker_tool    ? run_stickers(*config, database_path, stickers) :
                                                      run_app(*config),
                                    interrupts->token());
     loop.schedule(app);
