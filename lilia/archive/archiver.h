@@ -94,6 +94,8 @@ struct Archiver {
     /// Describes images and stickers; unset disables descriptions.
     std::optional<provider::Provider> vision;
     std::string vision_model;
+    /// Animated GIFs as one grid of frames (model.vision_gif_frames).
+    bool gif_frames = false;
     std::map<std::tuple<std::string, i64, i64>, std::shared_ptr<lighter::Event>> pending;
 };
 

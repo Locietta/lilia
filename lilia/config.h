@@ -80,6 +80,10 @@ struct ModelConfig {
     std::optional<double> writer_temperature;
     /// Describes images and stickers (on `base_url`); empty disables it.
     std::string vision_model = "deepseek-flash";
+    /// Send an animated GIF as one grid of its frames, for vision models that
+    /// read only the first frame. DeepSeek reads GIFs whole (2026-10-12: it
+    /// described motion without the grid, and the grid scored no better).
+    bool vision_gif_frames = false;
     /// Offer the provider-hosted web_search server tool. A searched answer
     /// costs tens of thousands of input tokens with DeepSeek.
     bool web_search = true;
@@ -290,9 +294,6 @@ struct StickerConfig {
     /// Stickers find_sticker shows the planner, and the pause between hers.
     usize candidates = 8;
     i64 cooldown_seconds = 60;
-    /// Tagging an animated sticker sends the original file before the grid of
-    /// its frames (text on the sticker stays sharp; costs a second image).
-    bool frames_with_original = false;
 };
 
 struct Config {

@@ -273,7 +273,7 @@ Task<> Collector::collect(std::string url, std::string context) {
 
 Task<std::optional<Tagged>> Collector::describe(const store::Sticker &sticker, const std::string &bytes, std::string context) {
     if (!vision) co_return std::nullopt;
-    // Vision models see only a GIF's first frame: show it as a grid of frames.
+    // For vision models that read only a GIF's first frame: a grid of frames.
     const auto grid = frames && sticker.media_type == "image/gif" ? image::frame_grid(bytes) : std::nullopt;
     const auto text = chat::fill_template(
         prompt_override_or(prompt, {reinterpret_cast<const char *>(xmake::sticker_md.data()), xmake::sticker_md.size()}),
@@ -283,10 +283,8 @@ Task<std::optional<Tagged>> Collector::describe(const store::Sticker &sticker, c
                         std::string()},
          {"context", context.empty() ? std::string() : std::format("它是在这句话之后发的：「{}」（只帮你理解用法）。", context)}});
     std::vector<provider::Part> parts;
-    if (!grid || config.frames_with_original) {
-        parts.push_back(provider::ImagePart{.media_type = sticker.media_type, .data = net::base64_encode(bytes)});
-    }
-    if (grid) parts.push_back(provider::ImagePart{.media_type = "image/jpeg", .data = net::base64_encode(grid->jpeg)});
+    parts.push_back(grid ? provider::ImagePart{.media_type = "image/jpeg", .data = net::base64_encode(grid->jpeg)} :
+                           provider::ImagePart{.media_type = sticker.media_type, .data = net::base64_encode(bytes)});
     parts.push_back(provider::TextPart{.text = text});
     provider::History history;
     history.push_back({.role = provider::Role::USER, .parts = std::move(parts)});

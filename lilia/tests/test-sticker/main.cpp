@@ -202,6 +202,7 @@ lighter::Task<> test_describe() {
         return std::optional<std::vector<provider::OutputItem>>{{test::text_answer("描述：一只猫在摇头\n标签：摇头、拒绝\n适合：是")}};
     };
     collector.vision = test::fake_provider(state);
+    collector.frames = true;
     const auto palette = test_palette();
     const auto gif = make_gif(32, 32, {square_at(0, 0), square_at(12, 12), square_at(24, 24)}, palette);
     auto id = db->add_sticker({.sha1 = "g", .path = "stickers/g.gif", .media_type = "image/gif"});
@@ -215,10 +216,11 @@ lighter::Task<> test_describe() {
             "a GIF goes as a grid of its frames, and the prompt says so");
     require(!prompt->text.contains("无语、震惊、开心"), "no example tags to copy");
 
-    config.frames_with_original = true;
+    collector.frames = false;
     std::ignore = co_await collector.describe(**db->sticker_by_id(*id), gif, "");
-    require(state->requests.back().back().parts.size() == 3, "the original file can go along");
-    config.frames_with_original = false;
+    const auto *whole = std::get_if<provider::ImagePart>(&state->requests.back().back().parts.front());
+    require(whole && whole->media_type == "image/gif", "without frames the GIF goes whole");
+    collector.frames = true;
 
     // Tagging respects the background budget and a person's edits.
     require(db->edit_sticker(*id, "人工标签", "人工描述").has_value(), "edit");

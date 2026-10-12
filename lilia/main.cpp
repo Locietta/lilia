@@ -55,7 +55,7 @@ void print_usage(FILE *output) {
                "       lilia expressions --rejected | --rescue <review id> | --check <id> | --uncheck <id>\n"
                "       lilia jargon [--limit <n>] | --set <term> <meaning> | --delete <term>\n"
                "       lilia retrieval [--query <text>]... [--labels <labels.json>] [--db <lilia.db>] [--config <path>]\n"
-               "       lilia stickers --db <copy.db> [--retag [--gifs] [--no-frames] [--prompt <sticker.md>] [--limit <n>]]\n"
+               "       lilia stickers --db <copy.db> [--retag [--gifs] [--[no-]frames] [--prompt <sticker.md>] [--limit <n>]]\n"
                "                      [--apply-from <retagged.db>] [--config <path>]\n"
                "       lilia segment [--terms | --count <n> | --bench | --pieces | --homophones] < lines.txt\n"
                "       lilia --version | --help\n",
@@ -254,7 +254,7 @@ Task<int> evaluate_stickers(const Config &config, retrieval::Retriever &retrieve
 struct StickerTool {
     bool retag = false;
     bool gifs = false;
-    bool frames = true;
+    std::optional<bool> frames; ///< default: model.vision_gif_frames
     usize limit = 0;
     std::optional<std::filesystem::path> prompt;
     std::optional<std::filesystem::path> apply_from;
@@ -334,7 +334,7 @@ Task<int> run_stickers(const Config &config, std::optional<std::filesystem::path
     sticker::Collector collector(config.stickers, config.data_dir, *store, [](Task<>) {});
     collector.vision = make_vision(config.model);
     collector.vision_model = config.model.vision_model;
-    collector.frames = tool.frames;
+    collector.frames = tool.frames.value_or(config.model.vision_gif_frames);
     if (tool.prompt) {
         std::ifstream file(*tool.prompt, std::ios::binary);
         std::stringstream text;
@@ -460,6 +460,7 @@ Task<int> run_app(const Config &config) {
     if (!config.model.vision_model.empty()) {
         archiver.vision = make_vision(config.model);
         archiver.vision_model = config.model.vision_model;
+        archiver.gif_frames = config.model.vision_gif_frames;
     }
     // Also with archiving off: forwards sent by id are still fetched.
     responder.archiver = &archiver;
@@ -472,6 +473,7 @@ Task<int> run_app(const Config &config) {
         if (!config.model.vision_model.empty()) {
             collector.vision = make_vision(config.model);
             collector.vision_model = config.model.vision_model;
+            collector.frames = config.model.vision_gif_frames;
         }
         collector.background_budget = config.learning.daily_token_budget;
         responder.stickers = &collector;
@@ -670,8 +672,8 @@ int main(int argc, char **argv) {
             stickers.retag = true;
         } else if (arg == "--gifs" && sticker_tool) {
             stickers.gifs = true;
-        } else if (arg == "--no-frames" && sticker_tool) {
-            stickers.frames = false;
+        } else if ((arg == "--frames" || arg == "--no-frames") && sticker_tool) {
+            stickers.frames = arg == "--frames";
         } else if (arg == "--prompt" && sticker_tool && i + 1 < argc) {
             stickers.prompt = argv[++i];
         } else if (arg == "--apply-from" && sticker_tool && i + 1 < argc) {

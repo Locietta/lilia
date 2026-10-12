@@ -223,8 +223,8 @@ Task<std::string> describe(Archiver &archiver, const store::ChatKey &chat, const
     if (media_type.empty() || bytes.size() > k_max_vision_bytes) co_return std::string();
     if (auto cached = archiver.store.media_description(sha1); cached.has_value() && !cached->empty()) co_return std::move(*cached);
 
-    // Vision models see only a GIF's first frame: show it as a grid of frames.
-    const auto grid = extension == ".gif" ? image::frame_grid(bytes) : std::nullopt;
+    // For vision models that read only a GIF's first frame: a grid of frames.
+    const auto grid = archiver.gif_frames && extension == ".gif" ? image::frame_grid(bytes) : std::nullopt;
     provider::History history;
     history.push_back({.role = provider::Role::USER,
                        .parts = {grid ? provider::ImagePart{.media_type = "image/jpeg", .data = net::base64_encode(grid->jpeg)} :
