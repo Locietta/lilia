@@ -1,4 +1,4 @@
-"""Build an offline page for labelling whether chat lines were said to lilia.
+"""Build an offline page for labelling whom chat lines were said to.
 
     python scripts/addressee_label_page.py --group <id> [--count 120 | --rows 41,92,...]
         [--data-dir ~/.local/share/lilia | --db <lilia.db>] --out addressee-label.html
@@ -6,10 +6,11 @@
 Picks recent lines of one group, preferring those the hindsight judge already
 labelled (so `lilia feedback --import-manual` can report how often it agreed),
 or exactly the given rows (messages.id, as `lilia replay --probe-db` prints
-them), and shows each with the lines around it. Clicking marks a line as said to her
-or not; the page exports labels.json ({"labels": [{chat_id, message_id,
-to_her}]}). The page holds private chat lines: keep it out of the tree (ops/
-is ignored) and delete it when done.
+them), and shows each with the lines around it. Each line gets the judge's
+choices (prompts/hindsight.md): her, another member, everyone, no one, or
+unclear; the page exports labels.json ({"labels": [{chat_id, message_id,
+to}]}). The page holds private chat lines: keep it out of the tree (ops/ is
+ignored) and delete it when done.
 """
 
 import argparse
@@ -23,20 +24,28 @@ PAGE = """<!doctype html>
 <style>
 body { font-family: system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 12px; }
 #bar { position: sticky; top: 0; background: #fff; padding: 8px 0; border-bottom: 1px solid #ddd; z-index: 1; }
+#bar small { color: #555; }
 .item { border: 1px solid #ddd; border-radius: 6px; margin: 10px 0; padding: 8px; }
 .item.her { border-color: #2a2; background: #eef8ee; }
-.item.not { border-color: #a22; background: #f8eeee; }
+.item.other { border-color: #a22; background: #f8eeee; }
+.item.group { border-color: #c80; background: #fdf5e6; }
+.item.self { border-color: #88a; background: #f1f1f8; }
+.item.unclear { border-color: #999; background: #f4f4f4; }
 .line { font-size: 13px; color: #666; white-space: pre-wrap; }
 .line.target { color: #000; font-weight: 600; background: #fff7cc; }
 .line.self { color: #15c; }
 button { margin-right: 6px; }
+button.on { font-weight: 700; }
 </style></head><body>
-<div id="bar"><b>这句话是不是在对她（莉莉娅）说？</b> 黄底那行是要判断的；看前后文判断。
+<div id="bar"><b>黄底那行当时是在对谁说？</b> 看前后文判断。<br>
+  <small>对她：叫她、问她、接她刚说的话。对某个群友：在对另一个（或另几个）人说。对大家：对群里所有人说，没有特定对象（提问、分享、感叹给大家听）。
+  不对谁：自言自语，或者只是个反应，不需要谁接。说不准：看完前后文也判断不了（不会导入）。</small><br>
   <span id="count"></span> <button id="export">导出 labels.json</button></div>
 <div id="items"></div>
 <script>
 const ITEMS = __ITEMS__;
-const KEY = "lilia-addressee-labels-v1";
+const KEY = "lilia-addressee-labels-v2";
+const CHOICES = [["her", "对她"], ["other", "对某个群友"], ["group", "对大家"], ["self", "不对谁"], ["unclear", "说不准"]];
 let state = JSON.parse(localStorage.getItem(KEY) || "{}");
 const save = () => localStorage.setItem(KEY, JSON.stringify(state));
 function render() {
@@ -47,11 +56,13 @@ function render() {
     const mark = state[key];
     if (mark !== undefined) done++;
     const d = document.createElement("div");
-    d.className = "item" + (mark === true ? " her" : mark === false ? " not" : "");
+    d.className = "item" + (mark ? " " + mark : "");
     d.innerHTML = item.lines.map(l => `<div class="line${l.target ? " target" : ""}${l.self ? " self" : ""}">${l.text}</div>`).join("") +
-      `<div style="margin-top:6px"><button data-v="1">对她说</button><button data-v="0">不是对她</button><button data-v="">清除</button></div>`;
+      `<div style="margin-top:6px">` +
+      CHOICES.map(([v, name]) => `<button data-v="${v}"${mark === v ? ' class="on"' : ""}>${name}</button>`).join("") +
+      `<button data-v="">清除</button></div>`;
     d.querySelectorAll("button").forEach(b => b.onclick = () => {
-      if (b.dataset.v === "") delete state[key]; else state[key] = b.dataset.v === "1";
+      if (b.dataset.v === "") delete state[key]; else state[key] = b.dataset.v;
       save(); render();
     });
     box.appendChild(d);
@@ -59,12 +70,11 @@ function render() {
   document.getElementById("count").textContent = `已标 ${done}/${ITEMS.length}`;
 }
 document.getElementById("export").onclick = () => {
-  const labels = Object.entries(state).map(([key, to_her]) => {
-    const [chat_id, message_id] = key.split(":").map(Number);
-    return {chat_id, message_id, to_her};
-  });
+  const labels = ITEMS.filter(item => state[item.chat_id + ":" + item.message_id]).map(item =>
+    ({chat_id: item.chat_id, message_id: item.message_id, to: state[item.chat_id + ":" + item.message_id]}));
   const blob = new Blob([JSON.stringify({labels}, null, 1)], {type: "application/json"});
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "addressee-labels.json"; a.click();
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = `addressee-labels-${ITEMS.length ? ITEMS[0].chat_id : "none"}.json`; a.click();
 };
 render();
 </script></body></html>

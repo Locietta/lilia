@@ -734,6 +734,7 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
     usize agreed = 0;
     usize judged = 0;
     usize misread = 0;
+    std::map<std::string, usize> misread_by; ///< whom the misread lines were said to ("?": not recorded)
     usize missed_her = 0;
     usize misses = 0;
     usize to_her_runs = 0;
@@ -741,8 +742,9 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
     usize other_runs = 0;
     for (const auto &label : picked) {
         const auto &chat = label.chat;
-        const auto tag =
-            std::format("PROBE chat#{:03} row {} label {}", (chat.id < 0 ? -chat.id : chat.id) % 1000, label.row_id, label.label ? 1 : 0);
+        // "label 0/group": whom it was said to, when the label records it.
+        const auto tag = std::format("PROBE chat#{:03} row {} label {}{}", (chat.id < 0 ? -chat.id : chat.id) % 1000, label.row_id,
+                                     label.label ? 1 : 0, label.addressee.empty() ? "" : "/" + label.addressee);
         auto line = source->message(chat, label.message_id);
         if (!line.has_value() || !*line) {
             print(tag + ": not stored");
@@ -803,6 +805,7 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
                     ++agreed;
                 } else if (her) {
                     ++misread;
+                    ++misread_by[label.addressee.empty() ? "?" : label.addressee];
                     verdict += " MISREAD";
                 } else {
                     ++missed_her;
@@ -826,10 +829,13 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
                               to_her, verdict));
         }
     }
+    std::string kinds;
+    for (const auto &[addressee, count] : misread_by) kinds += std::format("{}{} {}", kinds.empty() ? " (" : ", ", addressee, count);
+    if (!kinds.empty()) kinds += ")";
     print(std::format(
-        "SUMMARY real: to_her agreement {}/{} (misread {}, missed_her {}), misses {}/{} on lines to her, chip-in {}/{} on other "
+        "SUMMARY real: to_her agreement {}/{} (misread {}{}, missed_her {}), misses {}/{} on lines to her, chip-in {}/{} on other "
         "lines",
-        agreed, judged, misread, missed_her, misses, to_her_runs, chip_ins, other_runs));
+        agreed, judged, misread, kinds, missed_her, misses, to_her_runs, chip_ins, other_runs));
     co_return 0;
 }
 

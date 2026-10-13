@@ -151,6 +151,16 @@ lighter::Task<> test_judging() {
     require(request.contains("#4（回应 #3）") && request.contains("#2、#3、#5"), "the judge sees whom she answered and what to label");
     auto labels = db->addressee_labels(chat::k_feature_version);
     require(labels.has_value() && labels->size() == 3 && labels->at(1).label && !labels->at(0).label, "labels are stored");
+    require(labels->at(0).addressee == "other" && labels->at(1).addressee == "her", "with whom each line was said to");
+    // A person's label replaces the judge's, whom included; the judge's does not replace a person's.
+    auto manual = labels->at(0);
+    manual.source = "manual";
+    manual.addressee = "group";
+    require(db->add_addressee_label(manual).has_value(), "hand label");
+    auto judge_again = labels->at(0);
+    judge_again.addressee = "self";
+    require(db->add_addressee_label(judge_again).has_value(), "judge again");
+    require(db->addressee_labels(chat::k_feature_version).value().at(0).addressee == "group", "the hand label stands");
     auto effects = db->reply_effects(chat, 0);
     require(effects.has_value() && effects->size() == 1 && effects->front().reward == 1.2 && effects->front().to_her == "called" &&
                 effects->front().target_message_id == 30,

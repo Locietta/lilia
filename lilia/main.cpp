@@ -468,7 +468,8 @@ Task<int> run_feedback(const Config &config, std::optional<std::filesystem::path
         struct ManualLabel {
             i64 chat_id = 0;
             i64 message_id = 0;
-            bool to_her = false;
+            std::string to;      ///< her, other, group, self or unclear (skipped)
+            bool to_her = false; ///< older pages: only her or not
         };
         struct ManualLabels {
             std::vector<ManualLabel> labels;
@@ -478,18 +479,26 @@ Task<int> run_feedback(const Config &config, std::optional<std::filesystem::path
             co_return 1;
         }
         // The judge's labels first: hand labels replace them.
-        std::map<std::pair<i64, i64>, bool> judged;
-        if (auto existing = store->addressee_labels(chat::k_feature_version, "judge"); existing.has_value()) {
-            for (const auto &label : *existing) judged[{label.chat.id, label.message_id}] = label.label;
+        std::map<std::pair<i64, i64>, store::AddresseeLabel> judged;
+        if (auto existing = store->addressee_labels(0, "judge"); existing.has_value()) {
+            for (auto &label : *existing) judged[{label.chat.id, label.message_id}] = std::move(label);
         }
         usize stored = 0;
         usize compared = 0;
         usize agreed = 0;
+        usize compared_kinds = 0;
+        usize agreed_kinds = 0;
         for (const auto &label : manual.labels) {
             const store::ChatKey chat{.type = "group", .id = label.chat_id};
+            if (label.to == "unclear") continue;
+            const bool to_her = label.to.empty() ? label.to_her : label.to == "her";
             if (const auto it = judged.find({label.chat_id, label.message_id}); it != judged.end()) {
                 ++compared;
-                agreed += it->second == label.to_her;
+                agreed += it->second.label == to_her;
+                if (!label.to.empty() && !it->second.addressee.empty()) {
+                    ++compared_kinds;
+                    agreed_kinds += it->second.addressee == label.to;
+                }
             }
             auto message = store->message(chat, label.message_id);
             if (!message.has_value() || !*message) continue;
@@ -515,12 +524,15 @@ Task<int> run_feedback(const Config &config, std::optional<std::filesystem::path
                                                       .time = (*message)->time,
                                                       .feature_version = chat::k_feature_version,
                                                       .features = glz::write_json(values).value_or("[]"),
-                                                      .label = label.to_her,
+                                                      .label = to_her,
                                                       .source = "manual",
-                                                      .prior = feedback::predict(feedback.model_for(chat), x)});
+                                                      .prior = feedback::predict(feedback.model_for(chat), x),
+                                                      .addressee = label.to});
             ++stored;
         }
-        std::printf("stored %zu hand labels; the judge had labelled %zu of them and agreed on %zu\n", stored, compared, agreed);
+        std::printf("stored %zu hand labels; the judge had labelled %zu of them and agreed on %zu (her or not)", stored, compared, agreed);
+        if (compared_kinds > 0) std::printf(", on whom %zu of %zu", agreed_kinds, compared_kinds);
+        std::printf("\n");
         co_return 0;
     }
 

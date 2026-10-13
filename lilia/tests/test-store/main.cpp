@@ -148,7 +148,9 @@ PRAGMA user_version = 11;
             require(statement.has_value() && *statement->step(), "query");
             return statement->column_int(0);
         };
-        require(count("PRAGMA user_version") == 18, "now schema 18");
+        require(count("PRAGMA user_version") == 19, "now schema 19");
+        require(count("SELECT COUNT(*) FROM pragma_table_info('addressee_labels') WHERE name = 'addressee'") == 1,
+                "addressee labels say whom");
         auto sticker = db->sticker_by_hash("s");
         require(sticker.has_value() && *sticker && (*sticker)->modified_by == "AI" && (*sticker)->tags == "无语" &&
                     (*sticker)->usage.empty() && (*sticker)->usage_count == 0 && (*sticker)->tags_by == "VISION",

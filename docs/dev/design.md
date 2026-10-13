@@ -85,7 +85,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       how her messages went down (stance, contribution). Labels keep 17
       features of the line (`chat::line_features`: explicit @/quote/name,
       你/你们, right after her, her share of the last 5 minutes, a run between
-      two people…), not its text. A logistic prior is fitted on them
+      two people…), not its text, and whom it was said to (her, another
+      member, everyone, no one; 2026-10-13, before only her or not). The
+      prior learns her-or-not; probes report misreads by whom the line was
+      for. A logistic prior is fitted on them
       (Newton/IRLS, pulled toward hand-set weights, per group toward the pooled
       model) and shown to the planner for lines that name no one
       (「像是在对她说」的可能：#n 低/中/高) while `feedback.hint` is on (the

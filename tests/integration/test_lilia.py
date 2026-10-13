@@ -926,12 +926,14 @@ def test_probe_db(tmp_path):
                 from_self,
             ),
         )
-    labels = [(GROUP, 102, 0), (GROUP, 103, 1), (other_group, 201, 0)]
-    for chat, message_id, label in labels:
+    # The last says whom it was to; older labels kept only her-or-not.
+    labels = [(GROUP, 102, 0, ""), (GROUP, 103, 1, ""), (other_group, 201, 0, "other")]
+    for chat, message_id, label, addressee in labels:
         db.execute(
-            "INSERT INTO addressee_labels (chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source) "
-            "SELECT 'group', chat_id, message_id, id, time, 1, '[]', ?, 'judge' FROM messages WHERE chat_id = ? AND message_id = ?",
-            (label, chat, message_id),
+            "INSERT INTO addressee_labels (chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source, "
+            "addressee) SELECT 'group', chat_id, message_id, id, time, 1, '[]', ?, 'judge', ? FROM messages "
+            "WHERE chat_id = ? AND message_id = ?",
+            (label, addressee, chat, message_id),
         )
     db.commit()
     db.close()
@@ -952,8 +954,8 @@ def test_probe_db(tmp_path):
     assert not model_state["errors"], model_state["errors"]
     assert stdout.splitlines() == [
         "PROBE chat#555 row 3 label 1: spoke target self to_her called",
-        "PROBE chat#567 row 4 label 0: spoke target self to_her called MISREAD",
-        "SUMMARY real: to_her agreement 1/2 (misread 1, missed_her 0), "
+        "PROBE chat#567 row 4 label 0/other: spoke target self to_her called MISREAD",
+        "SUMMARY real: to_her agreement 1/2 (misread 1 (other 1), missed_her 0), "
         "misses 0/1 on lines to her, chip-in 1/1 on other lines",
     ], f"{stdout}\n{stderr}"
     # The older line not to her is left out by --limit; no one's words are printed.

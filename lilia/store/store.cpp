@@ -20,8 +20,9 @@ namespace {
 // sticker_evidence). 15: planner_turns. 16: hindsight feedback (stickers.reward,
 // addressee_labels, reply_effects, addressee_models, feedback_progress). 17:
 // chat_summaries.kind (window summaries). 18: stickers.heat and heat_time
-// (decayed popularity).
-constexpr int k_schema_version = 18;
+// (decayed popularity). 19: addressee_labels.addressee (her, other, group,
+// self).
+constexpr int k_schema_version = 19;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -262,6 +263,7 @@ CREATE TABLE IF NOT EXISTS addressee_labels (
     label INTEGER NOT NULL,
     source TEXT NOT NULL,
     prior REAL NOT NULL DEFAULT -1,
+    addressee TEXT NOT NULL DEFAULT '',
     UNIQUE (chat_type, chat_id, message_id)
 );
 
@@ -420,6 +422,9 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
         if (auto added = ensure_column("stickers", column, declaration); added.has_error()) {
             return lighter::outcome_error(std::move(added).error());
         }
+    }
+    if (auto added = ensure_column("addressee_labels", "addressee", "TEXT NOT NULL DEFAULT ''"); added.has_error()) {
+        return lighter::outcome_error(std::move(added).error());
     }
     if (auto added = ensure_column("chat_summaries", "kind", "TEXT NOT NULL DEFAULT 'rolling'"); added.has_error()) {
         return lighter::outcome_error(std::move(added).error());
@@ -1190,9 +1195,9 @@ Result<void> Store::set_feedback_progress(const ChatKey &chat, i64 through_row) 
 Result<void> Store::add_addressee_label(const AddresseeLabel &label) {
     // A person's label replaces the judge's; the judge never replaces anything.
     auto statement = database.prepare(
-        "INSERT INTO addressee_labels (chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source, prior) "
-        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT (chat_type, chat_id, message_id) DO UPDATE SET "
-        "label = excluded.label, source = excluded.source WHERE excluded.source = 'manual'");
+        "INSERT INTO addressee_labels (chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source, prior, "
+        "addressee) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT (chat_type, chat_id, message_id) DO UPDATE SET "
+        "label = excluded.label, source = excluded.source, addressee = excluded.addressee WHERE excluded.source = 'manual'");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, label.chat.type);
     statement->bind(2, label.chat.id);
@@ -1204,12 +1209,13 @@ Result<void> Store::add_addressee_label(const AddresseeLabel &label) {
     statement->bind(8, i64{label.label ? 1 : 0});
     statement->bind(9, label.source);
     statement->bind_double(10, label.prior);
+    statement->bind(11, label.addressee);
     return statement->run();
 }
 
 Result<std::vector<AddresseeLabel>> Store::addressee_labels(i64 feature_version, std::string_view source) {
     auto statement =
-        database.prepare("SELECT chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source, prior "
+        database.prepare("SELECT chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source, prior, addressee "
                          "FROM addressee_labels WHERE (?1 = 0 OR feature_version = ?1) AND (?2 = '' OR source = ?2) ORDER BY time, id");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, feature_version);
@@ -1227,7 +1233,8 @@ Result<std::vector<AddresseeLabel>> Store::addressee_labels(i64 feature_version,
                        .features = statement->column_text(6),
                        .label = statement->column_int(7) != 0,
                        .source = statement->column_text(8),
-                       .prior = statement->column_double(9)});
+                       .prior = statement->column_double(9),
+                       .addressee = statement->column_text(10)});
     }
     return out;
 }

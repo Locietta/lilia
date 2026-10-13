@@ -374,7 +374,8 @@ Task<bool> Feedback::judge(store::ChatKey chat_key, i64 self_id, usize limit) {
                                                 .features = glz::write_json(values).value_or("[]"),
                                                 .label = verdict.to == "her",
                                                 .source = "judge",
-                                                .prior = predict(model, x)});
+                                                .prior = predict(model, x),
+                                                .addressee = verdict.to});
         if (added.has_error()) {
             log::error("cannot store an addressee label: {}", added.error().message());
             continue;

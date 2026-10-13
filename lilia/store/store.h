@@ -195,6 +195,10 @@ struct AddresseeLabel {
     bool label = false;
     std::string source; ///< "judge" or "manual"
     double prior = -1;  ///< what the model said then; -1: nothing
+    /// Whom it was said to: "her", "other" (someone else), "group" (everyone,
+    /// no one in particular) or "self" (no one: an exclamation, a reaction);
+    /// empty for labels from before 2026-10-13, which kept only `label`.
+    std::string addressee;
 };
 
 /// How one of her messages went down, judged in hindsight.
