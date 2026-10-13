@@ -218,7 +218,7 @@ std::string fill_template(std::string_view text, const std::vector<std::pair<std
 std::string_view sticker_rule(bool enabled) {
     if (!enabled) return "";
     return "- 群里大家常用表情包回应。她想表达的主要是情绪或反应（笑死、无语、震惊、赞同、收到、委屈、看戏、晚安）时，发一张表情包"
-           "往往比打字自然，也比打\"确实\"\"草\"这种一两个字的反应好。先用 find_sticker 按想表达的感觉找几张，挑一张贴合语气的用 "
+           "往往比打字自然，也比只打一两个字的反应好。先用 find_sticker 按想表达的感觉找几张，挑一张贴合语气的用 "
            "send_sticker 发；都不合适就别发，或者打字。说完话想补个情绪，也可以接着发一张。别人发的表情包好玩，也可以用 repeat "
            "复读那一张。认真回答问题、说正事时不用表情包；刚发过一张就隔一会儿，也别总发同一张。\n";
 }
@@ -242,7 +242,7 @@ std::string_view handoff_rule(bool reference) {
                "不要写台词，也不要规定她具体说什么、怎么说，那由她自己决定。";
     }
     return "- intent：用一句短话（十来个字）写她的态度或想说的点，例如\"吐槽这集作画崩了\"或\"问他抽到没有\"。"
-           "不要写成台词，也不要写成一套论证或建议（\"认同……但提醒……建议……\"）。";
+           "不要写成台词，也不要写成一套论证或建议。";
 }
 
 provider::History build_writer_history(const WriterInput &input) {
