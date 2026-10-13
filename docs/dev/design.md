@@ -282,8 +282,9 @@ Model calls (2026-10-11):
      a capped pool of the fit ones.
    - The pool turns over (2026-10-13). Each sticker has a heat: a sighting
      adds 1, her send 2, and it halves every `stickers.half_life_days` (14).
-     Once the pool is full, a spare hotter than the coldest member takes its
-     place; a sticker a person edited stays. Before, a newcomer could only
+     Once the pool is full, a spare hotter than the coldest member by more
+     than one sighting takes its place, so only a spare seen again gets in;
+     a sticker a person edited stays. Before, a newcomer could only
      replace a never-sent member and counts never decayed, so the pool froze.
      Heat also weights the sample used without embeddings and orders word
      matches. Schema 18 started heat at seen + 2 × used.

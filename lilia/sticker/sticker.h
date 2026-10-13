@@ -29,7 +29,8 @@ namespace lilia::sticker {
 // a vision model describes and tags each (within an hourly budget; animated
 // ones as a grid of their frames for models that read only the first) and
 // judges whether it is fit to send. Fit stickers fill a capped pool; once it
-// is full, a spare hotter than the coldest member takes its place (heat:
+// is full, a spare hotter than the coldest member by more than one sighting
+// takes its place (heat:
 // sightings and her sends, decayed). What a sticker is used for is learned
 // from the chats it turns up in (sticker/usage.h): the lines around each
 // sighting are kept as an anonymised snippet, like jargon evidence, and the
@@ -147,7 +148,7 @@ struct Collector {
 
     /// Registers `sticker` if the pool has room; otherwise it takes the place
     /// of the coldest member a person has not edited when its heat now is
-    /// higher, and stays a spare when not.
+    /// higher by more than 1 (one sighting), and stays a spare when not.
     void file_into_pool(const store::Sticker &sticker);
 
     /// Reads a sticker's bytes from the data directory.

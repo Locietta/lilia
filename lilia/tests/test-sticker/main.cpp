@@ -510,6 +510,8 @@ void test_store_and_pool() {
             "a hotter sticker takes the place of the coldest, which becomes a spare");
     collector.file_into_pool(add("cold", 1.5));
     require(members() == std::set<std::string>{"h1", "h2"}, "a colder one stays out");
+    collector.file_into_pool(add("near", 2.5));
+    require(members() == std::set<std::string>{"h1", "h2"}, "hotter by less than a sighting stays out");
 
     // Every member has been sent: a hotter newcomer still gets in.
     require(db->sticker_used(ids["h1"], clock, 14).has_value() && db->sticker_used(ids["h2"], clock, 14).has_value(), "sent");

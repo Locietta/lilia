@@ -289,7 +289,8 @@ struct StickerConfig {
     /// Groups never collected from.
     std::vector<i64> exclude_groups;
     /// Registered stickers she may send. Once full, a spare hotter than the
-    /// coldest member takes its place; one a person edited is never displaced.
+    /// coldest member by more than one sighting takes its place; one a person
+    /// edited is never displaced.
     usize max_registered = 200;
     /// Heat, the popularity that ranks stickers: a sighting adds 1, her send
     /// 2, and it halves every this many days (0: never).

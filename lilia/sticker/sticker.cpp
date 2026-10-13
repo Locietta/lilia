@@ -547,12 +547,14 @@ void Collector::file_into_pool(const store::Sticker &sticker) {
     }
     // The weakest member is the coldest: seen and sent least lately, so a
     // sticker once popular (or once sent) ages out. A sticker a person edited
-    // stays: someone cared about it.
+    // stays: someone cared about it. The newcomer must be hotter by a whole
+    // sighting, so only a spare seen again gets in; one seen once would
+    // otherwise displace every member seen once before it.
     std::erase_if(*registered, [](const store::Sticker &member) { return member.modified_by == "USER"; });
     const i64 time = now();
     const auto heat = [&](const store::Sticker &member) { return store::current_heat(member, time, config.half_life_days); };
     const auto weakest = std::ranges::min_element(*registered, {}, heat);
-    if (weakest != registered->end() && heat(sticker) > heat(*weakest)) {
+    if (weakest != registered->end() && heat(sticker) > heat(*weakest) + 1.0) {
         std::ignore = store.set_sticker_status(weakest->id, "spare");
         std::ignore = store.set_sticker_status(sticker.id, "registered");
     }
