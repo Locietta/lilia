@@ -302,7 +302,8 @@ Model calls (2026-10-11):
      facts repeating `→她`, `interaction_summary`, a different dyad
      definition with keyword lists in `line_features`, and two writer
      patches. Keep the arrows and quotes; make the fitted prior the one
-     derived signal.
+     derived signal (addressee recognition: Ouchi & Tsuboi 2016, Le et al.
+     2019, MPC-BERT).
    - Planner dispatch: an if-chain on tool names with per-tool counters,
      silent repairs of planner mistakes (a self target becomes the newest
      line, a missing wait becomes 30 s), and replay's `must_speak` inside the
