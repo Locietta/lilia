@@ -1,8 +1,11 @@
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -408,25 +411,43 @@ void test_urls() {
 
 void test_sample() {
     std::vector<store::Sticker> pool;
-    for (i64 i = 0; i < 10; ++i) pool.push_back({.id = i, .description = "d" + std::to_string(i), .tags = "t", .seen = 1});
-    pool[3].seen = 40;
+    for (i64 i = 0; i < 10; ++i) pool.push_back({.id = i, .description = "d" + std::to_string(i), .tags = "t", .heat = 1});
+    pool[3].heat = 40;
     std::mt19937 rng(5);
     require(sticker::sample(pool, 20, rng).size() == 10, "never more than the pool");
     int popular = 0;
     for (int i = 0; i < 300; ++i) popular += sticker::sample(pool, 1, rng).front().id == 3;
     // Weight 41 against 9 others of weight 2: about 70% of single picks.
-    require(popular > 150, "seen often means picked often");
+    require(popular > 150, "hot means picked often");
+    // Sends of sticker 3 went down badly every time: mean 1/10, a fifth of its weight.
+    const sticker::Weighing weighing{.rewards = {{3, {.judged = 8, .welcomed = 0}}}};
+    popular = 0;
+    for (int i = 0; i < 300; ++i) popular += sticker::sample(pool, 1, rng, weighing).front().id == 3;
+    // Weight 8.2 against 18: about 31%.
+    require(popular > 60 && popular < 130, "a sticker that goes down badly comes up less");
+}
+
+void test_rewards() {
+    const sticker::Rewards rewards{{7, {.judged = 2, .welcomed = 2}}, {8, {.judged = 3, .welcomed = 0}}};
+    require(sticker::reward_mean(rewards, 9) == 0.5, "never judged: even odds");
+    require(std::abs(sticker::reward_mean(rewards, 7) - 0.75) < 1e-12 && std::abs(sticker::reward_mean(rewards, 8) - 0.2) < 1e-12,
+            "the mean of the Beta(1, 1) posterior");
+    require(sticker::reward_boost(0.5, 0.02) == 0 && std::abs(sticker::reward_boost(1, 0.02) - 0.06) < 1e-12 &&
+                std::abs(sticker::reward_boost(0, 0.02) + 0.06) < 1e-12,
+            "a boost within ±0.06 at the default weight");
+    require(std::abs(sticker::reward_boost(0.75, 0.02) - 0.03) < 1e-12, "two good sends of two: +0.03");
 }
 
 void test_finding() {
     std::vector<store::Sticker> pool{
-        {.id = 1, .sha1 = "a", .description = "猫在转圈", .tags = "开心、好耶", .seen = 9},
-        {.id = 2, .sha1 = "b", .description = "猫瞪眼，配字\"啊？\"", .tags = "无语、震惊", .seen = 1},
-        {.id = 3, .sha1 = "c", .description = "熊猫头摊手", .tags = "无语、无奈", .seen = 5},
+        {.id = 1, .sha1 = "a", .description = "猫在转圈", .tags = "开心、好耶", .heat = 9},
+        {.id = 2, .sha1 = "b", .description = "猫瞪眼，配字\"啊？\"", .tags = "无语、震惊", .heat = 1},
+        {.id = 3, .sha1 = "c", .description = "熊猫头摊手", .tags = "无语、无奈", .heat = 5},
+        {.id = 4, .sha1 = "d", .description = "狗狗无语", .tags = "无奈", .heat = 2},
     };
     std::mt19937 rng(7);
-    const auto found = sticker::match(pool, "无语/震惊", 2, rng);
-    require(found.size() == 2 && found[0].id == 2 && found[1].id == 3, "more words matched first, then the more popular");
+    const auto found = sticker::match(pool, "无语/震惊", 3, rng);
+    require(found.size() == 3 && found[0].id == 2 && found[1].id == 3 && found[2].id == 4, "more words matched first, then the hotter");
     require(sticker::match(pool, "晚安", 2, rng).size() == 2, "nothing matched: a sample fills up");
 
     require(sticker::embedding_text(pool[1]) == "无语、震惊：猫瞪眼，配字\"啊？\"", "embedded as tags and description");
@@ -461,32 +482,67 @@ void test_resend() {
 void test_store_and_pool() {
     auto db = store::Store::open_memory();
     require(db.has_value(), "open");
-    StickerConfig config{.enabled = true, .max_registered = 2};
+    StickerConfig config{.enabled = true, .max_registered = 2, .half_life_days = 14};
     sticker::Collector collector(config, "data", *db, [](lighter::Task<>) {});
-    std::vector<i64> ids;
-    for (int i = 0; i < 3; ++i) {
-        auto id = db->add_sticker({.sha1 = "h" + std::to_string(i), .path = "stickers/x", .media_type = "image/png", .seen = 1 + i});
+    constexpr i64 k_day = 86'400;
+    i64 clock = 100 * k_day;
+    collector.now = [&clock] { return clock; };
+    std::map<std::string, i64> ids;
+    const auto add = [&](std::string sha1, double heat) {
+        auto id = db->add_sticker({.sha1 = sha1, .path = "stickers/x", .media_type = "image/png", .heat = heat, .heat_time = clock});
         require(id.has_value(), "add sticker");
-        ids.push_back(*id);
+        ids[sha1] = *id;
+        return **db->sticker_by_id(*id);
+    };
+    const auto members = [&] {
+        std::set<std::string> out;
+        for (const auto &member : *db->stickers("registered")) out.insert(member.sha1);
+        return out;
+    };
+    const auto h0 = add("h0", 1);
+    const auto h1 = add("h1", 2);
+    require((*db->sticker_by_hash("h1"))->id == ids["h1"] && !*db->sticker_by_hash("nope"), "look up by hash");
+    collector.file_into_pool(h0);
+    collector.file_into_pool(h1);
+    require(members() == std::set<std::string>{"h0", "h1"}, "the pool fills up");
+    collector.file_into_pool(add("h2", 3));
+    require(members() == std::set<std::string>{"h1", "h2"} && db->stickers("spare")->front().sha1 == "h0",
+            "a hotter sticker takes the place of the coldest, which becomes a spare");
+    collector.file_into_pool(add("cold", 1.5));
+    require(members() == std::set<std::string>{"h1", "h2"}, "a colder one stays out");
+
+    // Every member has been sent: a hotter newcomer still gets in.
+    require(db->sticker_used(ids["h1"], clock, 14).has_value() && db->sticker_used(ids["h2"], clock, 14).has_value(), "sent");
+    require((*db->sticker_by_hash("h1"))->used == 1 && (*db->sticker_by_hash("h1"))->heat == 4, "a send counts and adds 2");
+    collector.file_into_pool(add("h3", 6));
+    require(members() == std::set<std::string>{"h2", "h3"}, "sent once is no shield");
+
+    // Heat decays: two months on, h2 (5) and h3 (6) are cold next to a
+    // sticker seen three times this week.
+    clock += 60 * k_day;
+    const auto h2 = **db->sticker_by_hash("h2");
+    require(std::abs(store::current_heat(h2, clock, 14) - 5 * std::exp2(-60.0 / 14)) < 1e-9 && store::current_heat(h2, clock, 0) == 5,
+            "heat halves every half-life; 0: never");
+    auto h4 = add("h4", 0);
+    for (int i = 0; i < 3; ++i) {
+        auto seen = db->sticker_seen(h4.id, clock, 14);
+        require(seen.has_value(), "seen");
+        h4 = *seen;
     }
-    require((*db->sticker_by_hash("h1"))->id == ids[1] && !*db->sticker_by_hash("nope"), "look up by hash");
-    for (int i = 0; i < 2; ++i) collector.file_into_pool(**db->sticker_by_hash("h" + std::to_string(i)));
-    require(db->stickers("registered")->size() == 2, "the pool fills up");
-    collector.file_into_pool(**db->sticker_by_hash("h2"));
-    auto registered = db->stickers("registered");
-    require(registered->size() == 2 && registered->front().sha1 == "h2", "a sticker seen more replaces the weakest unsent one");
-    require(db->stickers("spare")->front().sha1 == "h0", "the weakest becomes a spare");
-    // A sticker a person edited is never displaced.
-    require(db->edit_sticker(ids[1], "人工", "人工").has_value(), "edit");
-    auto newcomer = db->add_sticker({.sha1 = "h3", .path = "stickers/x", .media_type = "image/png", .seen = 9});
-    collector.file_into_pool(**db->sticker_by_hash("h3"));
-    registered = db->stickers("registered");
-    require(registered->size() == 2 && std::ranges::any_of(*registered, [&](const auto &s) { return s.id == ids[1]; }) &&
-                std::ranges::any_of(*registered, [&](const auto &s) { return s.id == *newcomer; }),
-            "an edited sticker stays; the other unsent one makes room");
-    require(db->sticker_seen(ids[0], 99).has_value() && (*db->sticker_by_hash("h0"))->seen == 2, "sightings count");
-    require(db->sticker_used(ids[2], 100).has_value() && (*db->sticker_by_hash("h2"))->used == 1, "uses count");
-    require(db->describe_sticker(ids[0], "猫", "无语", "rejected").has_value() && (*db->sticker_by_hash("h0"))->status == "rejected",
+    require(h4.seen == 4 && h4.heat == 3 && h4.heat_time == clock, "each sighting adds 1");
+    collector.file_into_pool(h4);
+    require(members() == std::set<std::string>{"h3", "h4"}, "the member unseen for long loses to the recent one");
+    clock += 14 * k_day;
+    const auto again = db->sticker_seen(h4.id, clock, 14);
+    require(again.has_value() && again->heat == 2.5, "decayed before it grows: 3 halved, plus 1");
+
+    // A sticker a person edited is never displaced, however cold.
+    require(db->edit_sticker(ids["h3"], "人工", "人工").has_value(), "edit");
+    collector.file_into_pool(add("h5", 9));
+    require(members() == std::set<std::string>{"h3", "h5"}, "an edited sticker stays; the other one makes room");
+    collector.file_into_pool(add("h6", 8));
+    require(members() == std::set<std::string>{"h3", "h5"}, "with only colder newcomers nothing moves");
+    require(db->describe_sticker(ids["h0"], "猫", "无语", "rejected").has_value() && (*db->sticker_by_hash("h0"))->status == "rejected",
             "tagging sets the status");
 }
 
@@ -497,6 +553,7 @@ int main() {
         test_parse_tagging();
         test_urls();
         test_sample();
+        test_rewards();
         test_finding();
         test_resend();
         test_store_and_pool();

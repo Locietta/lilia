@@ -142,13 +142,20 @@ std::vector<std::string> sticker_urls(const onebot::Message &message) {
     return urls;
 }
 
-std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng, const Rewards &rewards) {
+double reward_mean(const Rewards &rewards, i64 sticker_id) {
+    const auto it = rewards.find(sticker_id);
+    if (it == rewards.end()) return 0.5;
+    return static_cast<double>(1 + it->second.welcomed) / static_cast<double>(2 + it->second.judged);
+}
+
+double reward_boost(double mean, double weight) { return weight * 6 * (mean - 0.5); }
+
+std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng, const Weighing &weighing) {
     std::vector<store::Sticker> picked;
     std::vector<double> weights;
     for (const auto &sticker : pool) {
-        const auto reward = rewards.find(sticker.id);
-        weights.push_back(static_cast<double>(sticker.seen + 2 * sticker.used + 1) +
-                          (reward == rewards.end() ? 0.0 : std::max(0.0, reward->second.total)));
+        weights.push_back((store::current_heat(sticker, weighing.now, weighing.half_life_days) + 1) * 2 *
+                          reward_mean(weighing.rewards, sticker.id));
     }
     while (picked.size() < count && picked.size() < pool.size()) {
         std::discrete_distribution<usize> pick(weights.begin(), weights.end());
@@ -180,7 +187,7 @@ std::string lexical_text(const store::Sticker &sticker, bool usage) {
 }
 
 std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng,
-                                  const Rewards &rewards) {
+                                  const Weighing &weighing) {
     std::vector<std::string_view> words;
     for (usize i = 0; i < feeling.size();) {
         // Split at ASCII separators and the common full-width ones.
@@ -207,13 +214,14 @@ std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_
             rest.push_back(std::move(sticker));
         }
     }
-    std::ranges::stable_sort(hits, [](const auto &a, const auto &b) {
+    const auto heat = [&](const store::Sticker &sticker) { return store::current_heat(sticker, weighing.now, weighing.half_life_days); };
+    std::ranges::stable_sort(hits, [&](const auto &a, const auto &b) {
         if (a.first != b.first) return a.first > b.first;
-        return a.second.seen + 2 * a.second.used > b.second.seen + 2 * b.second.used;
+        return heat(a.second) > heat(b.second);
     });
     std::vector<store::Sticker> out;
     for (usize i = 0; i < hits.size() && out.size() < count; ++i) out.push_back(std::move(hits[i].second));
-    for (auto &sticker : sample(std::move(rest), count - out.size(), rng, rewards)) out.push_back(std::move(sticker));
+    for (auto &sticker : sample(std::move(rest), count - out.size(), rng, weighing)) out.push_back(std::move(sticker));
     return out;
 }
 
@@ -441,8 +449,7 @@ Task<> Collector::collect(std::string url, std::string context, std::shared_ptr<
     if (*known) {
         auto sticker = **known;
         if (found) *found = sticker.id;
-        std::ignore = store.sticker_seen(sticker.id, now());
-        ++sticker.seen;
+        if (auto seen = store.sticker_seen(sticker.id, now(), config.half_life_days); seen.has_value()) sticker = *std::move(seen);
         if (sticker.status == "pending") {
             co_await tag(std::move(sticker), std::move(bytes), std::move(context));
         } else if (sticker.status == "spare") {
@@ -469,6 +476,7 @@ Task<> Collector::collect(std::string url, std::string context, std::shared_ptr<
         .bytes = static_cast<i64>(bytes.size()),
         .first_seen = now(),
         .last_seen = now(),
+        .heat_time = now(),
     };
     auto id = store.add_sticker(sticker);
     if (id.has_error()) co_return;
@@ -537,13 +545,14 @@ void Collector::file_into_pool(const store::Sticker &sticker) {
         std::ignore = store.set_sticker_status(sticker.id, "registered");
         return;
     }
-    // The weakest member: never sent, least seen, longest unseen. A sticker a
-    // person edited stays: someone cared about it.
+    // The weakest member is the coldest: seen and sent least lately, so a
+    // sticker once popular (or once sent) ages out. A sticker a person edited
+    // stays: someone cared about it.
     std::erase_if(*registered, [](const store::Sticker &member) { return member.modified_by == "USER"; });
-    const auto weakest = std::ranges::min_element(*registered, [](const store::Sticker &a, const store::Sticker &b) {
-        return std::tuple(a.used, a.seen, a.last_seen) < std::tuple(b.used, b.seen, b.last_seen);
-    });
-    if (weakest != registered->end() && sticker.seen > weakest->seen && weakest->used == 0) {
+    const i64 time = now();
+    const auto heat = [&](const store::Sticker &member) { return store::current_heat(member, time, config.half_life_days); };
+    const auto weakest = std::ranges::min_element(*registered, {}, heat);
+    if (weakest != registered->end() && heat(sticker) > heat(*weakest)) {
         std::ignore = store.set_sticker_status(weakest->id, "spare");
         std::ignore = store.set_sticker_status(sticker.id, "registered");
     }

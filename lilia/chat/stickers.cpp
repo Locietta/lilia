@@ -27,18 +27,19 @@ Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feelin
     if (pool.has_error() || pool->empty()) co_return std::vector<store::Sticker>{};
     const usize count = std::max<usize>(r->config.stickers.candidates, 1);
     // How her sends of each went down (hindsight feedback).
-    auto stored = r->store.sticker_rewards();
-    const auto rewards = stored.has_value() ? *std::move(stored) : sticker::Rewards{};
-    if (!r->memory) co_return sticker::match(*std::move(pool), feeling, count, r->rng, rewards);
+    auto rewards = r->store.sticker_rewards();
+    sticker::Weighing weighing{.now = r->now(),
+                               .half_life_days = r->config.stickers.half_life_days,
+                               .rewards = rewards.has_value() ? *std::move(rewards) : sticker::Rewards{}};
+    if (!r->memory) co_return sticker::match(*std::move(pool), feeling, count, r->rng, weighing);
     std::vector<retrieval::Document> documents;
     for (const auto &sticker : *pool) {
-        const auto reward = rewards.find(sticker.id);
         documents.push_back(
             {.id = sticker.id,
              .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images,
                                                 r->config.stickers.usage_in_search),
              .lexical = sticker::lexical_text(sticker, r->config.stickers.usage_in_search),
-             .boost = reward == rewards.end() ? 0.0 : r->config.feedback.reward_weight * std::clamp(reward->second.total, -3.0, 3.0)});
+             .boost = sticker::reward_boost(sticker::reward_mean(weighing.rewards, sticker.id), r->config.feedback.reward_weight)});
     }
     const auto matches = co_await r->memory->retriever.search(
         retrieval::k_sticker_task, std::move(feeling), documents,
@@ -69,7 +70,7 @@ Task<bool> send_sticker(Responder *r, store::ChatKey chat, store::Sticker sticke
         .from_self = true,
     });
     if (stored.has_error()) log::error("cannot record sent sticker: {}", stored.error().message());
-    std::ignore = r->store.sticker_used(sticker.id, r->now());
+    std::ignore = r->store.sticker_used(sticker.id, r->now(), r->config.stickers.half_life_days);
     r->chats[chat].last_sticker = r->now();
     // How the group takes it is evidence of what the sticker is for.
     if (r->stickers && chat.type == "group") r->stickers->observe_own(chat.id, sticker.id);

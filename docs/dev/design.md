@@ -280,6 +280,18 @@ Model calls (2026-10-11):
    - Learn stickers from every group the account is in (`sticker/`): the
      image (deduplicated by hash), a vision model's description and tags,
      a capped pool of the fit ones.
+   - The pool turns over (2026-10-13). Each sticker has a heat: a sighting
+     adds 1, her send 2, and it halves every `stickers.half_life_days` (14).
+     Once the pool is full, a spare hotter than the coldest member takes its
+     place; a sticker a person edited stays. Before, a newcomer could only
+     replace a never-sent member and counts never decayed, so the pool froze.
+     Heat also weights the sample used without embeddings and orders word
+     matches. Schema 18 started heat at seen + 2 × used.
+   - Reward (2026-10-13): n of her sends of a sticker were judged, s of them
+     with a positive hindsight reward. The Beta(1, 1) posterior mean
+     m = (1 + s) / (2 + n) adds `feedback.reward_weight` × 6 × (m − 0.5) to
+     its search score (at most ±0.06 at the default 0.02, as the clamped
+     reward sum it replaces), and the sample weight is (heat + 1) × 2m.
    - Usage (2026-10-12, after MaiBot's jargon cycle; MaiBot itself freezes
      sticker tags): each sighting, hers included, keeps an anonymised snippet
      of up to 3 lines before and 3 after (within 3 minutes) in
@@ -336,8 +348,7 @@ Model calls (2026-10-11):
      (with A_Memorix) shows sectioned profiles of up to 3 people per round.
    - Learning: the expression blocklists match substrings, `learner.md`
      contradicts itself on 梗, and styles are not checked against the source
-     line. The sticker pool freezes (a newcomer replaces only a never-sent
-     sticker; counts never decay): use decayed counts and a Beta reward.
+     line.
    - Smaller: she cannot @ anyone; quoting is opt-in, where MaiBot quotes
      by default (its hint says for older targets); facts from private chats
      are not kept out of groups.

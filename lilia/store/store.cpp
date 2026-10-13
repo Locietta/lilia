@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <format>
 #include <utility>
 
@@ -18,8 +19,9 @@ namespace {
 // stickers.modified_by. 14: sticker usage (stickers.usage and its counts,
 // sticker_evidence). 15: planner_turns. 16: hindsight feedback (stickers.reward,
 // addressee_labels, reply_effects, addressee_models, feedback_progress). 17:
-// chat_summaries.kind (window summaries).
-constexpr int k_schema_version = 17;
+// chat_summaries.kind (window summaries). 18: stickers.heat and heat_time
+// (decayed popularity).
+constexpr int k_schema_version = 18;
 
 constexpr std::string_view k_expressions_table = R"sql(
 CREATE TABLE expressions (
@@ -211,7 +213,9 @@ CREATE TABLE IF NOT EXISTS stickers (
     usage_count INTEGER NOT NULL DEFAULT 0,
     usage_inferred_count INTEGER NOT NULL DEFAULT 0,
     tags_by TEXT NOT NULL DEFAULT 'VISION',
-    reward REAL NOT NULL DEFAULT 0
+    reward REAL NOT NULL DEFAULT 0,
+    heat REAL NOT NULL DEFAULT 0,
+    heat_time INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS stickers_by_status ON stickers (status, seen);
 
@@ -420,6 +424,20 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
     if (auto added = ensure_column("chat_summaries", "kind", "TEXT NOT NULL DEFAULT 'rolling'"); added.has_error()) {
         return lighter::outcome_error(std::move(added).error());
     }
+    // Schema 18: heat starts from the counts, as of the sticker's last sighting
+    // or send.
+    auto heated = count_of("SELECT COUNT(*) FROM pragma_table_info('stickers') WHERE name = 'heat'");
+    if (heated.has_error()) return lighter::outcome_error(std::move(heated).error());
+    if (*heated == 0) {
+        auto migrated =
+            store.database.execute("BEGIN; ALTER TABLE stickers ADD COLUMN heat REAL NOT NULL DEFAULT 0;"
+                                   "ALTER TABLE stickers ADD COLUMN heat_time INTEGER NOT NULL DEFAULT 0;"
+                                   "UPDATE stickers SET heat = seen + 2 * used, heat_time = max(last_seen, last_used); COMMIT;");
+        if (migrated.has_error()) {
+            (void) store.database.execute("ROLLBACK");
+            return lighter::outcome_error(std::move(migrated).error());
+        }
+    }
     // The media table predates its description column in versions 2 and 3.
     if (current == 2 || current == 3) {
         auto added = store.database.execute("ALTER TABLE media ADD COLUMN description TEXT NOT NULL DEFAULT ''");
@@ -626,7 +644,7 @@ namespace {
 
 constexpr std::string_view k_sticker_columns = "id, sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, "
                                                "last_seen, last_used, modified_by, usage, usage_count, "
-                                               "usage_inferred_count, tags_by";
+                                               "usage_inferred_count, tags_by, heat, heat_time";
 
 Sticker read_sticker(const Statement &statement) {
     return {
@@ -648,10 +666,32 @@ Sticker read_sticker(const Statement &statement) {
         .usage_count = statement.column_int(15),
         .usage_inferred_count = statement.column_int(16),
         .tags_by = statement.column_text(17),
+        .heat = statement.column_double(18),
+        .heat_time = statement.column_int(19),
     };
 }
 
+/// Adds `amount` to a sticker's heat at `time` (decayed first), along with
+/// `counts`: assignments over ?1 (the id) and ?2 (the time).
+Result<void> add_heat(Store &store, i64 id, i64 time, double amount, double half_life_days, std::string_view counts) {
+    auto sticker = store.sticker_by_id(id);
+    if (sticker.has_error()) return lighter::outcome_error(std::move(sticker).error());
+    if (!*sticker) return lighter::outcome_error(Error::storage("no sticker " + std::to_string(id)));
+    auto statement = store.database.prepare(std::format("UPDATE stickers SET {}, heat = ?3, heat_time = ?4 WHERE id = ?1", counts));
+    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
+    statement->bind(1, id);
+    statement->bind(2, time);
+    statement->bind_double(3, current_heat(**sticker, time, half_life_days) + amount);
+    statement->bind(4, std::max(time, (*sticker)->heat_time));
+    return statement->run();
+}
+
 } // namespace
+
+double current_heat(const Sticker &sticker, i64 now, double half_life_days) {
+    if (half_life_days <= 0 || now <= sticker.heat_time) return sticker.heat;
+    return sticker.heat * std::exp2(-static_cast<double>(now - sticker.heat_time) / (half_life_days * 86'400));
+}
 
 Result<std::optional<Sticker>> Store::sticker_by_hash(std::string_view sha1) {
     auto statement = database.prepare(std::format("SELECT {} FROM stickers WHERE sha1 = ?1", k_sticker_columns));
@@ -675,8 +715,9 @@ Result<std::optional<Sticker>> Store::sticker_by_id(i64 id) {
 
 Result<i64> Store::add_sticker(const Sticker &sticker) {
     auto statement =
-        database.prepare("INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, seen, used, "
-                         "first_seen, last_seen, last_used, modified_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)");
+        database.prepare("INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, "
+                         "last_seen, last_used, modified_by, heat, heat_time) "
+                         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, sticker.sha1);
     statement->bind(2, sticker.path);
@@ -691,16 +732,20 @@ Result<i64> Store::add_sticker(const Sticker &sticker) {
     statement->bind(11, sticker.last_seen);
     statement->bind(12, sticker.last_used);
     statement->bind(13, sticker.modified_by);
+    statement->bind_double(14, sticker.heat);
+    statement->bind(15, sticker.heat_time);
     if (auto ran = statement->run(); ran.has_error()) return lighter::outcome_error(std::move(ran).error());
     return sqlite3_last_insert_rowid(database.value);
 }
 
-Result<void> Store::sticker_seen(i64 id, i64 time) {
-    auto statement = database.prepare("UPDATE stickers SET seen = seen + 1, last_seen = ?2 WHERE id = ?1");
-    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, id);
-    statement->bind(2, time);
-    return statement->run();
+Result<Sticker> Store::sticker_seen(i64 id, i64 time, double half_life_days) {
+    if (auto added = add_heat(*this, id, time, 1, half_life_days, "seen = seen + 1, last_seen = ?2"); added.has_error()) {
+        return lighter::outcome_error(std::move(added).error());
+    }
+    auto sticker = sticker_by_id(id);
+    if (sticker.has_error()) return lighter::outcome_error(std::move(sticker).error());
+    if (!*sticker) return lighter::outcome_error(Error::storage("no sticker " + std::to_string(id)));
+    return **sticker;
 }
 
 Result<void> Store::describe_sticker(i64 id, std::string_view description, std::string_view tags, std::string_view status) {
@@ -806,12 +851,8 @@ Result<void> Store::set_sticker_status(i64 id, std::string_view status) {
     return statement->run();
 }
 
-Result<void> Store::sticker_used(i64 id, i64 time) {
-    auto statement = database.prepare("UPDATE stickers SET used = used + 1, last_used = ?2 WHERE id = ?1");
-    if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, id);
-    statement->bind(2, time);
-    return statement->run();
+Result<void> Store::sticker_used(i64 id, i64 time, double half_life_days) {
+    return add_heat(*this, id, time, 2, half_life_days, "used = used + 1, last_used = ?2");
 }
 
 Result<std::vector<Sticker>> Store::stickers(std::string_view status) {
@@ -1279,7 +1320,7 @@ Result<std::vector<AddresseeModel>> Store::addressee_models() {
 
 Result<std::map<i64, StickerReward>> Store::sticker_rewards() {
     // Derived each time: a message judged again replaces its effect.
-    auto statement = database.prepare("SELECT sticker_id, COUNT(*), SUM(reward > 0), SUM(reward) FROM reply_effects "
+    auto statement = database.prepare("SELECT sticker_id, COUNT(*), SUM(reward > 0) FROM reply_effects "
                                       "WHERE kind = 'sticker' AND sticker_id != 0 GROUP BY sticker_id");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     std::map<i64, StickerReward> out;
@@ -1287,8 +1328,7 @@ Result<std::map<i64, StickerReward>> Store::sticker_rewards() {
         auto row = statement->step();
         if (row.has_error()) return lighter::outcome_error(std::move(row).error());
         if (!*row) break;
-        out[statement->column_int(0)] = {
-            .judged = statement->column_int(1), .welcomed = statement->column_int(2), .total = statement->column_double(3)};
+        out[statement->column_int(0)] = {.judged = statement->column_int(1), .welcomed = statement->column_int(2)};
     }
     return out;
 }

@@ -288,8 +288,12 @@ struct StickerConfig {
     bool enabled = false;
     /// Groups never collected from.
     std::vector<i64> exclude_groups;
-    /// Registered stickers she may send; popular spares replace the weakest.
+    /// Registered stickers she may send. Once full, a spare hotter than the
+    /// coldest member takes its place; one a person edited is never displaced.
     usize max_registered = 200;
+    /// Heat, the popularity that ranks stickers: a sighting adds 1, her send
+    /// 2, and it halves every this many days (0: never).
+    double half_life_days = 14;
     /// Budgets: new stickers described (vision calls) and downloads per hour.
     usize descriptions_per_hour = 10;
     usize downloads_per_hour = 200;
@@ -327,7 +331,8 @@ struct FeedbackConfig {
     usize min_rows_group = 80;
     usize min_positives = 10;
     usize refit_every = 20;
-    /// Sticker search boost per point of reward (clamped to 3 points).
+    /// Sticker search boost: reward_weight * 6 * (m - 0.5), m the Beta mean of
+    /// her sends of it going down well; at most ±3 * reward_weight.
     double reward_weight = 0.02;
 };
 

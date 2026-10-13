@@ -127,8 +127,10 @@ CREATE TABLE stickers (id INTEGER PRIMARY KEY, sha1 TEXT NOT NULL UNIQUE, path T
     bytes INTEGER NOT NULL, description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
     seen INTEGER NOT NULL DEFAULT 1, used INTEGER NOT NULL DEFAULT 0, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
     last_used INTEGER NOT NULL DEFAULT 0);
-INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, first_seen, last_seen)
-    VALUES ('s', 'stickers/s.gif', 'image/gif', 9, '猫', '无语', 'registered', 1, 1);
+INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, last_seen, last_used)
+    VALUES ('s', 'stickers/s.gif', 'image/gif', 9, '猫', '无语', 'registered', 3, 2, 1, 50, 40);
+INSERT INTO stickers (sha1, path, media_type, bytes, status, seen, used, first_seen, last_seen, last_used)
+    VALUES ('t', 'stickers/t.png', 'image/png', 9, 'registered', 1, 1, 1, 50, 70);
 INSERT INTO memory_chunks VALUES (1, 'group', 1, 1, 2, 1, 2, 'x', 'm', x'00');
 INSERT INTO person_facts VALUES (1, 7, 'TA对芒果过敏', '芒果', 'group', 1, 1, 1, 'm', x'00');
 INSERT INTO chat_summaries VALUES (1, 'group', 1, 1, 2, 1, 2, '定了周六去成都', '聊到成都', 'm', x'00', x'00');
@@ -146,11 +148,13 @@ PRAGMA user_version = 11;
             require(statement.has_value() && *statement->step(), "query");
             return statement->column_int(0);
         };
-        require(count("PRAGMA user_version") == 17, "now schema 17");
+        require(count("PRAGMA user_version") == 18, "now schema 18");
         auto sticker = db->sticker_by_hash("s");
         require(sticker.has_value() && *sticker && (*sticker)->modified_by == "AI" && (*sticker)->tags == "无语" &&
                     (*sticker)->usage.empty() && (*sticker)->usage_count == 0 && (*sticker)->tags_by == "VISION",
                 "stickers gain modified_by (machine-made) and an empty usage");
+        require((*sticker)->heat == 7 && (*sticker)->heat_time == 50, "heat starts from seen + 2 * used, at the last sighting");
+        require((*db->sticker_by_hash("t"))->heat == 3 && (*db->sticker_by_hash("t"))->heat_time == 70, "or at her last send");
         require(count("SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name IN ('model', 'vector')") == 0 &&
                     count("SELECT COUNT(*) FROM pragma_table_info('chat_summaries') WHERE name IN ('model', 'vector', 'cue_vectors')") ==
                         0 &&

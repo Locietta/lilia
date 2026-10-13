@@ -28,8 +28,9 @@ namespace lilia::sticker {
 // the account is in are downloaded, deduplicated by content hash and counted;
 // a vision model describes and tags each (within an hourly budget; animated
 // ones as a grid of their frames for models that read only the first) and
-// judges whether it is fit to send. Fit stickers fill a capped pool; a popular spare
-// takes the place of the weakest member. What a sticker is used for is learned
+// judges whether it is fit to send. Fit stickers fill a capped pool; once it
+// is full, a spare hotter than the coldest member takes its place (heat:
+// sightings and her sends, decayed). What a sticker is used for is learned
 // from the chats it turns up in (sticker/usage.h): the lines around each
 // sighting are kept as an anonymised snippet, like jargon evidence, and the
 // helper model re-infers the usage as snippets accumulate. No other text from
@@ -51,9 +52,26 @@ std::vector<std::string> sticker_urls(const onebot::Message &message);
 /// The rewards of stickers by id (Store::sticker_rewards).
 using Rewards = std::map<i64, store::StickerReward>;
 
+/// How likely a send of the sticker goes down well: the mean of its Beta(1, 1)
+/// posterior, (1 + welcomed) / (2 + judged); 0.5 when never judged.
+double reward_mean(const Rewards &rewards, i64 sticker_id);
+
+/// Its search boost: weight * 6 * (mean - 0.5), within ±3 * weight (±0.06 at
+/// the default 0.02, the most the clamped reward sum gave before).
+double reward_boost(double mean, double weight);
+
+/// What sampling and matching weigh a sticker by besides its words: its heat
+/// at `now`, and how her sends of it went down.
+struct Weighing {
+    i64 now = 0;
+    double half_life_days = 0;
+    Rewards rewards;
+};
+
 /// Up to `count` stickers sampled without replacement, weighted by
-/// seen + 2 * used + 1 (+ a positive reward) so popular ones come up more.
-std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng, const Rewards &rewards = {});
+/// (heat + 1) * 2 * reward_mean, so popular ones come up more and ones whose
+/// sends went down badly less (a sticker never judged counts its heat alone).
+std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng, const Weighing &weighing = {});
 
 /// What a sticker is embedded as: its tags and description.
 std::string embedding_text(const store::Sticker &sticker);
@@ -71,10 +89,10 @@ std::vector<std::string> embedding_inputs(const store::Sticker &sticker, const s
 std::string lexical_text(const store::Sticker &sticker, bool usage);
 
 /// Without embeddings: stickers whose tags or description contain words of
-/// `feeling` ("无语、震惊"), most matched and most popular first, then a
+/// `feeling` ("无语、震惊"), most matched and hottest first, then a
 /// weighted sample to fill up to `count`.
 std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng,
-                                  const Rewards &rewards = {});
+                                  const Weighing &weighing = {});
 
 /// "s12": how the planner names a sticker.
 std::string handle(const store::Sticker &sticker);
@@ -127,8 +145,9 @@ struct Collector {
     /// then files it into the pool.
     lighter::Task<> tag(store::Sticker sticker, std::string bytes, std::string context);
 
-    /// Registers `sticker` if the pool has room; otherwise it becomes a spare
-    /// unless it has been seen more than the weakest registered one.
+    /// Registers `sticker` if the pool has room; otherwise it takes the place
+    /// of the coldest member a person has not edited when its heat now is
+    /// higher, and stays a spare when not.
     void file_into_pool(const store::Sticker &sticker);
 
     /// Reads a sticker's bytes from the data directory.

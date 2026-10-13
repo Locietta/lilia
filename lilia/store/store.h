@@ -133,14 +133,22 @@ struct Sticker {
     i64 usage_count = 0;
     i64 usage_inferred_count = 0;
     std::string tags_by = "VISION";
+    /// Decayed popularity: what it had at heat_time halves every
+    /// stickers.half_life_days; a sighting adds 1 and her send 2 (see
+    /// current_heat).
+    double heat = 1;
+    i64 heat_time = 0;
 };
 
+/// A sticker's heat at `now`, halved for every `half_life_days` since its
+/// heat_time (not grown when `now` is earlier; 0 days: no decay).
+double current_heat(const Sticker &sticker, i64 now, double half_life_days);
+
 /// How her sends of a sticker went down, from its reply_effects: sends
-/// judged, those with a positive reward, and the rewards summed.
+/// judged, and those with a positive reward.
 struct StickerReward {
     i64 judged = 0;
     i64 welcomed = 0;
-    double total = 0;
 };
 
 /// An anonymised snippet of a chat a sticker turned up in; `own` when lilia
@@ -454,8 +462,9 @@ struct Store {
     Result<std::optional<Sticker>> sticker_by_hash(std::string_view sha1);
     Result<std::optional<Sticker>> sticker_by_id(i64 id);
     Result<i64> add_sticker(const Sticker &sticker);
-    /// Counts another sighting.
-    Result<void> sticker_seen(i64 id, i64 time);
+    /// Counts another sighting, which adds 1 to its decayed heat; returns the
+    /// sticker as it is now.
+    Result<Sticker> sticker_seen(i64 id, i64 time, double half_life_days);
     /// Machine tags and the status; the tags and description of a sticker a
     /// person edited stay as they are.
     Result<void> describe_sticker(i64 id, std::string_view description, std::string_view tags, std::string_view status);
@@ -472,8 +481,10 @@ struct Store {
     /// Forgets a group's snippets; returns how many went.
     Result<i64> delete_sticker_evidence_of_group(i64 chat_id);
     Result<void> set_sticker_status(i64 id, std::string_view status);
-    Result<void> sticker_used(i64 id, i64 time);
-    /// Stickers with this status, most seen first.
+    /// Counts one of her sends, which adds 2 to its decayed heat.
+    Result<void> sticker_used(i64 id, i64 time, double half_life_days);
+    /// Stickers with this status, most seen first: an order for listing them;
+    /// current_heat is what ranks them.
     Result<std::vector<Sticker>> stickers(std::string_view status);
 
     Result<void> add_fact(const PersonFact &fact);
