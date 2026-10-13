@@ -271,6 +271,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     config.chat.groups = {k_replay_group};
     config.chat.private_users.clear();
     config.chat.admins.clear();
+    config.feedback.enabled = false; // the prior is shown, nothing is judged
     auto store = store::Store::open_memory();
     if (store.has_error()) {
         std::fprintf(stderr, "%s\n", store.error().message().c_str());
@@ -313,6 +314,10 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     }
     responder.writer_fallbacks = make_writer_fallbacks(config.model);
     responder.planner_fallbacks = make_planner_fallbacks(config.model);
+    // The addressee prior as live, from its hand-set weights.
+    feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
+                                [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    responder.feedback = &feedback;
     sticker::Collector collector(config.stickers, config.data_dir, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (stickers) {
         auto source = store::Store::open_readonly(*stickers);
@@ -503,6 +508,7 @@ Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std
     config.chat.groups = {k_replay_group};
     config.chat.private_users.clear();
     config.chat.admins.clear();
+    config.feedback.enabled = false; // the prior is shown, nothing is judged
     std::vector<std::string> names = config.chat.aliases;
     names.push_back(config.chat.name);
     std::map<std::string, i64> uids;
@@ -532,6 +538,10 @@ Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std
             if (!made) co_return 1;
             auto &responder = *made;
             responder.self = {.user_id = k_replay_self, .nickname = config.chat.name};
+            // The addressee prior as live, from its hand-set weights.
+            feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
+                                        [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+            responder.feedback = &feedback;
             const i64 base = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             i64 sim = 0;
             responder.now = [&sim, base] { return base + sim; };
@@ -693,15 +703,11 @@ i64 self_id_of(store::Store &store, const std::vector<i64> &groups) {
 }
 
 Task<int> run_db_probes(Config config, std::filesystem::path database, std::optional<std::filesystem::path> persona, usize repeat,
-                        usize limit, std::optional<std::filesystem::path> planner_prompt, bool hint) {
+                        usize limit, std::optional<std::filesystem::path> planner_prompt) {
     // Private conversations: the info log would show the planner's analyses
     // and what she said.
     if (static_cast<int>(log::g_threshold) > static_cast<int>(log::Level::WARN)) log::g_threshold = log::Level::WARN;
-    // The prior as shown live, but only its hand-set weights: models fitted
-    // on these very labels would grade themselves.
-    config.feedback.enabled = hint;
-    config.feedback.hint = hint;
-    config.feedback.hint_bootstrap = hint;
+    config.feedback.enabled = false;
     std::string planner_text;
     if (planner_prompt) {
         auto text = read_prompt(*planner_prompt);
@@ -758,10 +764,12 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
             if (!made) co_return 1;
             auto &responder = *made;
             responder.self = {.user_id = self_id, .nickname = config.chat.name};
-            // Nothing loaded: no fitted model, so the prior is bootstrap_weights().
+            // The prior as live (feedback.hint), but from its hand-set weights:
+            // nothing is loaded, as models fitted on these very labels would
+            // grade themselves.
             feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
                                         [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
-            if (hint) responder.feedback = &feedback;
+            responder.feedback = &feedback;
             i64 sim = (**line).time;
             responder.now = [&sim] { return sim; };
             responder.pause = [&sim](const store::ChatKey &, i64 seconds) -> Task<> {

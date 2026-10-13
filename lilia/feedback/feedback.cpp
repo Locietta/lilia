@@ -454,7 +454,7 @@ void Feedback::refit() {
 Feedback::Hint Feedback::hints(const store::ChatKey &chat_key, const std::vector<store::StoredMessage> &rows,
                                const std::vector<chat::LineEdges> &edges, i64 first_new_row) const {
     Hint hint;
-    if (!config.enabled || first_new_row <= 0) return hint;
+    if (first_new_row <= 0) return hint;
     const auto &model = model_for(chat_key);
     std::string shown;
     for (usize i = 0; i < rows.size() && i < edges.size(); ++i) {
@@ -466,7 +466,7 @@ Feedback::Hint Feedback::hints(const store::ChatKey &chat_key, const std::vector
         hint.logged += std::format("{}#{} {:.2f}", hint.logged.empty() ? "" : ", ", row.row_id, p);
         shown += std::format("{}#{} {}", shown.empty() ? "" : "，", row.row_id, level(p));
     }
-    if (config.hint && !shown.empty() && (fitted(chat_key) || config.hint_bootstrap)) {
+    if (config.hint && !shown.empty()) {
         hint.shown = "根据这个群以往的情况估计的「像是在对她说」的可能（只是参考，可能不准，以聊天内容为准）：" + shown + "。";
     }
     return hint;

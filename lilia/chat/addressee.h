@@ -13,10 +13,10 @@ namespace lilia::chat {
 
 // Who each line is said to, from what it says explicitly: an @, a quote, her
 // name. Language models find the addressee of a group-chat line far better
-// with this structure in view (speakers, reply-to links, a who-to-whom
-// summary) than from the text alone; "你" between two friends is the classic
-// misreading. Only explicit signals go here; reading the rest is the
-// planner's job.
+// with this structure in view (speakers, reply-to links) than from the text
+// alone; "你" between two friends is the classic misreading. Only explicit
+// signals go here; for lines that name no one, the planner reads them with
+// one derived estimate, the addressee prior over line_features (feedback/).
 
 struct LineEdges {
     /// The row it quotes (0: none, or not stored).
@@ -49,13 +49,6 @@ std::string edge_label(const LineEdges &edges);
 /// The text of a line for the planner: "#row" put into its quote ("[回复 #1201
 /// 小明: …] "), her own quote restored.
 std::string text_with_quote(const store::StoredMessage &line, const LineEdges &edges);
-
-/// "最近谁在对谁说（按 @ 和引用）：小红→小明 3 次（最近 #1250）、她→阿明 1 次（最近 #1248）。" and
-/// "阿明和小红在一来一回地聊（#1240–#1252）。" for the newest run of 4+ lines
-/// between two people without her; from the rows of the last
-/// `window_seconds`; empty when nothing explicit is there.
-std::string interaction_summary(const std::vector<store::StoredMessage> &rows, const std::vector<LineEdges> &edges, i64 now,
-                                i64 window_seconds);
 
 /// The features of line `index` for the addressee model (feedback/), from
 /// the log up to it alone, so live hints, backfills and training agree:

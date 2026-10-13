@@ -63,11 +63,11 @@ lighter::Task<int> run_probes(Config config, std::filesystem::path log, std::opt
 /// the chat's last digits, row ids and decisions, never what anyone said
 /// (hers included); last the tallies: to_her agreement on the line itself,
 /// misses on lines said to her, chip-ins on the others. `limit`: every line
-/// said to her and the newest others up to that many in all (0: all).
-/// `hint`: the planner also sees the addressee prior with its hand-set
-/// weights (nothing fitted on these labels).
+/// said to her and the newest others up to that many in all (0: all). The
+/// addressee prior is shown as live (feedback.hint), from its hand-set
+/// weights: nothing fitted on these labels.
 lighter::Task<int> run_db_probes(Config config, std::filesystem::path database, std::optional<std::filesystem::path> persona, usize repeat,
-                                 usize limit, std::optional<std::filesystem::path> planner_prompt = {}, bool hint = false);
+                                 usize limit, std::optional<std::filesystem::path> planner_prompt = {});
 
 /// The labelled lines `--probe-db` takes from `labels` (in time order): those
 /// of groups, every one said to her and the newest others up to `limit` in

@@ -160,21 +160,6 @@ void test_addressee() {
     require(session.contains("小红(20002)→小明: [回复 #1 小明: 打吗] 打\n"), "the planner line: " + session);
     require(chat::session_line(rows[0], 480, &edges[0]) == chat::session_line(rows[0], 480), "a line without edges reads as before");
 
-    const auto summary = chat::interaction_summary(rows, edges, t + 100, 900);
-    require(summary.starts_with("最近谁在对谁说（按 @ 和引用）：小明→她 2 次（最近 #8）") &&
-                summary.contains("小红→老王 1 次（最近 #5）") && summary.contains("她→小明 1 次"),
-            "who talks to whom: " + summary);
-    std::vector<store::StoredMessage> dyad;
-    std::vector<chat::LineEdges> plain;
-    for (i64 i = 0; i < 6; ++i) {
-        dyad.push_back(line(10 + i, i % 2 == 0 ? 20001 : 20002, i % 2 == 0 ? "小明" : "小红", "嗯", ""));
-        plain.emplace_back();
-    }
-    dyad.push_back(line(16, 20003, "老王", "？", ""));
-    plain.emplace_back();
-    require(chat::interaction_summary(dyad, plain, t + 100, 900) == "小明和小红在一来一回地聊（#10–#15）。", "a run between two people");
-    require(chat::interaction_summary(dyad, plain, t + 100'000, 900).empty(), "only the recent lines");
-
     const auto reply =
         chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#2","to_her":"no","style":"short","intent":"插一句"})"))}, rows);
     require(reply.reply && reply.to_her == "no", "the planner says whether the line was to her");

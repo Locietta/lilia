@@ -68,11 +68,12 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       it is told that people are repeating a line or that someone poked her,
       and decides whether to join or poke back.
     - Per round only a tail changes: the first new line, facts about the new
-      lines ("新消息里 #n 是对她说的", "#m 是对小明说的", a poke, her name),
-      who has talked to whom in the last 15 minutes and a run between two
-      people ("阿明和小红在一来一回地聊"), presence, self notes, slang (MaiBot's
-      matcher, first sentence of each meaning), recall, the time. What she
-      knows about people comes on request, through `look_up_person`.
+      lines (a poke, her name in a line that does not @ or quote her, 复读),
+      the addressee prior for new lines that name no one (below), presence,
+      self notes, slang (MaiBot's matcher, first sentence of each meaning),
+      recall, the time. Whom a line @s or quotes is on the line itself and is
+      not repeated. What she knows about people comes on request, through
+      `look_up_person`.
     - `to_her` is the planner's reading of the reply's target (called,
       likely, unsure, no); for `no` the writer is told it is chipping in.
       Every call is logged in `planner_turns` (tool, argument, target,
@@ -87,8 +88,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       two people…), not its text. A logistic prior is fitted on them
       (Newton/IRLS, pulled toward hand-set weights, per group toward the pooled
       model) and shown to the planner for lines that name no one
-      ("#n 像是在对她说的可能：低/中/高") when `feedback.hint` is on; it is
-      always logged in `planner_turns.hint`. Never a gate. Reward is the
+      (「像是在对她说」的可能：#n 低/中/高) while `feedback.hint` is on (the
+      default since 2026-10-13); before a model is fitted, or with judging
+      off, the hand-set weights give it, with no model calls. It is always
+      logged in `planner_turns.hint`. Never a gate. Reward is the
       reaction (Pang et al. 2023), not how long the chat ran, from a hand-set
       table (nothing labels how her messages went down, so there is nothing
       to fit it to); her stickers' rewards, derived from their judged effects
@@ -333,12 +336,15 @@ Model calls (2026-10-11):
      (`repair_reply`), 131 replayed answers from the live writer needed no
      format repair at all (one length cap), so the `name: text` log format
      stays. Steps that never fire in the live warnings go.
-   - Addressee is worked out five times: planner prose about 你/你们, tail
-     facts repeating `→她`, `interaction_summary`, a different dyad
-     definition with keyword lists in `line_features`, and two writer
-     patches. Keep the arrows and quotes; make the fitted prior the one
-     derived signal (addressee recognition: Ouchi & Tsuboi 2016, Le et al.
-     2019, MPC-BERT).
+   - Addressee (done 2026-10-13). It was worked out five times: planner
+     prose about 你/你们, tail facts repeating `→她`, `interaction_summary`,
+     `line_features`, and two writer patches. The arrows and quotes stay;
+     the prior is the one derived signal (addressee recognition: Ouchi &
+     Tsuboi 2016, Le et al. 2019, MPC-BERT). Measured with `--probe-db` on
+     243 judge-labelled real lines: dropping the tail facts, the summary and
+     most of the prose while showing the prior matched the old setup (misses
+     5 of 52 against 6–9, misreads 5 against 5–6); without the prior, misses
+     rose to 13. The writer's two patches stay: probes do not see the writer.
    - Planner dispatch (done 2026-10-13). An if-chain on tool names with
      per-tool counters became a table of tool handlers; silent repairs of
      planner mistakes (a self target became the newest line, a missing wait

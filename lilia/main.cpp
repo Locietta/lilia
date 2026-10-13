@@ -50,8 +50,7 @@ void print_usage(FILE *output) {
                "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
                "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>] [--continue-at <line>]\n"
                "       lilia replay <probes.jsonl> --probe [--repeat <n>] [--planner-prompt <planner.md>] [--config <path>]\n"
-               "       lilia replay --probe-db <copy.db> [--repeat <n>] [--limit <n>] [--hint] [--planner-prompt <planner.md>]\n"
-               "                    [--config <path>]\n"
+               "       lilia replay --probe-db <copy.db> [--repeat <n>] [--limit <n>] [--planner-prompt <planner.md>] [--config <path>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia learn-history [--group <id>]... [--count <n>] [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
@@ -738,12 +737,12 @@ Task<int> run_app(const Config &config) {
     }
     feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
                                 [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
-    if (config.feedback.enabled) {
-        feedback.judge_model_name = config.model.helper();
-        feedback.background_budget = config.learning.daily_token_budget;
-        feedback.load();
-        responder.feedback = &feedback;
-    }
+    // Always attached: the addressee prior needs no model calls; judging (and
+    // so fitting) only runs with feedback.enabled.
+    feedback.judge_model_name = config.model.helper();
+    feedback.background_budget = config.learning.daily_token_budget;
+    feedback.load();
+    responder.feedback = &feedback;
     retrieval::Retriever retriever(config.memory, *store);
     memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store, retriever);
     if (config.memory.enabled) {
@@ -785,7 +784,6 @@ int main(int argc, char **argv) {
     usize probe_repeat = 1;
     std::optional<std::filesystem::path> probe_db;
     usize probe_limit = 0;
-    bool probe_hint = false;
     std::optional<std::filesystem::path> learn_log;
     bool learn_history = false;
     std::vector<i64> history_groups;
@@ -949,8 +947,6 @@ int main(int argc, char **argv) {
             probe_db = argv[++i];
         } else if (arg == "--limit" && replay && !replay_log && i + 1 < argc) {
             probe_limit = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
-        } else if (arg == "--hint" && replay && !replay_log) {
-            probe_hint = true;
         } else if (arg == "--planner-prompt" && replay && i + 1 < argc) {
             planner_prompt = argv[++i];
         } else if (arg == "--repeat" && replay && i + 1 < argc) {
@@ -1060,7 +1056,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     auto app = lighter::with_token(
-        probe_db            ? run_db_probes(*config, *probe_db, persona_path, probe_repeat, probe_limit, planner_prompt, probe_hint) :
+        probe_db            ? run_db_probes(*config, *probe_db, persona_path, probe_repeat, probe_limit, planner_prompt) :
         replay_log && probe ? run_probes(*config, *replay_log, persona_path, probe_repeat, planner_prompt) :
         replay_log          ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at) :
         learn_log           ? run_learn(*config, *learn_log) :

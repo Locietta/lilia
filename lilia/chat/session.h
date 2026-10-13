@@ -36,8 +36,7 @@ struct PlannerRecord {
 /// notes, facts about the new messages, the time.
 struct PlannerTail {
     i64 first_new_row = 0;          ///< 0: nothing new since it last looked
-    std::vector<std::string> facts; ///< "新消息里 #18345 是对她说的" and the like
-    std::string interactions;       ///< who has been talking to whom (interaction_summary)
+    std::vector<std::string> facts; ///< "#18345 提到了她的名字", a poke, 复读
     std::string hint;               ///< the addressee prior for new lines (feedback/)
     std::string presence;           ///< just woke up, was busy, back online
     std::string self_notes;         ///< what she said about herself before

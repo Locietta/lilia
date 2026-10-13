@@ -160,6 +160,7 @@ lighter::Task<> test_judging() {
 
     // Hints: only for new lines that point at no one, shown only when on.
     std::vector<chat::LineEdges> edges(rows.size());
+    config.hint = false;
     auto hint = judge.hints(chat, rows, edges, 2);
     require(hint.shown.empty() && hint.logged.contains("#2 ") && !hint.logged.contains("#4"), "shadow mode: logged, not shown");
     config.hint = true;
@@ -167,6 +168,14 @@ lighter::Task<> test_judging() {
     require(hint.shown.starts_with("根据这个群以往的情况估计") && hint.shown.contains("#3 "), "shown when on");
     edges[2].to_her = true;
     require(!judge.hints(chat, rows, edges, 2).shown.contains("#3 "), "a line that says whom it is for needs no estimate");
+
+    // No judging and nothing fitted: the hand-set weights still give it.
+    auto bare_db = store::Store::open_memory();
+    require(bare_db.has_value(), "open");
+    const FeedbackConfig quiet;
+    feedback::Feedback bare(quiet, chat_config, *bare_db, test::fake_provider(state), [](lighter::Task<>) {});
+    require(!bare.fitted(chat) && bare.hints(chat, rows, std::vector<chat::LineEdges>(rows.size()), 2).shown.contains("#3 "),
+            "the hand-set prior without judging");
 }
 
 void test_gates() {

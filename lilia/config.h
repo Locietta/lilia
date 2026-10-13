@@ -317,10 +317,10 @@ struct FeedbackConfig {
     /// Judge her chats in hindsight (helper model): whom each line was said
     /// to, how her messages went down; learn an addressee prior from it.
     bool enabled = false;
-    /// Show the prior to the planner; off, it is only logged (planner_turns).
-    bool hint = false;
-    /// Show it before any model is fitted (hand-set weights).
-    bool hint_bootstrap = false;
+    /// Show the planner the addressee prior for new lines that name no one:
+    /// the fitted model once there is one, the hand-set weights before (no
+    /// model calls either way). Off, it is only logged (planner_turns).
+    bool hint = true;
     /// A window is judged this long after her last message in it, or once
     /// this many lines wait; at most this many judge calls an hour.
     i64 judge_after_seconds = 600;

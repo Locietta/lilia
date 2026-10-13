@@ -232,8 +232,8 @@ Task<> test_the_planner_decides() {
     require(text_of(h.planner->requests[0].back()).contains("提到了她的名字"), "a fact, not an instruction");
     require(h.say(2, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 你坏了吗")}).has_value(), "an @");
     co_await h.responder->run_turn(k_chat);
-    require(text_of(h.planner->requests[1].back()).contains("是对她说的") && text_of(h.planner->requests[1].back()).contains("→她: "),
-            "the @ is pointed out, on the line and in the facts");
+    require(text_of(h.planner->requests[1].back()).contains("→她: ") && !text_of(h.planner->requests[1].back()).contains("是对她说的"),
+            "the @ is pointed out on the line, not again in the facts");
     require(h.sent.empty() && h.writer->requests.empty(), "no reply is forced on the planner");
     co_await tasks.join();
 }

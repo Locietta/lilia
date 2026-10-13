@@ -51,8 +51,6 @@ constexpr usize k_max_replies = 3;
 constexpr usize k_max_web_searches = 2;
 constexpr usize k_max_look_ups = 3;
 constexpr usize k_max_sticker_finds = 3;
-/// Who-talks-to-whom in the tail covers the last quarter hour.
-constexpr i64 k_interaction_seconds = 900;
 /// What the planner is told about the addressee hint, when hints are on.
 constexpr std::string_view k_hint_rule =
     "- 「像是在对她说」的估计是根据这个群以往的情况算出来的，只是参考；和聊天内容不一致时，以聊天内容为准。\n";
@@ -283,29 +281,14 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             for (const auto &item : items) joined += (joined.empty() ? "" : "、") + item;
             return joined;
         };
-        std::vector<std::string> to_her;
+        // Whom a line @s or quotes is on the line itself (→她, →小明); her
+        // name in the text is not, and may be talk about her.
         std::vector<std::string> named;
-        std::vector<std::string> to_all;
-        std::vector<std::pair<std::string, std::vector<std::string>>> to_others;
         for (usize i = 0; from_row > 0 && i < rows.size() && i < edges.size(); ++i) {
             if (rows[i].row_id < from_row || rows[i].from_self || is_notice(rows[i])) continue;
-            const auto row = std::format("#{}", rows[i].row_id);
-            if (edges[i].to_her) {
-                to_her.push_back(row);
-            } else if (edges[i].names_her) {
-                named.push_back(row);
-            }
-            if (edges[i].to_all) to_all.push_back(row);
-            for (const auto &name : edges[i].to) {
-                auto it = std::ranges::find(to_others, name, &std::pair<std::string, std::vector<std::string>>::first);
-                if (it == to_others.end()) it = to_others.insert(to_others.end(), {name, {}});
-                it->second.push_back(row);
-            }
+            if (!edges[i].to_her && edges[i].names_her) named.push_back(std::format("#{}", rows[i].row_id));
         }
-        if (!to_her.empty()) out.push_back(std::format("新消息里 {} 是对她说的（@ 了她或者引用了她的话）。", join(to_her)));
         if (!named.empty()) out.push_back(std::format("{} 提到了她的名字。", join(named)));
-        for (const auto &[name, lines] : to_others) out.push_back(std::format("{} 是对{}说的（@ 或引用）。", join(lines), name));
-        if (!to_all.empty()) out.push_back(std::format("{} @ 了全体成员。", join(to_all)));
         // QQ's 复读: what people are doing, for the planner to join or not.
         if (const auto chain = repeat_chain(rows); chain && chain->people >= 2)
             out.push_back(std::format("最后 {} 个人在复读「{}」。", chain->people, chain->text));
@@ -572,7 +555,6 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         const auto edges = edges_of(rows);
         tail.facts = facts(addressed, tail.first_new_row, edges);
         tail.now = now();
-        if (chat.type == "group") tail.interactions = interaction_summary(rows, edges, tail.now, k_interaction_seconds);
         // The addressee prior: shown as a hint when on, always logged.
         const auto hint =
             feedback && chat.type == "group" ? feedback->hints(chat, rows, edges, tail.first_new_row) : feedback::Feedback::Hint{};
