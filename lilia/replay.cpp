@@ -16,6 +16,7 @@
 #include <lighter/async/runtime/task_group.h>
 
 #include <lilia/chat/responder.h>
+#include <lilia/feedback/feedback.h>
 #include <lilia/chat/trigger.h>
 #include <lilia/learn/learner.h>
 #include <lilia/log.h>
@@ -692,10 +693,15 @@ i64 self_id_of(store::Store &store, const std::vector<i64> &groups) {
 }
 
 Task<int> run_db_probes(Config config, std::filesystem::path database, std::optional<std::filesystem::path> persona, usize repeat,
-                        usize limit, std::optional<std::filesystem::path> planner_prompt) {
+                        usize limit, std::optional<std::filesystem::path> planner_prompt, bool hint) {
     // Private conversations: the info log would show the planner's analyses
     // and what she said.
     if (static_cast<int>(log::g_threshold) > static_cast<int>(log::Level::WARN)) log::g_threshold = log::Level::WARN;
+    // The prior as shown live, but only its hand-set weights: models fitted
+    // on these very labels would grade themselves.
+    config.feedback.enabled = hint;
+    config.feedback.hint = hint;
+    config.feedback.hint_bootstrap = hint;
     std::string planner_text;
     if (planner_prompt) {
         auto text = read_prompt(*planner_prompt);
@@ -752,6 +758,10 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
             if (!made) co_return 1;
             auto &responder = *made;
             responder.self = {.user_id = self_id, .nickname = config.chat.name};
+            // Nothing loaded: no fitted model, so the prior is bootstrap_weights().
+            feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
+                                        [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+            if (hint) responder.feedback = &feedback;
             i64 sim = (**line).time;
             responder.now = [&sim] { return sim; };
             responder.pause = [&sim](const store::ChatKey &, i64 seconds) -> Task<> {
