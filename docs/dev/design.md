@@ -75,7 +75,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       not repeated. What she knows about people comes on request, through
       `look_up_person`.
     - `to_her` is the planner's reading of the reply's target (called,
-      likely, unsure, no); for `no` the writer is told it is chipping in.
+      likely, group, unsure, no); for `no` the writer is told it is
+      chipping in, for `group` (said to everyone, 2026-10-13) that it
+      answers as one of them and was not asked itself. Hand labels showed
+      lines to everyone read as `likely` without it.
       Every call is logged in `planner_turns` (tool, argument, target,
       to_her, her messages, the round's analysis), kept 180 days.
     - Hindsight feedback (`feedback/`, 2026-10-12, after MaiBot's
