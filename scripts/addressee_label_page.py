@@ -1,10 +1,12 @@
 """Build an offline page for labelling whether chat lines were said to lilia.
 
-    python scripts/addressee_label_page.py --group <id> [--count 120] [--data-dir ~/.local/share/lilia] --out addressee-label.html
+    python scripts/addressee_label_page.py --group <id> [--count 120 | --rows 41,92,...]
+        [--data-dir ~/.local/share/lilia | --db <lilia.db>] --out addressee-label.html
 
 Picks recent lines of one group, preferring those the hindsight judge already
 labelled (so `lilia feedback --import-manual` can report how often it agreed),
-and shows each with the lines around it. Clicking marks a line as said to her
+or exactly the given rows (messages.id, as `lilia replay --probe-db` prints
+them), and shows each with the lines around it. Clicking marks a line as said to her
 or not; the page exports labels.json ({"labels": [{chat_id, message_id,
 to_her}]}). The page holds private chat lines: keep it out of the tree (ops/
 is ignored) and delete it when done.
@@ -73,11 +75,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--group", type=int, required=True)
     parser.add_argument("--count", type=int, default=120)
+    parser.add_argument("--rows", help="comma-separated row ids to label instead")
     parser.add_argument("--data-dir", default="~/.local/share/lilia")
+    parser.add_argument("--db", help="a lilia.db to read instead of the data dir's")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
-    data = os.path.expanduser(args.data_dir)
-    db = sqlite3.connect(f"file:{os.path.join(data, 'lilia.db')}?mode=ro", uri=True)
+    path = os.path.expanduser(args.db or os.path.join(args.data_dir, "lilia.db"))
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     rows = db.execute(
         "SELECT id, message_id, sender_id, sender_name, text, from_self FROM messages "
         "WHERE chat_type = 'group' AND chat_id = ? ORDER BY id",
@@ -93,8 +97,17 @@ def main():
     }
     # People's lines (not hers, not notices), judged ones first, newest first.
     candidates = [row for row in rows if not row[5] and row[2] != 0]
-    candidates.sort(key=lambda row: (row[1] not in judged, -row[0]))
-    picked = sorted(candidates[: args.count], key=lambda row: row[0])
+    if args.rows:
+        wanted = {int(row) for row in args.rows.split(",")}
+        picked = [row for row in candidates if row[0] in wanted]
+        if len(picked) != len(wanted):
+            missing = wanted - {row[0] for row in picked}
+            raise SystemExit(
+                f"not people's lines in group {args.group}: {sorted(missing)}"
+            )
+    else:
+        candidates.sort(key=lambda row: (row[1] not in judged, -row[0]))
+        picked = sorted(candidates[: args.count], key=lambda row: row[0])
 
     items = []
     for row in picked:
