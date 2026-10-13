@@ -100,6 +100,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     - `lilia replay <probes.jsonl> --probe` runs one turn per expected line
       of a synthetic set (`tests/replay/addressee.jsonl`: quotes, @s, her
       earlier lines) and counts intrusions, misses and to_her agreement.
+      `lilia replay --probe-db <copy.db>` does the same for the lines labelled
+      in a copy of lilia.db: each gets its stored context, the last three of
+      others' lines new, and one turn; it prints row ids and decisions only,
+      never what anyone said (2026-10-13).
     - Past twice `context_messages` / `context_bytes` the anchor moves to
       keep 1×; rounds about lines no longer shown go, older turns keep their
       calls but lose their analyses. After a restart the history is the

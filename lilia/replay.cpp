@@ -16,7 +16,9 @@
 #include <lighter/async/runtime/task_group.h>
 
 #include <lilia/chat/responder.h>
+#include <lilia/chat/trigger.h>
 #include <lilia/learn/learner.h>
+#include <lilia/log.h>
 #include <lilia/memory/memory.h>
 #include <lilia/retrieval/retriever.h>
 #include <lilia/onebot/message.h>
@@ -227,6 +229,35 @@ std::optional<std::vector<ReplayLine>> read_log(const std::filesystem::path &log
     return lines;
 }
 
+/// A prompt variant's text; nullopt (reported) when it cannot be read.
+std::optional<std::string> read_prompt(const std::filesystem::path &path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        std::fprintf(stderr, "cannot read %s\n", path.string().c_str());
+        return std::nullopt;
+    }
+    return std::string(std::istreambuf_iterator<char>(input), {});
+}
+
+/// A responder for one probe run: the persona, fallbacks and planner prompt
+/// the run asks for, without delays. Null (reported) when the persona cannot
+/// be read.
+std::unique_ptr<chat::Responder> probe_responder(const Config &config, store::Store &store, chat::Responder::Spawn spawn,
+                                                 const std::optional<std::filesystem::path> &persona, const std::string &planner_prompt) {
+    auto responder =
+        std::make_unique<chat::Responder>(config, store, make_planner(config.model), make_searcher(config.model), make_writer(config.model),
+                                          persona.value_or(std::filesystem::path(config.data_dir) / "persona.md"), std::move(spawn));
+    if (auto loaded = responder->reload_persona(); loaded.has_error()) {
+        std::fprintf(stderr, "%s\n", loaded.error().message().c_str());
+        return nullptr;
+    }
+    responder->writer_fallbacks = make_writer_fallbacks(config.model);
+    responder->planner_fallbacks = make_planner_fallbacks(config.model);
+    responder->planner_prompt = planner_prompt;
+    responder->realtime = false;
+    return responder;
+}
+
 } // namespace
 
 Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
@@ -275,12 +306,9 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         co_return 1;
     }
     if (writer_prompt) {
-        std::ifstream input(*writer_prompt, std::ios::binary);
-        if (!input) {
-            std::fprintf(stderr, "cannot read %s\n", writer_prompt->string().c_str());
-            co_return 1;
-        }
-        responder.writer_rules.assign(std::istreambuf_iterator<char>(input), {});
+        auto rules = read_prompt(*writer_prompt);
+        if (!rules) co_return 1;
+        responder.writer_rules = *std::move(rules);
     }
     responder.writer_fallbacks = make_writer_fallbacks(config.model);
     responder.planner_fallbacks = make_planner_fallbacks(config.model);
@@ -466,12 +494,9 @@ Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std
     if (!parsed) co_return 1;
     std::string planner_text;
     if (planner_prompt) {
-        std::ifstream input(*planner_prompt, std::ios::binary);
-        if (!input) {
-            std::fprintf(stderr, "cannot read %s\n", planner_prompt->string().c_str());
-            co_return 1;
-        }
-        planner_text.assign(std::istreambuf_iterator<char>(input), {});
+        auto text = read_prompt(*planner_prompt);
+        if (!text) co_return 1;
+        planner_text = *std::move(text);
     }
     const auto lines = *std::move(parsed);
     config.chat.groups = {k_replay_group};
@@ -501,18 +526,11 @@ Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std
             auto store = store::Store::open_memory();
             if (store.has_error()) co_return 1;
             lighter::TaskGroup tasks(lighter::EventLoop::current());
-            chat::Responder responder(config, *store, make_planner(config.model), make_searcher(config.model), make_writer(config.model),
-                                      persona.value_or(std::filesystem::path(config.data_dir) / "persona.md"),
-                                      [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
-            if (auto loaded = responder.reload_persona(); loaded.has_error()) {
-                std::fprintf(stderr, "%s\n", loaded.error().message().c_str());
-                co_return 1;
-            }
-            responder.writer_fallbacks = make_writer_fallbacks(config.model);
-            responder.planner_fallbacks = make_planner_fallbacks(config.model);
-            responder.planner_prompt = planner_text;
+            const auto made =
+                probe_responder(config, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); }, persona, planner_text);
+            if (!made) co_return 1;
+            auto &responder = *made;
             responder.self = {.user_id = k_replay_self, .nickname = config.chat.name};
-            responder.realtime = false;
             const i64 base = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             i64 sim = 0;
             responder.now = [&sim, base] { return base + sim; };
@@ -605,6 +623,198 @@ Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std
                       agreed, judged));
     co_return 0;
 }
+
+std::vector<store::AddresseeLabel> pick_probe_labels(std::vector<store::AddresseeLabel> labels, usize limit) {
+    std::erase_if(labels, [](const store::AddresseeLabel &label) { return label.chat.type != "group"; });
+    if (limit == 0) return labels;
+    const auto to_her = static_cast<usize>(std::ranges::count_if(labels, &store::AddresseeLabel::label));
+    usize others = limit > to_her ? limit - to_her : 0;
+    std::vector<bool> keep(labels.size());
+    for (usize i = labels.size(); i-- > 0;) {
+        if (labels[i].label) {
+            keep[i] = true;
+        } else if (others > 0) {
+            keep[i] = true;
+            --others;
+        }
+    }
+    std::vector<store::AddresseeLabel> picked;
+    for (usize i = 0; i < labels.size(); ++i) {
+        if (keep[i]) picked.push_back(std::move(labels[i]));
+    }
+    return picked;
+}
+
+chat::Flow probe_flow(const std::vector<store::StoredMessage> &rows, i64 self_id, const ChatConfig &config, store::Store &source) {
+    chat::Flow flow;
+    usize first = rows.size();
+    for (usize others = 0; first > 0 && others < 3;) {
+        const auto &row = rows[--first];
+        others += !row.from_self && !chat::is_notice(row);
+    }
+    for (usize i = first; i < rows.size(); ++i) {
+        const auto &row = rows[i];
+        if (row.from_self || chat::is_notice(row)) continue;
+        onebot::Message segments;
+        std::ignore = glz::read<onebot::k_read_opts>(segments, row.segments_json);
+        // The event ingest classified, as far as the stored row tells.
+        bool replies_to_self = false;
+        if (const auto target = onebot::reply_target(segments)) {
+            auto quoted = source.message(row.chat, *target);
+            replies_to_self = quoted.has_value() && *quoted && (*quoted)->from_self;
+        }
+        const onebot::MessageEvent event{
+            .time = row.time,
+            .self_id = self_id,
+            .message_type = row.chat.type,
+            .message_id = row.message_id,
+            .user_id = row.sender_id,
+            .group_id = row.chat.id,
+            .sender = {.user_id = row.sender_id, .nickname = row.sender_name},
+            .message = std::move(segments),
+        };
+        const auto reason = chat::classify(event, self_id, replies_to_self, config);
+        if (reason != chat::TriggerReason::NONE) (reason == chat::TriggerReason::ALIAS ? flow.named : flow.addressed) = row.message_id;
+        flow.unseen.push_back(row);
+    }
+    return flow;
+}
+
+i64 self_id_of(store::Store &store, const std::vector<i64> &groups) {
+    for (const auto group : groups) {
+        auto recent = store.recent_messages({.type = "group", .id = group}, 500);
+        if (!recent.has_value()) continue;
+        for (const auto &message : *recent) {
+            if (message.from_self) return message.sender_id;
+        }
+    }
+    return 0;
+}
+
+Task<int> run_db_probes(Config config, std::filesystem::path database, std::optional<std::filesystem::path> persona, usize repeat,
+                        usize limit, std::optional<std::filesystem::path> planner_prompt) {
+    // Private conversations: the info log would show the planner's analyses
+    // and what she said.
+    if (static_cast<int>(log::g_threshold) > static_cast<int>(log::Level::WARN)) log::g_threshold = log::Level::WARN;
+    std::string planner_text;
+    if (planner_prompt) {
+        auto text = read_prompt(*planner_prompt);
+        if (!text) co_return 1;
+        planner_text = *std::move(text);
+    }
+    auto source = store::Store::open_readonly(database);
+    auto labels = source.has_value() ? source->addressee_labels(0) :
+                                       Result<std::vector<store::AddresseeLabel>>(lighter::outcome_error(source.error()));
+    if (labels.has_error()) {
+        std::fprintf(stderr, "%s\n", labels.error().message().c_str());
+        co_return 1;
+    }
+    const auto picked = pick_probe_labels(*std::move(labels), limit);
+    std::vector<i64> groups;
+    for (const auto &label : picked) {
+        if (!std::ranges::contains(groups, label.chat.id)) groups.push_back(label.chat.id);
+    }
+    const i64 self_id = self_id_of(*source, groups);
+    if (self_id == 0) std::fprintf(stderr, "her QQ id is unknown (she never spoke there): @s of her are not recognised\n");
+    config.chat.private_users.clear();
+    config.chat.admins.clear();
+    const usize window = config.chat.context_messages > 0 ? config.chat.context_messages : 40;
+    usize agreed = 0;
+    usize judged = 0;
+    usize misread = 0;
+    usize missed_her = 0;
+    usize misses = 0;
+    usize to_her_runs = 0;
+    usize chip_ins = 0;
+    usize other_runs = 0;
+    for (const auto &label : picked) {
+        const auto &chat = label.chat;
+        const auto tag =
+            std::format("PROBE chat#{:03} row {} label {}", (chat.id < 0 ? -chat.id : chat.id) % 1000, label.row_id, label.label ? 1 : 0);
+        auto line = source->message(chat, label.message_id);
+        if (!line.has_value() || !*line) {
+            print(tag + ": not stored");
+            continue;
+        }
+        auto rows = source->messages_before(chat, (**line).row_id, window);
+        if (rows.has_error()) {
+            std::fprintf(stderr, "%s\n", rows.error().message().c_str());
+            co_return 1;
+        }
+        rows->push_back(**line);
+        config.chat.groups = {chat.id};
+        for (usize run = 0; run < std::max<usize>(repeat, 1); ++run) {
+            auto store = store::Store::open_memory();
+            if (store.has_error()) co_return 1;
+            lighter::TaskGroup tasks(lighter::EventLoop::current());
+            const auto made =
+                probe_responder(config, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); }, persona, planner_text);
+            if (!made) co_return 1;
+            auto &responder = *made;
+            responder.self = {.user_id = self_id, .nickname = config.chat.name};
+            i64 sim = (**line).time;
+            responder.now = [&sim] { return sim; };
+            responder.pause = [&sim](const store::ChatKey &, i64 seconds) -> Task<> {
+                sim += seconds; // a wait reveals nothing: the probe ends at its line
+                co_return;
+            };
+            bool spoke = false;
+            std::optional<chat::Plan> reply;
+            i64 next_id = 1'000'000;
+            responder.outbox = [&](const store::ChatKey &, onebot::Message) -> Task<std::optional<i64>> {
+                spoke = true;
+                co_return ++next_id;
+            };
+            responder.observer = [&](const store::ChatKey &, const chat::Plan &plan, const std::vector<std::string> &) {
+                if (plan.reply && !reply) reply = plan;
+            };
+            for (const auto &row : *rows) std::ignore = store->add_message(row);
+            auto &state = responder.chats[chat];
+            state.name = "回放群";
+            state.flow = probe_flow(*rows, self_id, config.chat, *source);
+            if (!state.flow.unseen.empty()) co_await responder.run_turn(chat);
+            co_await tasks.join();
+
+            const bool on_line = reply && reply->target == label.message_id;
+            const auto to_her = reply && !reply->to_her.empty() ? reply->to_her : std::string("-");
+            std::string verdict;
+            if (on_line && (to_her == "called" || to_her == "likely" || to_her == "no")) {
+                ++judged;
+                const bool her = to_her != "no";
+                if (her == label.label) {
+                    ++agreed;
+                } else if (her) {
+                    ++misread;
+                    verdict += " MISREAD";
+                } else {
+                    ++missed_her;
+                    verdict += " MISSED_HER";
+                }
+            }
+            if (label.label) {
+                ++to_her_runs;
+                if (!spoke) {
+                    ++misses;
+                    verdict += " MISS";
+                }
+            } else {
+                ++other_runs;
+                chip_ins += spoke;
+            }
+            print(std::format("{}: {} target {} to_her {}{}", tag, spoke ? "spoke" : "silent",
+                              !reply  ? "-" :
+                              on_line ? "self" :
+                                        "other",
+                              to_her, verdict));
+        }
+    }
+    print(std::format(
+        "SUMMARY real: to_her agreement {}/{} (misread {}, missed_her {}), misses {}/{} on lines to her, chip-in {}/{} on other "
+        "lines",
+        agreed, judged, misread, missed_her, misses, to_her_runs, chip_ins, other_runs));
+    co_return 0;
+}
+
 Task<int> run_learn(Config config, std::filesystem::path log) {
     auto parsed = read_log(log);
     if (!parsed) co_return 1;

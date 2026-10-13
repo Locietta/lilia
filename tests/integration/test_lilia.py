@@ -183,21 +183,30 @@ def message_end(stop_reason, output_tokens):
 
 
 def planner_answer(body):
-    """Replies to the line that says 你好呀, by its #number; after that (the
-    round that sees the reply's receipt) ends the turn."""
+    """Replies to the line that says 你好呀, by its #number, as said to her
+    (silent when there is none); after that (the round that sees the reply's
+    receipt) ends the turn."""
     first = body["messages"][-1]["content"][0]
-    if first.get("type") == "tool_result":
+    target = (
+        None
+        if first.get("type") == "tool_result"
+        else next(
+            (
+                line.split(" ", 1)[0]
+                for line in first["text"].splitlines()
+                if "你好呀" in line
+            ),
+            None,
+        )
+    )
+    if target is None:
         name, arguments = "stay_silent", {"reason": "说完了"}
     else:
-        target = next(
-            line.split(" ", 1)[0]
-            for line in first["text"].splitlines()
-            if "你好呀" in line
-        )
         name, arguments = (
             "reply",
             {
                 "target": target,
+                "to_her": "called",
                 "quote": False,
                 "style": "short",
                 "search": False,
@@ -820,3 +829,147 @@ def test_reply_and_reconnect(tmp_path):
     assert (data_dir / media[1][6]).read_bytes() == VOICE_BYTES
     assert napcat.file_requests[0]["params"] == {"file": "voice.amr"}
     assert model_state["gets"] == ["/img.png"], "only allowed-group media is fetched"
+
+
+def test_probe_db(tmp_path):
+    """`lilia replay --probe-db` on a copy of stored chat: one turn per picked
+    label, and only row ids and decisions in what it prints."""
+    model, model_state = start_model_server()
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "onebot": {"access_token": "$LILIA_TEST_ONEBOT_TOKEN"},
+                "model": {
+                    "base_url": f"http://127.0.0.1:{model.server_port}",
+                    "model": "fake-model",
+                    "planner_model": "fake-model",
+                    "helper_model": "fake-model",
+                    "api_key": "$LILIA_TEST_KEY",
+                },
+                "chat": {"groups": [GROUP]},
+                "data_dir": str(tmp_path / "data"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = dict(os.environ, LILIA_TEST_ONEBOT_TOKEN=TOKEN, LILIA_TEST_KEY=API_KEY)
+    database = tmp_path / "copy.db"
+    # Any command that opens the database for writing creates its tables.
+    subprocess.run(
+        [str(find_binary()), "feedback", "--eval", "--db", str(database)]
+        + ["--config", str(config)],
+        env=env,
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    other_group = 1234567
+    texts = ["早上好", "今天好冷", "@lilia 你好呀", "大家你好呀"]
+    rows = [
+        # chat, message id, sender, name, segments, from_self, time
+        (
+            GROUP,
+            101,
+            SELF_ID,
+            "莉莉娅",
+            [{"type": "text", "data": {"text": texts[0]}}],
+            1,
+            1000,
+        ),
+        (
+            GROUP,
+            102,
+            20002,
+            "魔王",
+            [{"type": "text", "data": {"text": texts[1]}}],
+            0,
+            1010,
+        ),
+        (
+            GROUP,
+            103,
+            20003,
+            "勇者",
+            [
+                {"type": "at", "data": {"qq": str(SELF_ID), "name": "lilia"}},
+                {"type": "text", "data": {"text": " 你好呀"}},
+            ],
+            0,
+            1020,
+        ),
+        (
+            other_group,
+            201,
+            20002,
+            "魔王",
+            [{"type": "text", "data": {"text": texts[3]}}],
+            0,
+            1030,
+        ),
+    ]
+    db = sqlite3.connect(database)
+    for (chat, message_id, sender, name, segments, from_self, at), text in zip(
+        rows, texts
+    ):
+        db.execute(
+            "INSERT INTO messages (chat_type, chat_id, message_id, sender_id, sender_name, time, segments, text, from_self) "
+            "VALUES ('group', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                chat,
+                message_id,
+                sender,
+                name,
+                at,
+                json.dumps(segments, ensure_ascii=False),
+                text,
+                from_self,
+            ),
+        )
+    labels = [(GROUP, 102, 0), (GROUP, 103, 1), (other_group, 201, 0)]
+    for chat, message_id, label in labels:
+        db.execute(
+            "INSERT INTO addressee_labels (chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source) "
+            "SELECT 'group', chat_id, message_id, id, time, 1, '[]', ?, 'judge' FROM messages WHERE chat_id = ? AND message_id = ?",
+            (label, chat, message_id),
+        )
+    db.commit()
+    db.close()
+
+    try:
+        ran = subprocess.run(
+            [str(find_binary()), "replay", "--probe-db", str(database), "--limit", "2"]
+            + ["--config", str(config)],
+            env=env,
+            capture_output=True,
+            timeout=120,
+        )
+    finally:
+        model.shutdown()
+    stdout = ran.stdout.decode("utf-8", errors="replace")
+    stderr = ran.stderr.decode("utf-8", errors="replace")
+    assert ran.returncode == 0, f"{stdout}\n{stderr}"
+    assert not model_state["errors"], model_state["errors"]
+    assert stdout.splitlines() == [
+        "PROBE chat#555 row 3 label 1: spoke target self to_her called",
+        "PROBE chat#567 row 4 label 0: spoke target self to_her called MISREAD",
+        "SUMMARY real: to_her agreement 1/2 (misread 1, missed_her 0), "
+        "misses 0/1 on lines to her, chip-in 1/1 on other lines",
+    ], f"{stdout}\n{stderr}"
+    # The older line not to her is left out by --limit; no one's words are printed.
+    for secret in texts + ["你好呀", "魔王", "勇者", "fake reply", "打个招呼"]:
+        assert secret not in stdout and secret not in stderr, secret
+    planners = [
+        b
+        for b in model_state["bodies"]
+        if "reply" in [tool.get("name") for tool in b.get("tools", [])]
+    ]
+    first_rounds = [
+        b
+        for b in planners
+        if b["messages"][-1]["content"][0].get("type") != "tool_result"
+    ]
+    assert len(first_rounds) == 2, "one turn per picked label"
+    assert "早上好" in json.dumps(first_rounds[0]["messages"], ensure_ascii=False), (
+        "the line's stored context comes along"
+    )

@@ -50,6 +50,7 @@ void print_usage(FILE *output) {
                "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
                "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>] [--continue-at <line>]\n"
                "       lilia replay <probes.jsonl> --probe [--repeat <n>] [--planner-prompt <planner.md>] [--config <path>]\n"
+               "       lilia replay --probe-db <copy.db> [--repeat <n>] [--limit <n>] [--planner-prompt <planner.md>] [--config <path>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
                "       lilia learn-history [--group <id>]... [--count <n>] [--config <path>]\n"
                "       lilia expressions [--config <path>] [--limit <n>]\n"
@@ -425,18 +426,6 @@ struct FeedbackTool {
     std::optional<std::filesystem::path> import_manual;
 };
 
-/// Her QQ id, from her stored messages; 0 when she never spoke.
-i64 self_id_of(store::Store &store, const std::vector<i64> &groups) {
-    for (const auto group : groups) {
-        auto recent = store.recent_messages({.type = "group", .id = group}, 500);
-        if (!recent.has_value()) continue;
-        for (const auto &message : *recent) {
-            if (message.from_self) return message.sender_id;
-        }
-    }
-    return 0;
-}
-
 double auc(const std::vector<std::pair<double, double>> &scored) {
     // Probability that a random positive outranks a random negative.
     double positives = 0;
@@ -783,6 +772,7 @@ Task<int> run_app(const Config &config) {
 
 int main(int argc, char **argv) {
     std::optional<std::filesystem::path> config_path;
+    bool replay = false;
     std::optional<std::filesystem::path> replay_log;
     std::optional<std::filesystem::path> persona_path;
     std::optional<std::filesystem::path> habits_db;
@@ -792,6 +782,8 @@ int main(int argc, char **argv) {
     bool probe = false;
     std::optional<std::filesystem::path> planner_prompt;
     usize probe_repeat = 1;
+    std::optional<std::filesystem::path> probe_db;
+    usize probe_limit = 0;
     std::optional<std::filesystem::path> learn_log;
     bool learn_history = false;
     std::vector<i64> history_groups;
@@ -896,9 +888,14 @@ int main(int argc, char **argv) {
         return 0;
     }
     int first = 1;
-    if (argc > 2 && std::string_view(argv[1]) == "replay") {
-        replay_log = argv[2];
-        first = 3;
+    if (argc > 1 && std::string_view(argv[1]) == "replay") {
+        // `--probe-db` probes stored chat instead of a log.
+        replay = true;
+        first = 2;
+        if (argc > 2 && !std::string_view(argv[2]).starts_with('-')) {
+            replay_log = argv[2];
+            first = 3;
+        }
     } else if (argc > 2 && std::string_view(argv[1]) == "learn") {
         learn_log = argv[2];
         first = 3;
@@ -936,7 +933,7 @@ int main(int argc, char **argv) {
             check_only = true;
         } else if (arg == "--config" && i + 1 < argc) {
             config_path = argv[++i];
-        } else if (arg == "--persona" && replay_log && i + 1 < argc) {
+        } else if (arg == "--persona" && replay && i + 1 < argc) {
             persona_path = argv[++i];
         } else if (arg == "--habits" && replay_log && i + 1 < argc) {
             habits_db = argv[++i];
@@ -946,9 +943,13 @@ int main(int argc, char **argv) {
             stickers_db = argv[++i];
         } else if (arg == "--probe" && replay_log) {
             probe = true;
-        } else if (arg == "--planner-prompt" && replay_log && i + 1 < argc) {
+        } else if (arg == "--probe-db" && replay && !replay_log && i + 1 < argc) {
+            probe_db = argv[++i];
+        } else if (arg == "--limit" && replay && !replay_log && i + 1 < argc) {
+            probe_limit = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
+        } else if (arg == "--planner-prompt" && replay && i + 1 < argc) {
             planner_prompt = argv[++i];
-        } else if (arg == "--repeat" && replay_log && i + 1 < argc) {
+        } else if (arg == "--repeat" && replay && i + 1 < argc) {
             probe_repeat = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else if (arg == "--continue-at" && replay_log && i + 1 < argc) {
             continue_at = static_cast<usize>(std::max(0, std::atoi(argv[++i])));
@@ -1014,6 +1015,10 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    if (replay && !replay_log && !probe_db) {
+        print_usage(stderr);
+        return 2;
+    }
 
     const auto path = config_path.value_or(default_config_path());
     // Listing learned expressions reads the database only; no keys needed.
@@ -1038,7 +1043,7 @@ int main(int argc, char **argv) {
     // fall through to it (a tool run with the live config would join the
     // groups and migrate the live database).
     const bool subcommand = argc > 1 && !std::string_view(argv[1]).starts_with('-');
-    const bool tool = replay_log || learn_log || learn_history || review || retrieval_check || sticker_tool || feedback_tool;
+    const bool tool = replay || learn_log || learn_history || review || retrieval_check || sticker_tool || feedback_tool;
     if (subcommand && !tool) {
         log::error("unhandled subcommand {}", argv[1]);
         return 2;
@@ -1051,6 +1056,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     auto app = lighter::with_token(
+        probe_db            ? run_db_probes(*config, *probe_db, persona_path, probe_repeat, probe_limit, planner_prompt) :
         replay_log && probe ? run_probes(*config, *replay_log, persona_path, probe_repeat, planner_prompt) :
         replay_log          ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at) :
         learn_log           ? run_learn(*config, *learn_log) :

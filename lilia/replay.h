@@ -55,6 +55,32 @@ lighter::Task<int> run_replay(Config config, std::filesystem::path log, std::opt
 lighter::Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona, usize repeat,
                               std::optional<std::filesystem::path> planner_prompt = {});
 
+/// `lilia replay --probe-db <copy.db>`: the same probes on real chat, for the
+/// lines the hindsight judge (or a person) labelled in a copy of lilia.db
+/// (read-only). Each run gets the line's stored context (up to
+/// `chat.context_messages` lines before it) in a fresh chat, the last three
+/// of others' lines ending at it new, and one turn. Prints, per run, only
+/// the chat's last digits, row ids and decisions, never what anyone said
+/// (hers included); last the tallies: to_her agreement on the line itself,
+/// misses on lines said to her, chip-ins on the others. `limit`: every line
+/// said to her and the newest others up to that many in all (0: all).
+lighter::Task<int> run_db_probes(Config config, std::filesystem::path database, std::optional<std::filesystem::path> persona, usize repeat,
+                                 usize limit, std::optional<std::filesystem::path> planner_prompt = {});
+
+/// The labelled lines `--probe-db` takes from `labels` (in time order): those
+/// of groups, every one said to her and the newest others up to `limit` in
+/// all (0: all), still in time order.
+std::vector<store::AddresseeLabel> pick_probe_labels(std::vector<store::AddresseeLabel> labels, usize limit);
+
+/// The flow of a chat whose stored `rows` (oldest first) end at a probed
+/// line: the last three of others' lines (no notices) are unseen, and
+/// `addressed` / `named` are set as ingest sets them (`config.groups` must
+/// hold the chat). What the lines quote is looked up in `source`.
+chat::Flow probe_flow(const std::vector<store::StoredMessage> &rows, i64 self_id, const ChatConfig &config, store::Store &source);
+
+/// Her QQ id, from her stored messages in `groups`; 0 when she never spoke.
+i64 self_id_of(store::Store &store, const std::vector<i64> &groups);
+
 /// Runs the expression learner over a JSONL log (same format as replay) in
 /// batches of `learning.batch_messages` and prints what it would learn.
 lighter::Task<int> run_learn(Config config, std::filesystem::path log);

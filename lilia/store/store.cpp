@@ -1210,7 +1210,7 @@ Result<void> Store::add_addressee_label(const AddresseeLabel &label) {
 Result<std::vector<AddresseeLabel>> Store::addressee_labels(i64 feature_version, std::string_view source) {
     auto statement =
         database.prepare("SELECT chat_type, chat_id, message_id, row_id, time, feature_version, features, label, source, prior "
-                         "FROM addressee_labels WHERE feature_version = ?1 AND (?2 = '' OR source = ?2) ORDER BY time, id");
+                         "FROM addressee_labels WHERE (?1 = 0 OR feature_version = ?1) AND (?2 = '' OR source = ?2) ORDER BY time, id");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
     statement->bind(1, feature_version);
     statement->bind(2, source);

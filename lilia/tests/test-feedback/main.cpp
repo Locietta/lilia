@@ -12,6 +12,8 @@
 #include <lilia/chat/addressee.h>
 #include <lilia/feedback/feedback.h>
 #include <lilia/feedback/logistic.h>
+#include <lilia/onebot/message.h>
+#include <lilia/replay.h>
 #include <lilia/store/store.h>
 #include <lilia/tests/support/fake_provider.h>
 #include <lilia/tests/support/fake_ws_peer.h>
@@ -258,6 +260,55 @@ void test_sticker_rewards() {
     require(again.has_value() && again->at(7).judged == 2 && again->at(7).welcomed == 2, "a replaced effect is counted once");
 }
 
+void test_probe_picks() {
+    const auto label = [](i64 row, bool to_her, std::string type = "group") {
+        return store::AddresseeLabel{
+            .chat = {.type = std::move(type), .id = k_group}, .message_id = row * 10, .row_id = row, .label = to_her};
+    };
+    const std::vector<store::AddresseeLabel> labels{
+        label(1, false), label(2, true), label(3, false), label(4, false), label(5, false, "private"), label(6, true)};
+    const auto rows = [](const std::vector<store::AddresseeLabel> &picked) {
+        std::vector<i64> out;
+        for (const auto &one : picked) out.push_back(one.row_id);
+        return out;
+    };
+    require(rows(pick_probe_labels(labels, 0)) == std::vector<i64>{1, 2, 3, 4, 6}, "no limit: every group line");
+    require(rows(pick_probe_labels(labels, 3)) == std::vector<i64>{2, 4, 6}, "every line to her, then the newest others");
+    require(rows(pick_probe_labels(labels, 1)) == std::vector<i64>{2, 6}, "lines to her are never cut");
+}
+
+void test_probe_flow() {
+    auto source = store::Store::open_memory();
+    require(source.has_value(), "open");
+    const auto with = [](store::StoredMessage row, const onebot::Message &segments) {
+        row.segments_json = glz::write_json(segments).value_or("[]");
+        return row;
+    };
+    auto notice = line(5, 150, 0, "群通知", "小明戳了戳莉莉娅");
+    notice.segments_json = "[]";
+    const std::vector<store::StoredMessage> rows{
+        with(line(1, 100, 2001, "阿明", "在吗"), {onebot::at_segment(k_self), onebot::text_segment(" 在吗")}),
+        line(2, 110, 0, "莉莉娅", "在", true),
+        line(3, 120, 2002, "小红", "早"),
+        with(line(4, 130, 2001, "阿明", "你在干嘛"), {onebot::reply_segment(20), onebot::text_segment("你在干嘛")}),
+        notice,
+        line(6, 160, 2002, "小红", "莉莉娅也来"),
+        line(7, 170, 0, "莉莉娅", "来了", true),
+        line(8, 180, 2001, "阿明", "好"),
+    };
+    for (const auto &row : rows) require(source->add_message(row).has_value(), "stored");
+    ChatConfig config;
+    config.groups = {k_group};
+    config.aliases = {"莉莉娅"};
+    const auto flow = probe_flow(rows, k_self, config, *source);
+    std::vector<i64> unseen;
+    for (const auto &row : flow.unseen) unseen.push_back(row.row_id);
+    require(unseen == std::vector<i64>{4, 6, 8}, "the last three of others' lines are new; notices and hers are not");
+    require(flow.addressed == 40, "a quote of her line addresses her; the older @ is not new");
+    require(flow.named == 60, "her name");
+    require(self_id_of(*source, {k_group}) == k_self, "her id from her lines");
+}
+
 } // namespace
 
 int main() {
@@ -267,6 +318,8 @@ int main() {
         test_parse();
         test_gates();
         test_sticker_rewards();
+        test_probe_picks();
+        test_probe_flow();
         lighter::EventLoop loop;
         auto task = test_judging();
         loop.schedule(task);

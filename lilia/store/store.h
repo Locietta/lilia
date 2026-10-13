@@ -349,7 +349,7 @@ struct Store {
     Result<i64> feedback_progress(const ChatKey &chat);
     Result<void> set_feedback_progress(const ChatKey &chat, i64 through_row);
     Result<void> add_addressee_label(const AddresseeLabel &label);
-    /// Labels with this feature version; `source` empty: all.
+    /// Labels with this feature version (0: any); `source` empty: all.
     Result<std::vector<AddresseeLabel>> addressee_labels(i64 feature_version, std::string_view source = {});
     Result<void> add_reply_effect(const ReplyEffect &effect);
     Result<std::vector<ReplyEffect>> reply_effects(const ChatKey &chat, i64 since);
