@@ -163,6 +163,9 @@ void test_addressee() {
     const auto reply =
         chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#2","to_her":"no","style":"short","intent":"插一句"})"))}, rows);
     require(reply.reply && reply.to_her == "no", "the planner says whether the line was to her");
+    require(chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#2","to_her":"group","style":"short","intent":"x"})"))}, rows)
+                    .to_her == "group",
+            "or to everyone");
     require(chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#2","to_her":"maybe","style":"short","intent":"x"})"))}, rows)
                 .to_her.empty(),
             "an unknown reading is dropped");

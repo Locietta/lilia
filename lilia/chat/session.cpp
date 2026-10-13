@@ -147,7 +147,7 @@ std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
         .name = "reply",
         .description = "让她说话，回应其中一条消息",
         .input_schema = {.properties = {{"target", property("string", "要回应的消息编号，例如 \"#18345\"")},
-                                        {"to_her", property("string", "那条消息是不是在对她说：called | likely | unsure | no")},
+                                        {"to_her", property("string", "那条消息是不是在对她说：called | likely | group | unsure | no")},
                                         {"quote", property("boolean", "是否引用那条消息")},
                                         {"style", property("string", "short | normal | long")},
                                         {reference_handoff ? "brief" : "intent",
@@ -262,7 +262,7 @@ std::expected<Plan, std::string> parse_call(const provider::ToolCall &call, cons
     if (!target) return no_target();
     const auto style = string_field(input, "style");
     auto to_her = std::string(trim(string_field(input, "to_her")));
-    if (to_her != "called" && to_her != "likely" && to_her != "unsure" && to_her != "no") to_her.clear();
+    if (to_her != "called" && to_her != "likely" && to_her != "group" && to_her != "unsure" && to_her != "no") to_her.clear();
     return Plan{
         .reply = true,
         .target = target->message_id,

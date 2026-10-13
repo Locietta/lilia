@@ -274,6 +274,7 @@ provider::History build_writer_history(const WriterInput &input) {
     note += style_instruction(input.plan.style);
     note += std::format("\n【你要回应{}的这条：「{}」", display_name(input.target), input.target.text);
     if (input.plan.to_her == "no") note += "（这条不是对你说的，你是插一句：别装作对方在问你）";
+    if (input.plan.to_her == "group") note += "（这条是对大家说的，你作为群里一员接一句，不是专门在问你）";
     if (!input.plan.brief.empty()) {
         note += std::format("】\n【回复信息参考：{}\n可以参考，但视情况而定，不用完全遵守】", resolve_rows(input.plan.brief, input.recent));
     } else {

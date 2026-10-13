@@ -735,6 +735,8 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
     usize judged = 0;
     usize misread = 0;
     std::map<std::string, usize> misread_by; ///< whom the misread lines were said to ("?": not recorded)
+    usize group_lines = 0;                   ///< answered lines said to everyone
+    usize group_read = 0;                    ///< of them, read as "group"
     usize missed_her = 0;
     usize misses = 0;
     usize to_her_runs = 0;
@@ -798,9 +800,13 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
             const bool on_line = reply && reply->target == label.message_id;
             const auto to_her = reply && !reply->to_her.empty() ? reply->to_her : std::string("-");
             std::string verdict;
-            if (on_line && (to_her == "called" || to_her == "likely" || to_her == "no")) {
+            if (on_line && (to_her == "called" || to_her == "likely" || to_her == "group" || to_her == "no")) {
                 ++judged;
-                const bool her = to_her != "no";
+                const bool her = to_her == "called" || to_her == "likely";
+                if (label.addressee == "group") {
+                    ++group_lines;
+                    group_read += to_her == "group";
+                }
                 if (her == label.label) {
                     ++agreed;
                 } else if (her) {
@@ -832,10 +838,11 @@ Task<int> run_db_probes(Config config, std::filesystem::path database, std::opti
     std::string kinds;
     for (const auto &[addressee, count] : misread_by) kinds += std::format("{}{} {}", kinds.empty() ? " (" : ", ", addressee, count);
     if (!kinds.empty()) kinds += ")";
+    const auto group = group_lines > 0 ? std::format(", lines to everyone read so {}/{}", group_read, group_lines) : std::string();
     print(std::format(
         "SUMMARY real: to_her agreement {}/{} (misread {}{}, missed_her {}), misses {}/{} on lines to her, chip-in {}/{} on other "
-        "lines",
-        agreed, judged, misread, kinds, missed_her, misses, to_her_runs, chip_ins, other_runs));
+        "lines{}",
+        agreed, judged, misread, kinds, missed_her, misses, to_her_runs, chip_ins, other_runs, group));
     co_return 0;
 }
 

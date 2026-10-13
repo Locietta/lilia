@@ -29,7 +29,8 @@ struct Plan {
     bool reply = false;
     i64 target = 0; ///< message id lilia answers
     /// Whether the target was said to her: "called" (@, quote, her name),
-    /// "likely", "unsure" or "no" (to others; she chips in); empty: not given.
+    /// "likely", "group" (to everyone; she answers as one of them), "unsure"
+    /// or "no" (to someone else, or to no one; she chips in); empty: not given.
     std::string to_her;
     bool quote = false;
     ReplyStyle style = ReplyStyle::SHORT;
