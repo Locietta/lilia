@@ -293,11 +293,11 @@ Model calls (2026-10-11):
 5. **Replace the ad hoc parts** (review against MaiBot `0f94cfa8`,
    2026-10-12). About a fifth of `chat/` and half the rules in `planner.md`
    and `writer.md` patch symptoms. Each change is measured in replay first.
-   - Writer output. The log reaches the writer as `name: text`, so it
-     sometimes answers as a transcript, and a chain of scrubbers cleans up
-     after it (speaker labels, leading mentions, asides, transcripts, length
-     caps). Fix the format; keep one validator that retries and counts its
-     repairs.
+   - Writer output (measured 2026-10-13). The scrubbers came from older
+     writers and log formats. Now that they are one counted step
+     (`repair_reply`), 131 replayed answers from the live writer needed no
+     format repair at all (one length cap), so the `name: text` log format
+     stays. Steps that never fire in the live warnings go.
    - Addressee is worked out five times: planner prose about 你/你们, tail
      facts repeating `→她`, `interaction_summary`, a different dyad
      definition with keyword lists in `line_features`, and two writer
