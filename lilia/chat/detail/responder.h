@@ -82,7 +82,8 @@ struct Delivered {
     bool sent = false;
     std::string said;             ///< her messages, joined
     std::vector<i64> message_ids; ///< of her messages, in order
-    /// Why nothing was attempted (the target was recalled), for the planner.
+    /// Why nothing was attempted (the target was recalled, or is hers), for
+    /// the planner.
     std::string refused;
 };
 

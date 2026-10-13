@@ -267,8 +267,12 @@ void test_planner() {
     const auto waiting = chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":12,"reason":"他还在打字"})"))}, rows);
     require(!waiting.reply && waiting.wait == 12 && waiting.reason == "他还在打字", "wait carries seconds and reason");
     require(chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":"600"})"))}, rows).wait == 60 &&
-                chat::parse_plan({OutputItem(tool_call("wait", R"({})"))}, rows).wait == 30,
-            "waits are capped at a minute; 30 seconds when unsaid");
+                chat::parse_plan({OutputItem(tool_call("wait", R"({"seconds":"5秒"})"))}, rows).wait == 5,
+            "waits are capped at a minute; a number leading a string counts");
+    const auto unsaid = chat::parse_call(tool_call("wait", R"({"seconds":"一会儿"})").call, rows);
+    require(!unsaid && unsaid.error().contains("没说等多少秒"), "a wait without seconds is sent back, not guessed");
+    const auto unshown = chat::parse_call(tool_call("repeat", R"({"target":"#3"})").call, rows);
+    require(!unshown && unshown.error() == "没找到这个编号的消息，没有发。", "so is a target that is not shown");
     const auto sticker = chat::parse_plan({OutputItem(tool_call("send_sticker", R"({"sticker":"s12"})"))}, rows);
     require(!sticker.reply && sticker.sticker == "s12", "a sticker by its number");
 

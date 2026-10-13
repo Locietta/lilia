@@ -108,7 +108,17 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       none of them, only the one recalled (a cue above 0.8 against the last
       12 lines); showing the newest is lilia's choice.
     - Limits: 16 rounds per turn, 3 waits in a row (MaiBot's), 3 replies per
-      turn (lilia's), waits of 1–60 s. Replay passes waits in simulated time.
+      turn (lilia's), waits of 1–60 s. Per turn, 2 web searches, 3 look-ups,
+      3 sticker searches and `memory.max_searches` history searches. Replay
+      passes waits in simulated time.
+    - Each tool is one entry of a table in `run_turn` (2026-10-13): whether
+      the chat offers it this turn, its calls per turn, what a call does.
+      A mistake gets a receipt and the round goes on, so the planner sees it:
+      a tool that is off here ("现在用不了 X。") or does not exist, a limit
+      reached ("这次已经用过 N 次 X 了"), her own line as a reply target, a
+      wait without seconds, a target not shown. Nothing is silently repaired.
+      Replay's `must_speak` is one guard on the tools that stop a turn plus
+      the end of the turn.
   - The writer (`prompts/persona.md` + `prompts/writer.md`) sees the log as
     turns (her lines are assistant turns) plus the planner's style and
     intent ("#n" becomes the line it names), never its analysis: that is
@@ -307,10 +317,11 @@ Model calls (2026-10-11):
      patches. Keep the arrows and quotes; make the fitted prior the one
      derived signal (addressee recognition: Ouchi & Tsuboi 2016, Le et al.
      2019, MPC-BERT).
-   - Planner dispatch: an if-chain on tool names with per-tool counters,
-     silent repairs of planner mistakes (a self target becomes the newest
-     line, a missing wait becomes 30 s), and replay's `must_speak` inside the
-     production loop.
+   - Planner dispatch (done 2026-10-13). An if-chain on tool names with
+     per-tool counters became a table of tool handlers; silent repairs of
+     planner mistakes (a self target became the newest line, a missing wait
+     30 s) became receipts, and replay's `must_speak` one guard. A tool that
+     was off ended the turn, and `send_sticker` and `poke` were not gated.
    - Writer rules quote the phrases they forbid, which primes them. A/B a
      rule in replay before adding it.
    - No anti-loop guard: MaiBot replaces an analysis over 90% like the

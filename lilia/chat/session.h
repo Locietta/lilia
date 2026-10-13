@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deque>
+#include <expected>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -79,12 +80,15 @@ struct PlannerToolSet {
 /// The planner's tools; the same every round, so they never break the cache.
 std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set);
 
-/// Reads one planner tool call. Targets are "#<row id>" among `rows`; an
-/// unknown tool or an invalid target means silence (with the reason). Waits
-/// are clamped to 1..60 seconds (30 when missing).
-Plan parse_call(const provider::ToolCall &call, const std::vector<store::StoredMessage> &rows);
+/// Reads the arguments of one planner tool call. Targets are "#<row id>"
+/// among `rows`; waits are clamped to 1..60 seconds. A call it cannot read (a
+/// target not shown, a wait without seconds) gives the receipt telling the
+/// planner why. A tool with no arguments for a Plan (search_web, or a name that
+/// is no tool) reads as an empty Plan.
+std::expected<Plan, std::string> parse_call(const provider::ToolCall &call, const std::vector<store::StoredMessage> &rows);
 
-/// parse_call() of the first tool call in `items`; no call means silence.
+/// parse_call() of the first tool call in `items` (a call it cannot read has
+/// its receipt as the reason); no call means silence.
 Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vector<store::StoredMessage> &rows);
 
 } // namespace lilia::chat

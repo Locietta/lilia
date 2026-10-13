@@ -1,8 +1,12 @@
 #include <lilia/chat/detail/responder.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <expected>
 #include <format>
+#include <functional>
+#include <limits>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -150,6 +154,18 @@ struct Step {
     std::string ended; ///< why the turn ended (Next::END)
 };
 
+/// One planner tool: whether the chat offers it this turn, how often a turn
+/// may call it, and what a call does.
+struct ToolHandler {
+    std::string_view name;
+    bool available = true;
+    usize limit = std::numeric_limits<usize>::max(); ///< calls per turn
+    bool stops = false;                              ///< the turn may stop here (wait, stay_silent)
+    /// A call, its arguments as read and its planner_turns row.
+    std::move_only_function<Task<Step>(const provider::ToolCall &, Plan, i64)> run;
+    usize used = 0; ///< calls run this turn
+};
+
 } // namespace
 
 Task<> Responder::run_turn(store::ChatKey chat) {
@@ -201,12 +217,13 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                                   {"search_rule", search_rule(config.model.web_search)},
                                   {"sticker_rule", sticker_rule(has_stickers)}},
                                  embedded(xmake::planner_group_md), embedded(xmake::planner_private_md));
-    const auto tools = planner_tools({.reference_handoff = settings.handoff == "reference",
-                                      .memory = memory != nullptr,
-                                      .people = knows_people,
-                                      .web = config.model.web_search,
-                                      .stickers = has_stickers,
-                                      .poke = chat.type == "group"});
+    const PlannerToolSet offered{.reference_handoff = settings.handoff == "reference",
+                                 .memory = memory != nullptr,
+                                 .people = knows_people,
+                                 .web = config.model.web_search,
+                                 .stickers = has_stickers,
+                                 .poke = chat.type == "group"};
+    const auto tools = planner_tools(offered);
     const u64 cycle = ++state.cycles;
 
     // Notes for this turn: in the tail of every round, never in the history.
@@ -313,12 +330,10 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (!arrived.empty()) newest = arrived.back().message_id;
     };
     const auto reply_to = [&](Plan plan) -> Task<Delivered> {
-        auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
-        if (target != rows.end() && target->from_self) {
-            // She answers others, not herself; fall back to the newest message.
-            plan.target = newest;
-            target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
-        }
+        const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
+        // She answers others, not herself: the planner picks again.
+        if (target != rows.end() && target->from_self)
+            co_return Delivered{.refused = std::format("#{} 是她自己说的，选别人的一条。", target->row_id)};
         if (target == rows.end()) {
             log::warn("planner target {} is not in the chat log", plan.target);
             co_return Delivered{};
@@ -334,168 +349,207 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         co_return co_await deliver(this, chat, plan, rows, *target, info, now(), found);
     };
 
-    usize searches = 0;
-    usize web_searches = 0;
-    usize look_ups = 0;
-    usize sticker_finds = 0;
     usize waits = 0;
     usize replies = 0;
     std::string analysis;
-    // One tool call of a round, with its call as parsed and its planner_turns row.
-    const auto act = [&](const provider::ToolCall &call, Plan plan, i64 turn_id) -> Task<Step> {
-        const auto &tool = call.name;
-        const auto argument = [&](std::string_view key) { return string_input(call.input, key); };
-        // One she cannot use right now gets a receipt saying why (the tools
-        // never change, which would void the cached prompt).
-        if ((tool == "search_history" && searches >= config.memory.max_searches) ||
-            (tool == "search_web" && web_searches >= k_max_web_searches) || (tool == "look_up_person" && look_ups >= k_max_look_ups) ||
-            (tool == "find_sticker" && sticker_finds >= k_max_sticker_finds)) {
-            co_return Step{.receipt = "这一轮已经查过了，不能再查，根据现有的信息决定。"};
-        }
-        if ((tool == "wait" || tool == "stay_silent") && must_speak && replies == 0)
-            co_return Step{.receipt = "这次需要她说点什么，用 reply。"};
-        if (tool == "send_sticker" && now() - state.last_sticker < config.stickers.cooldown_seconds) {
-            co_return Step{.receipt = "她刚发过表情包，隔一会儿再发；可以用文字回应，或者不说话。"};
-        }
-        // Each of her messages counts against the turn's replies.
-        const auto spoke = [&](std::string receipt) {
-            ++replies;
-            waits = 0;
-            note_spoke(state.flow);
-            if (replies >= k_max_replies) return Step{.receipt = std::move(receipt), .next = Next::END, .ended = "replied enough"};
-            return Step{.receipt = std::move(receipt)};
-        };
+    // Replay only (`--continue-at`, blind comparisons): she must say something
+    // this turn, so neither a tool that stops nor a round without calls ends
+    // it before she has.
+    const auto must_still_speak = [&] { return must_speak && replies == 0; };
+    // Each of her messages counts against the turn's replies.
+    const auto spoke = [&](std::string receipt) {
+        ++replies;
+        waits = 0;
+        note_spoke(state.flow);
+        if (replies >= k_max_replies) return Step{.receipt = std::move(receipt), .next = Next::END, .ended = "replied enough"};
+        return Step{.receipt = std::move(receipt)};
+    };
+    // Whoever wrote the line, or whoever a notice says did it (poked her); 0
+    // for her own lines and lines not shown.
+    const auto author_of = [&](i64 message_id) -> i64 {
+        const auto target = std::ranges::find(rows, message_id, &store::StoredMessage::message_id);
+        if (target == rows.end() || target->from_self) return 0;
+        return is_notice(*target) ? notice_actor(*target) : target->sender_id;
+    };
 
-        // A look into the history: its result goes back to the planner, and to
-        // the writer if she replies.
-        if (memory && tool == "search_history") {
-            const auto hits = co_await memory->search(chat, argument("query"));
-            const auto rendered = memory::render_hits(hits);
-            if (!hits.empty()) found.remembered += rendered;
-            ++searches;
-            co_return Step{.receipt = rendered};
-        }
-        // A look online: the same.
-        if (config.model.web_search && tool == "search_web") {
-            const auto online = co_await search_web(this, chat, info, argument("query"));
-            if (!online.empty()) found.online += (found.online.empty() ? "" : "\n") + online;
-            ++web_searches;
-            co_return Step{.receipt = online.empty() ? std::string("没查到。") : "查到的：" + online};
-        }
-        // Stickers she could send: the planner picks one (or none) next round.
-        if (has_stickers && tool == "find_sticker") {
-            const auto feeling = argument("feeling");
-            const auto candidates = co_await find_stickers(this, feeling);
-            log::info("{} looks for stickers for \"{}\": {} found", describe(chat), feeling, candidates.size());
-            ++sticker_finds;
-            co_return Step{.receipt = candidates.empty() ?
-                                          std::string("没找到能发的表情包。") :
-                                          std::format("找到这些：\n{}要发就用 send_sticker 填编号；都不贴切就别发。",
-                                                      sticker::render_candidates(candidates, now(), config.stickers.usage_in_search))};
-        }
-
-        plan.follow_up = replies > 0;
-        plan.analysis = analysis;
-        if (plan.look_up && knows_people) {
-            // MaiBot's person profiles, on request: whoever wrote the line.
-            const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
-            const i64 user = target == rows.end() || target->from_self ? 0 : is_notice(*target) ? notice_actor(*target) : target->sender_id;
-            ++look_ups;
-            if (user == 0) co_return Step{.receipt = "这条找不到是谁发的。"};
-            const auto name = person(this, chat, user);
-            auto known = store.facts(user, config.memory.facts_per_person);
-            if (!known.has_value() || known->empty()) co_return Step{.receipt = std::format("她对{}还没记下什么。", name)};
-            const auto rendered = memory::render_facts(*known);
-            if (!std::ranges::contains(found.people, user, &std::pair<i64, KnownPerson>::first))
-                found.people.push_back({user, {.name = name, .facts = rendered}});
-            co_return Step{.receipt = std::format("她记得的关于{}的事：{}", name, rendered)};
-        }
-        if (tool == "send_sticker") {
-            // Any registered sticker by its number, usually one find_sticker showed.
-            std::optional<store::Sticker> chosen;
-            if (const auto id = sticker::parse_handle(plan.sticker)) {
-                if (auto pool = store.stickers("registered"); pool.has_value()) {
-                    if (const auto it = std::ranges::find(*pool, *id, &store::Sticker::id); it != pool->end()) chosen = *it;
+    // The planner's tools, in the order planner_tools() offers them.
+    std::array handlers{
+        ToolHandler{
+            .name = "reply",
+            .run = [&](const provider::ToolCall &, Plan plan, i64 turn_id) -> Task<Step> {
+                const auto delivered = co_await reply_to(plan);
+                if (!delivered.refused.empty()) co_return Step{.receipt = delivered.refused};
+                if (!delivered.sent) co_return Step{.receipt = "没发出去。", .next = Next::END, .ended = "the reply failed"};
+                if (turn_id > 0) {
+                    std::string ids;
+                    for (const auto id : delivered.message_ids) ids += (ids.empty() ? "" : ",") + std::to_string(id);
+                    std::ignore = store.set_planner_turn_sent(turn_id, ids);
                 }
-            }
-            if (!chosen) co_return Step{.receipt = "没有这个编号的表情包；编号要用 find_sticker 找到的，比如 s12。"};
-            if (!co_await send_sticker(this, chat, *chosen)) co_return Step{.receipt = "没发出去。"};
-            if (observer) observer(chat, plan, {"[表情]"});
-            co_return spoke(std::format("她发了表情包 {}。", sticker::handle(*chosen)));
-        }
-        if (plan.repeat) {
+                co_return spoke(std::format("她回复了 #{}，说的话在上面的聊天记录里。", row_of(plan.target)));
+            },
+        },
+        ToolHandler{
+            // Stickers she could send: the planner picks one (or none) next round.
+            .name = "find_sticker",
+            .available = offered.stickers,
+            .limit = k_max_sticker_finds,
+            .run = [&](const provider::ToolCall &call, Plan, i64) -> Task<Step> {
+                const auto feeling = string_input(call.input, "feeling");
+                const auto candidates = co_await find_stickers(this, feeling);
+                log::info("{} looks for stickers for \"{}\": {} found", describe(chat), feeling, candidates.size());
+                co_return Step{.receipt = candidates.empty() ?
+                                              std::string("没找到能发的表情包。") :
+                                              std::format("找到这些：\n{}要发就用 send_sticker 填编号；都不贴切就别发。",
+                                                          sticker::render_candidates(candidates, now(), config.stickers.usage_in_search))};
+            },
+        },
+        ToolHandler{
+            // Any registered sticker by its number, usually one find_sticker showed.
+            .name = "send_sticker",
+            .available = offered.stickers,
+            .run = [&](const provider::ToolCall &, Plan plan, i64) -> Task<Step> {
+                if (now() - state.last_sticker < config.stickers.cooldown_seconds)
+                    co_return Step{.receipt = "她刚发过表情包，隔一会儿再发；可以用文字回应，或者不说话。"};
+                std::optional<store::Sticker> chosen;
+                if (const auto id = sticker::parse_handle(plan.sticker)) {
+                    if (auto pool = store.stickers("registered"); pool.has_value()) {
+                        if (const auto it = std::ranges::find(*pool, *id, &store::Sticker::id); it != pool->end()) chosen = *it;
+                    }
+                }
+                if (!chosen) co_return Step{.receipt = "没有这个编号的表情包；编号要用 find_sticker 找到的，比如 s12。"};
+                if (!co_await send_sticker(this, chat, *chosen)) co_return Step{.receipt = "没发出去。"};
+                if (observer) observer(chat, plan, {"[表情]"});
+                co_return spoke(std::format("她发了表情包 {}。", sticker::handle(*chosen)));
+            },
+        },
+        ToolHandler{
             // 复读: the message again, as it is (a sticker too).
-            const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
-            const auto again = target != rows.end() && !target->from_self ? sticker_again(*target) : std::nullopt;
-            if (target == rows.end() || target->from_self || is_notice(*target) || (!again && !repeatable(target->text))) {
-                co_return Step{.receipt = "这条不适合复读（只复读别人的短消息或表情包），没有发。"};
-            }
-            if (!co_await send_and_record(this, chat, again ? onebot::Message{*again} : onebot::Message{onebot::text_segment(target->text)},
-                                          again ? target->text : std::string())) {
-                co_return Step{.receipt = "没发出去。"};
-            }
-            if (observer) observer(chat, plan, {target->text});
-            log::info("{} repeats {}: {}", describe(chat), plan.target, target->text);
-            co_return spoke(std::format("她复读了 #{}。", target->row_id));
-        }
-        if (plan.poke) {
-            // Whoever wrote the line, or whoever a poke notice says poked her.
-            const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
-            const i64 user = target == rows.end() ? 0 :
-                             is_notice(*target)   ? notice_actor(*target) :
-                             target->from_self    ? 0 :
-                                                    target->sender_id;
-            if (user == 0 || user == self.user_id) co_return Step{.receipt = "这条找不到可以戳的人。"};
-            if (now() - state.poked[user] < k_poke_gap_seconds) co_return Step{.receipt = "刚戳过这个人，过一会儿再戳。"};
-            if (!co_await call_action(this, "send_poke", std::format(R"({{"group_id":{},"user_id":{}}})", chat.id, user))) {
-                co_return Step{.receipt = "没戳成。"};
-            }
-            state.poked[user] = now();
-            note_spoke(state.flow);
-            if (observer) observer(chat, plan, {"[戳一戳]"});
-            log::info("{} pokes {}", describe(chat), user);
-            co_return Step{.receipt = std::format("她戳了戳 {}。", person(this, chat, user))};
-        }
-        if (plan.wait > 0) {
-            // MaiBot allows three waits in a row, then the turn rests.
-            if (++waits > k_max_waits)
-                co_return Step{.receipt = "不能再等了，这一轮到此为止。", .next = Next::END, .ended = "waited enough"};
-            log::info("{} waits {}s: {}", describe(chat), plan.wait, plan.reason);
-            if (observer) observer(chat, plan, {});
-            const i64 before = now();
-            if (pause) {
-                co_await pause(chat, plan.wait);
-            } else if (realtime && chat.type == "private") {
-                // MaiBot's: in a private chat, the other one writing ends the wait.
-                auto arrival = state.arrival;
-                arrival->reset();
-                if (state.flow.unseen.empty())
-                    std::ignore = co_await lighter::with_timeout(arrival->wait(), std::chrono::seconds(plan.wait));
-            } else if (realtime) {
-                co_await lighter::sleep(std::chrono::seconds(plan.wait));
-            }
-            co_return Step{.receipt = state.flow.unseen.empty() || chat.type != "private" ?
-                                          std::format("等了 {} 秒。", now() - before) :
-                                          std::format("等了 {} 秒，对方发来了新消息。", now() - before),
-                           .next = Next::PAUSE};
-        }
-        if (!plan.reply) {
-            if (tool == "reply" || tool == "repeat" || tool == "poke" || tool == "look_up_person") {
-                // A target that is not in the history: let it look again.
-                co_return Step{.receipt = "没找到这个编号的消息，没有发。"};
-            }
-            co_return Step{.receipt = "好。", .next = Next::END, .ended = plan.reason};
-        }
-
-        const auto delivered = co_await reply_to(plan);
-        if (!delivered.refused.empty()) co_return Step{.receipt = delivered.refused};
-        if (!delivered.sent) co_return Step{.receipt = "没发出去。", .next = Next::END, .ended = "the reply failed"};
-        if (turn_id > 0) {
-            std::string ids;
-            for (const auto id : delivered.message_ids) ids += (ids.empty() ? "" : ",") + std::to_string(id);
-            std::ignore = store.set_planner_turn_sent(turn_id, ids);
-        }
-        co_return spoke(std::format("她回复了 #{}，说的话在上面的聊天记录里。", row_of(plan.target)));
+            .name = "repeat",
+            .run = [&](const provider::ToolCall &, Plan plan, i64) -> Task<Step> {
+                const auto target = std::ranges::find(rows, plan.target, &store::StoredMessage::message_id);
+                const auto again = target != rows.end() && !target->from_self ? sticker_again(*target) : std::nullopt;
+                if (target == rows.end() || target->from_self || is_notice(*target) || (!again && !repeatable(target->text))) {
+                    co_return Step{.receipt = "这条不适合复读（只复读别人的短消息或表情包），没有发。"};
+                }
+                if (!co_await send_and_record(this, chat,
+                                              again ? onebot::Message{*again} : onebot::Message{onebot::text_segment(target->text)},
+                                              again ? target->text : std::string())) {
+                    co_return Step{.receipt = "没发出去。"};
+                }
+                if (observer) observer(chat, plan, {target->text});
+                log::info("{} repeats {}: {}", describe(chat), plan.target, target->text);
+                co_return spoke(std::format("她复读了 #{}。", target->row_id));
+            },
+        },
+        ToolHandler{
+            .name = "wait",
+            .stops = true,
+            .run = [&](const provider::ToolCall &, Plan plan, i64) -> Task<Step> {
+                // MaiBot allows three waits in a row, then the turn rests.
+                if (++waits > k_max_waits)
+                    co_return Step{.receipt = "不能再等了，这一轮到此为止。", .next = Next::END, .ended = "waited enough"};
+                log::info("{} waits {}s: {}", describe(chat), plan.wait, plan.reason);
+                if (observer) observer(chat, plan, {});
+                const i64 before = now();
+                if (pause) {
+                    co_await pause(chat, plan.wait);
+                } else if (realtime && chat.type == "private") {
+                    // MaiBot's: in a private chat, the other one writing ends the wait.
+                    auto arrival = state.arrival;
+                    arrival->reset();
+                    if (state.flow.unseen.empty())
+                        std::ignore = co_await lighter::with_timeout(arrival->wait(), std::chrono::seconds(plan.wait));
+                } else if (realtime) {
+                    co_await lighter::sleep(std::chrono::seconds(plan.wait));
+                }
+                co_return Step{.receipt = state.flow.unseen.empty() || chat.type != "private" ?
+                                              std::format("等了 {} 秒。", now() - before) :
+                                              std::format("等了 {} 秒，对方发来了新消息。", now() - before),
+                               .next = Next::PAUSE};
+            },
+        },
+        ToolHandler{
+            .name = "poke",
+            .available = offered.poke,
+            .run = [&](const provider::ToolCall &, Plan plan, i64) -> Task<Step> {
+                const i64 user = author_of(plan.target);
+                if (user == 0 || user == self.user_id) co_return Step{.receipt = "这条找不到可以戳的人。"};
+                if (now() - state.poked[user] < k_poke_gap_seconds) co_return Step{.receipt = "刚戳过这个人，过一会儿再戳。"};
+                if (!co_await call_action(this, "send_poke", std::format(R"({{"group_id":{},"user_id":{}}})", chat.id, user))) {
+                    co_return Step{.receipt = "没戳成。"};
+                }
+                state.poked[user] = now();
+                note_spoke(state.flow);
+                if (observer) observer(chat, plan, {"[戳一戳]"});
+                log::info("{} pokes {}", describe(chat), user);
+                co_return Step{.receipt = std::format("她戳了戳 {}。", person(this, chat, user))};
+            },
+        },
+        ToolHandler{
+            // A look into the history: its result goes back to the planner,
+            // and to the writer if she replies.
+            .name = "search_history",
+            .available = offered.memory,
+            .limit = config.memory.max_searches,
+            .run = [&](const provider::ToolCall &call, Plan, i64) -> Task<Step> {
+                const auto hits = co_await memory->search(chat, string_input(call.input, "query"));
+                const auto rendered = memory::render_hits(hits);
+                if (!hits.empty()) found.remembered += rendered;
+                co_return Step{.receipt = rendered};
+            },
+        },
+        ToolHandler{
+            // MaiBot's person profiles, on request: whoever wrote the line.
+            .name = "look_up_person",
+            .available = offered.people,
+            .limit = k_max_look_ups,
+            .run = [&](const provider::ToolCall &, Plan plan, i64) -> Task<Step> {
+                const i64 user = author_of(plan.target);
+                if (user == 0) co_return Step{.receipt = "这条找不到是谁发的。"};
+                const auto name = person(this, chat, user);
+                auto known = store.facts(user, config.memory.facts_per_person);
+                if (!known.has_value() || known->empty()) co_return Step{.receipt = std::format("她对{}还没记下什么。", name)};
+                const auto rendered = memory::render_facts(*known);
+                if (!std::ranges::contains(found.people, user, &std::pair<i64, KnownPerson>::first))
+                    found.people.push_back({user, {.name = name, .facts = rendered}});
+                co_return Step{.receipt = std::format("她记得的关于{}的事：{}", name, rendered)};
+            },
+        },
+        ToolHandler{
+            // A look online: the same as search_history.
+            .name = "search_web",
+            .available = offered.web,
+            .limit = k_max_web_searches,
+            .run = [&](const provider::ToolCall &call, Plan, i64) -> Task<Step> {
+                const auto online = co_await search_web(this, chat, info, string_input(call.input, "query"));
+                if (!online.empty()) found.online += (found.online.empty() ? "" : "\n") + online;
+                co_return Step{.receipt = online.empty() ? std::string("没查到。") : "查到的：" + online};
+            },
+        },
+        ToolHandler{
+            .name = "stay_silent",
+            .stops = true,
+            .run = [&](const provider::ToolCall &, Plan plan, i64) -> Task<Step> {
+                co_return Step{.receipt = "好。", .next = Next::END, .ended = plan.reason};
+            },
+        },
+    };
+    // One tool call of a round, with its arguments as read and its
+    // planner_turns row. A mistake gets a receipt and the round goes on, so the
+    // planner sees it; the tools never change, which would void the cached
+    // prompt.
+    const auto act = [&](const provider::ToolCall &call, std::expected<Plan, std::string> parsed, i64 turn_id) -> Task<Step> {
+        const auto handler = std::ranges::find(handlers, std::string_view(call.name), &ToolHandler::name);
+        if (handler == handlers.end()) co_return Step{.receipt = std::format("没有 {} 这个工具。", call.name)};
+        if (!handler->available || handler->limit == 0) co_return Step{.receipt = std::format("现在用不了 {}。", call.name)};
+        if (handler->used >= handler->limit)
+            co_return Step{.receipt = std::format("这次已经用过 {} 次 {} 了，根据现有的信息决定。", handler->used, call.name)};
+        if (handler->stops && must_still_speak()) co_return Step{.receipt = "这次需要她说点什么，用 reply。"};
+        if (!parsed) co_return Step{.receipt = std::move(parsed).error()};
+        ++handler->used;
+        parsed->follow_up = replies > 0;
+        parsed->analysis = analysis;
+        co_return co_await handler->run(call, *std::move(parsed), turn_id);
     };
 
     // MaiBot's planner loop: each round an analysis and tool calls, run in
@@ -558,10 +612,10 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         // The round stays in the history with a result for each call.
         PlannerRecord record{.after_row = shown, .cycle = cycle, .output = *planned};
         if (calls.empty()) {
-            // No call: she says nothing (blind comparisons ask again).
+            // No call: she says nothing (replay's must_speak asks again).
             std::ignore = log_turn({}, {}, {.reason = "no tool call"});
             state.records.push_back(std::move(record));
-            if (must_speak && replies == 0) {
+            if (must_still_speak()) {
                 co_await refresh();
                 continue;
             }
@@ -574,11 +628,12 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                 record.outcomes.push_back({.call_id = call->id, .receipt = skipped});
                 continue;
             }
-            auto plan = parse_call(*call, rows);
+            auto parsed = parse_call(*call, rows);
             auto what = string_input(call->input, "feeling");
             if (what.empty()) what = string_input(call->input, "query");
             if (what.empty()) what = string_input(call->input, "sticker");
-            const auto step = co_await act(*call, plan, log_turn(call->name, std::move(what), plan));
+            const i64 turn_id = log_turn(call->name, std::move(what), parsed ? *parsed : Plan{.reason = parsed.error()});
+            const auto step = co_await act(*call, std::move(parsed), turn_id);
             record.outcomes.push_back({.call_id = call->id, .receipt = step.receipt});
             if (step.next == Next::PAUSE) skipped = "没有执行：等完先看看情况，再决定要不要做。";
             if (step.next == Next::END) {
@@ -591,8 +646,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         if (!over) co_await refresh();
     }
 
-    // Blind comparisons only: she must say something.
-    if (must_speak && replies == 0 && ended != "the reply failed") {
+    // Replay's must_speak: a turn that ended without her saying anything
+    // replies to the newest line.
+    if (must_still_speak() && ended != "the reply failed") {
         log::info("{} turn ended ({}) without a reply; replying anyway", describe(chat), ended);
         if ((co_await reply_to({.reply = true, .target = newest})).sent) ++replies;
     }

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <format>
+#include <optional>
 #include <set>
 #include <variant>
 
@@ -227,48 +228,43 @@ std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
     return tools;
 }
 
-Plan parse_call(const provider::ToolCall &call, const std::vector<store::StoredMessage> &rows) {
+std::expected<Plan, std::string> parse_call(const provider::ToolCall &call, const std::vector<store::StoredMessage> &rows) {
     const auto &input = call.input;
-    if (call.name == "stay_silent") return {.reason = string_field(input, "reason")};
-    if (call.name == "repeat") {
+    // A target not shown: let it look again.
+    const auto no_target = [&] {
+        return std::unexpected(std::string(call.name == "look_up_person" ? "没找到这个编号的消息。" : "没找到这个编号的消息，没有发。"));
+    };
+    if (call.name == "stay_silent") return Plan{.reason = string_field(input, "reason")};
+    if (call.name == "repeat" || call.name == "poke" || call.name == "look_up_person") {
         const auto *target = find_target(string_field(input, "target"), rows);
-        if (!target) return {.reason = "invalid repeat target " + string_field(input, "target")};
-        return {.target = target->message_id, .repeat = true};
+        if (!target) return no_target();
+        return Plan{.target = target->message_id,
+                    .repeat = call.name == "repeat",
+                    .poke = call.name == "poke",
+                    .look_up = call.name == "look_up_person"};
     }
-    if (call.name == "poke") {
-        const auto *target = find_target(string_field(input, "target"), rows);
-        if (!target) return {.reason = "invalid poke target " + string_field(input, "target")};
-        return {.target = target->message_id, .poke = true};
-    }
-    if (call.name == "look_up_person") {
-        const auto *target = find_target(string_field(input, "target"), rows);
-        if (!target) return {.reason = "invalid look_up_person target " + string_field(input, "target")};
-        return {.target = target->message_id, .look_up = true};
-    }
-    if (call.name == "send_sticker") {
-        const auto sticker = string_field(input, "sticker");
-        if (sticker.empty()) return {.reason = "send_sticker without a sticker"};
-        return {.sticker = sticker};
-    }
+    if (call.name == "send_sticker") return Plan{.sticker = string_field(input, "sticker")};
     if (call.name == "wait") {
-        // MaiBot waits 30 seconds when the argument is missing or invalid.
-        i64 seconds = 30;
+        // A number, or a string that starts with one ("5秒"). MaiBot waits 30
+        // seconds without one; the planner is told instead.
+        std::optional<i64> seconds;
         if (const auto *value = field(input, "seconds"); value && value->is_number()) {
-            seconds = static_cast<i64>(value->get_number());
+            seconds = static_cast<i64>(std::clamp(value->get_number(), 1.0, 60.0));
         } else if (value && value->is_string()) {
             const auto &text = value->get_string();
             if (i64 parsed = 0; std::from_chars(text.data(), text.data() + text.size(), parsed).ec == std::errc{}) seconds = parsed;
         }
-        return {.wait = std::clamp<i64>(seconds, 1, 60), .reason = string_field(input, "reason")};
+        if (!seconds) return std::unexpected(std::string("没说等多少秒，没有等；seconds 填 1 到 60 之间的数字。"));
+        return Plan{.wait = std::clamp<i64>(*seconds, 1, 60), .reason = string_field(input, "reason")};
     }
-    if (call.name != "reply") return {.reason = "unknown tool " + call.name};
+    if (call.name != "reply") return Plan{};
 
     const auto *target = find_target(string_field(input, "target"), rows);
-    if (!target) return {.reason = "invalid target " + string_field(input, "target")};
+    if (!target) return no_target();
     const auto style = string_field(input, "style");
     auto to_her = std::string(trim(string_field(input, "to_her")));
     if (to_her != "called" && to_her != "likely" && to_her != "unsure" && to_her != "no") to_her.clear();
-    return {
+    return Plan{
         .reply = true,
         .target = target->message_id,
         .to_her = std::move(to_her),
@@ -283,7 +279,10 @@ Plan parse_call(const provider::ToolCall &call, const std::vector<store::StoredM
 
 Plan parse_plan(const std::vector<provider::OutputItem> &items, const std::vector<store::StoredMessage> &rows) {
     for (const auto &item : items) {
-        if (const auto *tool = std::get_if<provider::ToolCallItem>(&item)) return parse_call(tool->call, rows);
+        if (const auto *tool = std::get_if<provider::ToolCallItem>(&item)) {
+            auto plan = parse_call(tool->call, rows);
+            return plan ? *std::move(plan) : Plan{.reason = std::move(plan).error()};
+        }
     }
     return {.reason = "no tool call"};
 }

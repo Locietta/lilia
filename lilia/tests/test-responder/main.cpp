@@ -523,6 +523,72 @@ Task<> test_several_calls_a_round() {
     co_await tasks.join();
 }
 
+Task<> test_planner_mistakes() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("在追")};
+    };
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
+        return std::vector{
+            test::tool_call("reply", R"({"target":")" + line_number(history, "新番") + R"(","style":"short","intent":"说在追"})")};
+    };
+    std::ignore = h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 新番追了吗")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent == std::vector<std::string>{"在追"}, "she has a line of her own");
+
+    // A tool that does not exist, one that is off here, a wait without
+    // seconds, her own line as a target: each gets a receipt, and the round
+    // goes on.
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"算了"})")};
+        return std::vector{test::tool_call("dance", "{}", "toolu_1"), test::tool_call("search_web", R"({"query":"新番"})", "toolu_2"),
+                           test::tool_call("wait", R"({"reason":"等他说完"})", "toolu_3"),
+                           test::tool_call("reply",
+                                           R"({"target":")" + line_number(history, "(她自己)") + R"(","style":"short","intent":"再说"})",
+                                           "toolu_4")};
+    };
+    std::ignore = h.say(2, 20001, "小明", {onebot::text_segment("第几集了")});
+    const auto before = h.planner->requests.size();
+    co_await h.responder->run_turn(k_chat);
+    require(h.planner->requests.size() == before + 2, "the turn went on to another round");
+    const auto &records = h.responder->chats[k_chat].records;
+    const auto &outcomes = records[records.size() - 2].outcomes;
+    std::string receipts;
+    for (const auto &outcome : outcomes) receipts += "[" + outcome.receipt + "]";
+    require(outcomes.size() == 4 && outcomes[0].receipt == "没有 dance 这个工具。" && outcomes[1].receipt == "现在用不了 search_web。" &&
+                outcomes[2].receipt.starts_with("没说等多少秒") && outcomes[3].receipt.ends_with(" 是她自己说的，选别人的一条。"),
+            "each mistake has its receipt: " + receipts);
+    require(h.sent.size() == 1 && h.writer->requests.size() == 1, "nothing more was sent");
+    co_await tasks.join();
+}
+
+Task<> test_tool_limits() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.config.model.web_search = true;
+    // The planner keeps searching, a round at a time, until it is told to stop.
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (text_of(history.back()).contains("这次已经用过")) return std::vector{test::tool_call("stay_silent", R"({"reason":"查不到"})")};
+        return std::vector{test::tool_call("search_web", R"({"query":"今天的新闻"})")};
+    };
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("没什么大新闻")};
+    };
+    std::ignore = h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 今天有什么新闻")});
+    co_await h.responder->run_turn(k_chat);
+    const auto &requests = h.planner->requests;
+    require(requests.size() == 4 && h.writer->requests.size() == 2, "two searches a turn, then a receipt and silence");
+    require(text_of(requests[3].back()).contains("这次已经用过 2 次 search_web 了"), "the receipt counts the turn's searches");
+
+    // The count is per turn.
+    std::ignore = h.say(2, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 再查查")});
+    co_await h.responder->run_turn(k_chat);
+    require(requests.size() == 8 && h.writer->requests.size() == 4, "a new turn searches again");
+    co_await tasks.join();
+}
+
 Task<> test_private_chats() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
@@ -565,6 +631,33 @@ Task<> test_private_chats() {
     co_await tasks.join();
 }
 
+Task<> test_no_pokes_in_private() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.config.chat.private_users = {20001};
+    const store::ChatKey friend_chat{.type = "private", .id = 20001};
+    h.clock += 5;
+    std::ignore = h.responder->ingest({.time = h.clock,
+                                       .self_id = k_self,
+                                       .message_type = "private",
+                                       .message_id = 1,
+                                       .user_id = 20001,
+                                       .sender = {.user_id = 20001, .nickname = "小明"},
+                                       .message = {onebot::text_segment("戳你一下")}});
+    // poke is not offered in a private chat; a call anyway is not run.
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"好了"})")};
+        return std::vector{test::tool_call("poke", R"({"target":")" + line_number(history, "戳你") + R"("})")};
+    };
+    co_await h.responder->run_turn(friend_chat);
+    const auto &requests = h.planner->requests;
+    require(!std::ranges::contains(h.planner->tools.front(), std::string("poke"), &provider::ToolDefinition::name), "no poke offered");
+    require(requests.size() == 2 && text_of(requests[1].back()).contains("现在用不了 poke。") &&
+                !text_of(requests[1].back()).contains("没戳成"),
+            "the call gets a receipt and no poke is tried: " + text_of(requests[1].back()));
+    co_await tasks.join();
+}
+
 Task<> test_history_survives_many_turns() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
@@ -592,7 +685,8 @@ int main() {
     try {
         for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
                            &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches,
-                           &test_pokes_and_repeats, &test_stickers, &test_several_calls_a_round, &test_private_chats}) {
+                           &test_pokes_and_repeats, &test_stickers, &test_several_calls_a_round, &test_planner_mistakes, &test_tool_limits,
+                           &test_private_chats, &test_no_pokes_in_private}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);
