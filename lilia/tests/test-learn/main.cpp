@@ -78,18 +78,49 @@ void test_parse() {
     require(!learn::parse_learned({tool_call("record_expressions", many)}, k_lines, k_names), "more than 20 items discard the batch");
     require(learn::parse_learned({}, k_lines, k_names)->empty(), "no tool call learns nothing");
 
+    const std::vector<learn::Line> spoken{
+        {.sender = 7, .text = "这人纯纯废物"},
+        {.sender = 9, .text = "你怎么这么区"},
+        {.sender = 7, .text = "绷"},
+    };
     const auto filtered = learn::parse_learned({tool_call("record_expressions", R"({"items": [
             {"situation": "吐槽某个人很差劲", "style": "用「废物」", "source": "1"},
-            {"situation": "调侃对方菜或者不行", "style": "用\"你怎么这么区\"", "source": "1"},
-            {"situation": "看到离谱的事", "style": "说「绷」", "source": "1"}
+            {"situation": "调侃对方菜或者不行", "style": "用\"你怎么这么区\"", "source": "2"},
+            {"situation": "看到离谱的事", "style": "说「绷」", "source": "3"}
         ]})")},
-                                               k_lines, k_names);
+                                               spoken, k_names);
     require(filtered && filtered->size() == 1 && filtered->front().style == "用\"绷\"", "put-downs are dropped");
     require(learn::normalize_style("回“洗澡”") == "用\"洗澡\"" && learn::normalize_style("句尾加\"捏\"") == "句尾加\"捏\"", "normalising");
     require(!learn::blocked_expression("开玩笑逗人", "用\"杂鱼~\"") && !learn::blocked_expression("评价新卡强度不够", "用\"这卡有点区\""),
             "playful 杂鱼 and 区 about a card pass");
     require(learn::blocked_expression("调侃对方不行", "用\"你怎么这么区\"") && learn::blocked_expression("觉得离谱", "用\"弱智吧\""),
             "aimed at a person or a slur is blocked");
+    require(learn::blocked_expression("调侃对方", "用\"你真菜\"") && learn::blocked_expression("调侃对方", "用\"你也太区了吧\"") &&
+                learn::blocked_expression("觉得离谱", "用\"你真sb\""),
+            "jieba's filler words (真菜) and HMM runs (太区) still count; sb after CJK is a word");
+    require(!learn::blocked_expression("问对方有什么不同", "用\"你看这个区别\"") &&
+                !learn::blocked_expression("给对方指路", "用\"你看菜单\"") &&
+                !learn::blocked_expression("教别人看网页", "用\"你先滚动到底\"") &&
+                !learn::blocked_expression("聊旅行", "用\"你去过Lisbon吗\""),
+            "区别, 菜单, 滚动 are other words; sb inside an English word is not a slur");
+}
+
+void test_grounding() {
+    usize ungrounded = 0;
+    const auto learned = learn::parse_learned({tool_call("record_expressions", R"({"items": [
+            {"situation": "觉得离谱", "style": "用\"笑死……这也行\"", "source": "1"},
+            {"situation": "夸卡强", "style": "用「太T0了」和「XSWL」", "source": "4"},
+            {"situation": "觉得可以", "style": "用'这也行'", "source": "1"},
+            {"situation": "觉得离谱", "style": "用\"笑死，这也行\"", "source": "1"},
+            {"situation": "调侃别人", "style": "用\"急了急了\"", "source": "1"},
+            {"situation": "夸卡强", "style": "用\"T\"", "source": "4"},
+            {"situation": "觉得好笑", "style": "说笑死", "source": "1"},
+            {"situation": "觉得好笑", "style": "用\"\"", "source": "1"}
+        ]})")},
+                                              k_lines, k_names, &ungrounded);
+    require(learned && learned->size() == 3 && (*learned)[1].style == "用\"太T0了\"和\"XSWL\"" && (*learned)[2].style == "用'这也行'",
+            "every quoted part, cut at ellipses, is in the source line, ignoring case");
+    require(ungrounded == 5, std::format("rewordings, other lines, partial ASCII words and unquoted styles are dropped: {}", ungrounded));
 }
 
 void test_review() {
@@ -273,6 +304,8 @@ void test_segment() {
         {"C++和c#都能写，A-B测试", "C++/和/c#/都/能/写/，/A/-/B/测试"},
         {"一个emoji🐱和全角，标点！", "一个/emoji/🐱/和/全角/，/标点/！"},
         {"第一行\r\n第二行", "第一行/\r\n/第二行"},
+        {"你怎么这么区，这个区别", "你/怎么/这么/区/，/这个/区别"},
+        {"你真菜 你也太区了吧", "你/真菜/ /你/也/太区/了/吧"},
     };
     for (const auto &[text, expected] : cases) {
         require(joined(learn::cut(text)) == expected, std::format("cut {}: {}", text, joined(learn::cut(text))));
@@ -337,6 +370,7 @@ int main() {
     try {
         test_request();
         test_parse();
+        test_grounding();
         test_review();
         test_jargon();
         test_sharing();

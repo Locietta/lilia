@@ -80,14 +80,17 @@ LearnerRequest build_learner_request(std::string_view prompt, const std::vector<
 
 /// Reads record_expressions. nullopt: more than 20 items, the whole batch is
 /// discarded (MaiBot). Drops items citing a missing or [SELF] line, mentioning
-/// SELF/images/stickers, equal to one of `names`, too long, or put-downs.
+/// SELF/images/stickers, equal to one of `names`, too long, or put-downs, and
+/// styles whose quoted words (each part of 用"…", cut at ellipses) are not
+/// in their source line; those last are counted in `ungrounded`.
 std::optional<std::vector<Learned>> parse_learned(const std::vector<provider::OutputItem> &items, const std::vector<Line> &lines,
-                                                  const std::vector<std::string> &names);
+                                                  const std::vector<std::string> &names, usize *ungrounded = nullptr);
 
 /// True for patterns that put people down, which lilia must never pick up:
 /// outright slurs always; words like 区/菜/垃圾 only when aimed at a person
 /// (a situation about 别人/对方/某人, or a phrase said to 你), since they are
-/// fine about cards, items and other things.
+/// fine about cards, items and other things. ASCII words (sb) match whole,
+/// single characters only as words of their own (区, not 区别).
 bool blocked_expression(std::string_view situation, std::string_view style);
 
 /// One spelling per style: 「」“”『』 become ASCII quotes and 说"…"/回"…"/使用"…"

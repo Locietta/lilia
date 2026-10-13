@@ -237,7 +237,10 @@ Model calls (2026-10-11):
    - Expression learning (done 2026-10-07, `learn/`). Every group the
      account is in feeds an in-memory buffer; batches of 30 lines become
      "当[情境]时，可以[说法]" patterns with counts, and the text is dropped.
-     Other groups are read-only.
+     Other groups are read-only. A pattern must quote its source line: each
+     part of 用"…", cut at ellipses, has to occur in it. Put-downs like 区
+     and 菜 count as words of their own in jieba's cut or inside rare ones
+     (真菜), not inside common words like 区别 or 菜单 (2026-10-13).
    - MaiBot-style learning (2026-10-09). Patterns are kept per source chat
      (`expression_groups` decides which chats share them), reviewed before
      storing with every verdict logged, embedded, and picked after the

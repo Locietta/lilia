@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <format>
+#include <ranges>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -26,6 +27,7 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/learn/frequency.h>
+#include <lilia/learn/segment.h>
 #include <lilia/log.h>
 #include <lilia/onebot/message.h>
 
@@ -129,7 +131,8 @@ constexpr std::array<std::string_view, 14> k_slurs{"煞笔", "傻逼", "傻b",  
 /// Fine about things ("这卡有点区", "这道具纯纯垃圾"), not about people:
 /// dropped only when the pattern is aimed at a person. (Not "杂鱼": that is
 /// playful little-devil teasing.)
-constexpr std::array<std::string_view, 11> k_put_downs{"区", "菜", "垃圾", "废物", "肺物", "笨蛋", "笨", "滚", "闭嘴", "艾草", "没用"};
+constexpr std::array<std::string_view, 14> k_put_downs{"区", "菜",   "垃圾", "废物", "肺物", "笨蛋", "笨",
+                                                       "滚", "滚开", "滚蛋", "菜鸟", "闭嘴", "艾草", "没用"};
 
 /// A situation about someone (别人/对方/某人...) or a phrase said to "你".
 constexpr std::array<std::string_view, 9> k_person_markers{"别人", "对方", "某人", "某个人", "群友", "他人", "人家", "朋友", "骂人"};
@@ -156,6 +159,54 @@ bool occurs(std::string_view text, std::string_view term) {
         if (left && right) return true;
     }
     return false;
+}
+
+/// Single characters (区, 菜, 滚) hide in ordinary words (区别, 菜单, 滚动):
+/// one counts as its own token, or inside a word jieba's dictionary rates
+/// rare. Filler like 真菜 and 太笨 is listed at 3, 区别 at 3776; runs the
+/// HMM joins (太区) are not listed at all.
+constexpr i64 k_common_word_frequency = 10;
+
+/// `word` is said in `text`: ASCII as a whole word, a single character as
+/// above, anything longer as a substring.
+bool says(std::string_view text, std::string_view word) {
+    if (is_ascii_word(word)) return occurs(text, word);
+    if (!contains(text, word) || chat::count_code_points(word) > 1) return contains(text, word);
+    return std::ranges::any_of(cut(text), [&](std::string_view token) {
+        return contains(token, word) && (token == word || dictionary_frequency(token) < k_common_word_frequency);
+    });
+}
+
+/// The quoted parts of a style (normalised, so "…"; ‘…’ or '…' when it has
+/// none), cut at ellipses: 用"笑死…这也行" gives 笑死 and 这也行.
+std::vector<std::string> quoted_pieces(std::string_view style) {
+    std::string_view open = "\"", close = "\"";
+    if (!contains(style, open)) {
+        open = contains(style, "‘") ? "‘" : "'";
+        close = open == "‘" ? "’" : "'";
+    }
+    std::vector<std::string> pieces;
+    for (auto start = style.find(open); start != std::string_view::npos;) {
+        start += open.size();
+        const auto end = style.find(close, start);
+        auto part = std::string(style.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start));
+        for (auto at = part.find("..."); at != std::string::npos; at = part.find("...")) part.replace(at, 3, "…");
+        for (const auto piece : part | std::views::split(std::string_view("…"))) {
+            if (const auto text = trim(std::string_view(piece)); !text.empty()) pieces.emplace_back(text);
+        }
+        if (end == std::string_view::npos) break;
+        start = style.find(open, end + close.size());
+    }
+    return pieces;
+}
+
+/// The style quotes its source line: every quoted piece occurs in it, matched
+/// like jargon (case and runs of whitespace ignored, ASCII as whole words).
+bool grounded(std::string_view style, std::string_view line) {
+    const auto pieces = quoted_pieces(style);
+    const auto text = normalize_match_text(line);
+    return !pieces.empty() &&
+           std::ranges::all_of(pieces, [&](const std::string &piece) { return occurs(text, normalize_match_text(piece)); });
 }
 
 /// Anonymous labels for one batch: 群友N by first appearance, "[SELF] 名字".
@@ -213,7 +264,7 @@ Task<> learn_batch(Learner *learner, i64 group, std::vector<Line> lines) {
 } // namespace
 
 bool blocked_expression(std::string_view situation, std::string_view style) {
-    const auto in_either = [&](std::string_view word) { return contains(style, word) || contains(situation, word); };
+    const auto in_either = [&](std::string_view word) { return says(style, word) || says(situation, word); };
     if (std::ranges::any_of(k_slurs, in_either)) return true;
     if (std::ranges::any_of(k_blocked_situations, [&](std::string_view word) { return contains(situation, word); })) return true;
     const bool at_person =
@@ -257,14 +308,14 @@ LearnerRequest build_learner_request(std::string_view prompt, const std::vector<
                                              "总结结果，可以为空",
                                              R"({"type": "object", "properties": {
         "situation": {"type": "string", "description": "场景，不超过 20 个字"},
-        "style": {"type": "string", "description": "说法、句式或梗，不超过 20 个字"},
+        "style": {"type": "string", "description": "原话里的说法或梗，写成「用\"……\"」，不超过 20 个字"},
         "source": {"type": "string", "description": "来源行的编号"}},
         "required": ["situation", "style", "source"]})"));
     return request;
 }
 
 std::optional<std::vector<Learned>> parse_learned(const std::vector<provider::OutputItem> &items, const std::vector<Line> &lines,
-                                                  const std::vector<std::string> &names) {
+                                                  const std::vector<std::string> &names, usize *ungrounded) {
     std::vector<Learned> learned;
     const auto *input = tool_input(items, "record_expressions");
     if (!input) return learned;
@@ -283,6 +334,10 @@ std::optional<std::vector<Learned>> parse_learned(const std::vector<provider::Ou
         if (mentions_media(situation) || mentions_media(style)) continue;
         if (std::ranges::any_of(
                 names, [&](const std::string &name) { return !name.empty() && (style == name || style == "用\"" + name + "\""); })) {
+            continue;
+        }
+        if (!grounded(style, lines[source - 1].text)) {
+            if (ungrounded) ++*ungrounded;
             continue;
         }
         learned.push_back({.situation = std::move(situation), .style = std::move(style), .source = source - 1});
@@ -709,7 +764,9 @@ Task<std::vector<Learned>> Learner::learn(i64 group, std::vector<Line> lines) {
     std::vector<Learned> stored;
     const auto items = co_await run_call(this, group, build_learner_request(prompt, lines, name), "learning");
     if (items) {
-        const auto extracted = parse_learned(*items, lines, names);
+        usize ungrounded = 0;
+        const auto extracted = parse_learned(*items, lines, names, &ungrounded);
+        if (ungrounded > 0) log::info("learning: {} expression(s) dropped, not quoted from their source line", ungrounded);
         if (!extracted) {
             log::warn("learning: more than {} items; batch discarded", k_max_learned_items);
         } else if (!extracted->empty()) {
