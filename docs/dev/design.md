@@ -89,9 +89,14 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       model) and shown to the planner for lines that name no one
       ("#n 像是在对她说的可能：低/中/高") when `feedback.hint` is on; it is
       always logged in `planner_turns.hint`. Never a gate. Reward is the
-      reaction (Pang et al. 2023), not how long the chat ran; her stickers'
-      rewards boost them in search. `lilia feedback --backfill/--eval/--report/
---import-manual`; `scripts/addressee_label_page.py` for hand labels.
+      reaction (Pang et al. 2023), not how long the chat ran, from a hand-set
+      table (nothing labels how her messages went down, so there is nothing
+      to fit it to); her stickers' rewards, derived from their judged effects
+      each time (2026-10-13), boost them in search.
+      `lilia feedback --backfill/--eval/--report/--import-manual`; `--eval`
+      fits with the refit's gates and constants (`fit_models`) and scores
+      what production would use (2026-10-13).
+      `scripts/addressee_label_page.py` for hand labels.
     - `lilia replay <probes.jsonl> --probe` runs one turn per expected line
       of a synthetic set (`tests/replay/addressee.jsonl`: quotes, @s, her
       earlier lines) and counts intrusions, misses and to_her agreement.
@@ -332,9 +337,7 @@ Model calls (2026-10-11):
    - Learning: the expression blocklists match substrings, `learner.md`
      contradicts itself on 梗, and styles are not checked against the source
      line. The sticker pool freezes (a newcomer replaces only a never-sent
-     sticker; counts never decay; reward is a running sum): use decayed
-     counts and a Beta reward. The feedback reward table is hand-set, and
-     `--eval` scores with settings that differ from production.
+     sticker; counts never decay): use decayed counts and a Beta reward.
    - Smaller: she cannot @ anyone; quoting is opt-in, where MaiBot quotes
      by default (its hint says for older targets); facts from private chats
      are not kept out of groups.

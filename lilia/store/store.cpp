@@ -398,6 +398,7 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
         }
     }
     // Columns added after their table, by shape: absent ones are added.
+    // stickers.reward is no longer written (rewards come from reply_effects).
     const auto ensure_column = [&](std::string_view table_name, std::string_view column, std::string_view declaration) -> Result<void> {
         auto present = count_of(std::format("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'", table_name, column));
         if (present.has_error()) return lighter::outcome_error(std::move(present).error());
@@ -625,7 +626,7 @@ namespace {
 
 constexpr std::string_view k_sticker_columns = "id, sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, "
                                                "last_seen, last_used, modified_by, usage, usage_count, "
-                                               "usage_inferred_count, tags_by, reward";
+                                               "usage_inferred_count, tags_by";
 
 Sticker read_sticker(const Statement &statement) {
     return {
@@ -647,7 +648,6 @@ Sticker read_sticker(const Statement &statement) {
         .usage_count = statement.column_int(15),
         .usage_inferred_count = statement.column_int(16),
         .tags_by = statement.column_text(17),
-        .reward = statement.column_double(18),
     };
 }
 
@@ -1277,12 +1277,20 @@ Result<std::vector<AddresseeModel>> Store::addressee_models() {
     return out;
 }
 
-Result<void> Store::add_sticker_reward(i64 id, double reward) {
-    auto statement = database.prepare("UPDATE stickers SET reward = reward + ?2 WHERE id = ?1");
+Result<std::map<i64, StickerReward>> Store::sticker_rewards() {
+    // Derived each time: a message judged again replaces its effect.
+    auto statement = database.prepare("SELECT sticker_id, COUNT(*), SUM(reward > 0), SUM(reward) FROM reply_effects "
+                                      "WHERE kind = 'sticker' AND sticker_id != 0 GROUP BY sticker_id");
     if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-    statement->bind(1, id);
-    statement->bind_double(2, reward);
-    return statement->run();
+    std::map<i64, StickerReward> out;
+    for (;;) {
+        auto row = statement->step();
+        if (row.has_error()) return lighter::outcome_error(std::move(row).error());
+        if (!*row) break;
+        out[statement->column_int(0)] = {
+            .judged = statement->column_int(1), .welcomed = statement->column_int(2), .total = statement->column_double(3)};
+    }
+    return out;
 }
 
 Result<void> Store::add_llm_call(const LlmCall &call) {

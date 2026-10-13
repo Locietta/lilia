@@ -142,11 +142,14 @@ std::vector<std::string> sticker_urls(const onebot::Message &message) {
     return urls;
 }
 
-std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng) {
+std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng, const Rewards &rewards) {
     std::vector<store::Sticker> picked;
     std::vector<double> weights;
-    for (const auto &sticker : pool)
-        weights.push_back(static_cast<double>(sticker.seen + 2 * sticker.used + 1) + std::max(0.0, sticker.reward));
+    for (const auto &sticker : pool) {
+        const auto reward = rewards.find(sticker.id);
+        weights.push_back(static_cast<double>(sticker.seen + 2 * sticker.used + 1) +
+                          (reward == rewards.end() ? 0.0 : std::max(0.0, reward->second.total)));
+    }
     while (picked.size() < count && picked.size() < pool.size()) {
         std::discrete_distribution<usize> pick(weights.begin(), weights.end());
         const auto index = pick(rng);
@@ -176,7 +179,8 @@ std::string lexical_text(const store::Sticker &sticker, bool usage) {
     return text;
 }
 
-std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng) {
+std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng,
+                                  const Rewards &rewards) {
     std::vector<std::string_view> words;
     for (usize i = 0; i < feeling.size();) {
         // Split at ASCII separators and the common full-width ones.
@@ -209,7 +213,7 @@ std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_
     });
     std::vector<store::Sticker> out;
     for (usize i = 0; i < hits.size() && out.size() < count; ++i) out.push_back(std::move(hits[i].second));
-    for (auto &sticker : sample(std::move(rest), count - out.size(), rng)) out.push_back(std::move(sticker));
+    for (auto &sticker : sample(std::move(rest), count - out.size(), rng, rewards)) out.push_back(std::move(sticker));
     return out;
 }
 

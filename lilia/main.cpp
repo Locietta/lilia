@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -567,26 +568,16 @@ Task<int> run_feedback(const Config &config, std::optional<std::filesystem::path
             std::printf("too few labels (%zu)\n", labels.has_value() ? labels->size() : 0);
             co_return 0;
         }
-        std::vector<std::pair<store::ChatKey, feedback::Sample>> samples;
-        for (const auto &label : *labels) {
-            std::vector<double> values;
-            if (glz::read_json(values, label.features) || values.size() != chat::k_features) continue;
-            feedback::Sample sample{.label = label.label ? 1.0 : 0.0};
-            std::ranges::copy(values, sample.x.begin());
-            samples.emplace_back(label.chat, sample);
-        }
-        // Earlier labels train, later ones test.
+        const auto samples = feedback::samples_of(*labels);
+        // Earlier labels train, later ones test; fitted as a refit would,
+        // gates and all, and once more without the gates.
         const usize cut = samples.size() * 7 / 10;
-        std::vector<feedback::Sample> train;
-        std::map<store::ChatKey, std::vector<feedback::Sample>> train_by_chat;
-        for (usize i = 0; i < cut; ++i) {
-            train.push_back(samples[i].second);
-            train_by_chat[samples[i].first].push_back(samples[i].second);
-        }
+        const std::span<const feedback::LabelledSample> train(samples.data(), cut);
+        const auto production = feedback::fit_models(train, config.feedback);
+        auto no_gates = config.feedback;
+        no_gates.min_rows_global = no_gates.min_rows_group = no_gates.min_positives = 0;
+        const auto ungated = feedback::fit_models(train, no_gates);
         const auto bootstrap = feedback::bootstrap_weights();
-        const auto global = feedback::fit_logistic(train, bootstrap, 1.0);
-        std::map<store::ChatKey, feedback::Weights> groups;
-        for (const auto &[chat, chat_samples] : train_by_chat) groups[chat] = feedback::fit_logistic(chat_samples, global, 3.0);
         const auto score = [&](std::string_view name, const auto &weights_for) {
             std::vector<feedback::Sample> test;
             std::vector<std::pair<double, double>> scored;
@@ -603,18 +594,25 @@ Task<int> run_feedback(const Config &config, std::optional<std::filesystem::path
                 const double p = std::clamp(scored[i].first, 1e-9, 1 - 1e-9);
                 loss -= test[i].label * std::log(p) + (1 - test[i].label) * std::log(1 - p);
             }
-            std::printf("%-10s log loss %.3f  Brier %.3f  AUC %.3f\n", std::string(name).c_str(), loss / static_cast<double>(test.size()),
+            std::printf("%-18s log loss %.3f  Brier %.3f  AUC %.3f\n", std::string(name).c_str(), loss / static_cast<double>(test.size()),
                         brier / static_cast<double>(test.size()), auc(scored));
         };
         usize positives = 0;
         for (const auto &[chat, sample] : samples) positives += sample.label > 0.5;
         std::printf("%zu labels (%zu to her); train %zu, test %zu\n", samples.size(), positives, cut, samples.size() - cut);
+        const auto gated = [](const feedback::FittedModel &model) { return model.fitted ? "fitted" : "not fitted"; };
+        std::printf("on the training labels, a refit (min_rows_global %zu, min_rows_group %zu, min_positives %zu) would leave:\n",
+                    config.feedback.min_rows_global, config.feedback.min_rows_group, config.feedback.min_positives);
+        std::printf("  global: %s (%zu rows, %zu to her)\n", gated(production.global), production.global.rows, production.global.positives);
+        for (const auto &[chat, model] : production.groups) {
+            std::printf("  %s %lld: %s (%zu rows, %zu to her)\n", chat.type.c_str(), static_cast<long long>(chat.id), gated(model),
+                        model.rows, model.positives);
+        }
         score("bootstrap", [&](const store::ChatKey &) -> const feedback::Weights & { return bootstrap; });
-        score("global", [&](const store::ChatKey &) -> const feedback::Weights & { return global; });
-        score("per group", [&](const store::ChatKey &chat) -> const feedback::Weights & {
-            const auto it = groups.find(chat);
-            return it == groups.end() ? global : it->second;
-        });
+        // What she would use: a group's own model, else the global one, else bootstrap.
+        score("production", [&](const store::ChatKey &chat) -> const feedback::Weights & { return production.model_for(chat); });
+        score("ungated global", [&](const store::ChatKey &) -> const feedback::Weights & { return ungated.global.weights; });
+        score("ungated per group", [&](const store::ChatKey &chat) -> const feedback::Weights & { return ungated.model_for(chat); });
     }
 
     if (tool.report) {

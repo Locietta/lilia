@@ -48,9 +48,12 @@ std::optional<Tagged> parse_tagging(std::string_view answer);
 /// Download URLs of the sticker segments (images with sub_type 1, mface).
 std::vector<std::string> sticker_urls(const onebot::Message &message);
 
+/// The rewards of stickers by id (Store::sticker_rewards).
+using Rewards = std::map<i64, store::StickerReward>;
+
 /// Up to `count` stickers sampled without replacement, weighted by
 /// seen + 2 * used + 1 (+ a positive reward) so popular ones come up more.
-std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng);
+std::vector<store::Sticker> sample(std::vector<store::Sticker> pool, usize count, std::mt19937 &rng, const Rewards &rewards = {});
 
 /// What a sticker is embedded as: its tags and description.
 std::string embedding_text(const store::Sticker &sticker);
@@ -70,7 +73,8 @@ std::string lexical_text(const store::Sticker &sticker, bool usage);
 /// Without embeddings: stickers whose tags or description contain words of
 /// `feeling` ("无语、震惊"), most matched and most popular first, then a
 /// weighted sample to fill up to `count`.
-std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng);
+std::vector<store::Sticker> match(std::vector<store::Sticker> pool, std::string_view feeling, usize count, std::mt19937 &rng,
+                                  const Rewards &rewards = {});
 
 /// "s12": how the planner names a sticker.
 std::string handle(const store::Sticker &sticker);

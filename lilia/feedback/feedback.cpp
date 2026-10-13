@@ -32,6 +32,9 @@ constexpr double k_global_l2 = 1;
 constexpr double k_group_l2 = 3;
 
 constexpr std::array<std::string_view, 5> k_addressees{"her", "other", "group", "self", "unclear"};
+/// The reward of a judged reaction; reward_of is their only reader. Hand-set:
+/// nobody labels how well her messages went down, so there is nothing to fit
+/// them to.
 constexpr std::array<std::pair<std::string_view, double>, 8> k_stances{{{"appreciation", 1.0},
                                                                         {"playful", 0.7},
                                                                         {"neutral", 0.2},
@@ -172,6 +175,53 @@ double reward_of(std::string_view stance, std::string_view contribution) {
 }
 
 std::string_view level(double probability) { return probability < 0.2 ? "低" : probability <= 0.6 ? "中" : "高"; }
+
+std::vector<LabelledSample> samples_of(const std::vector<store::AddresseeLabel> &labels) {
+    std::vector<LabelledSample> samples;
+    for (const auto &label : labels) {
+        std::vector<double> values;
+        if (glz::read_json(values, label.features) || values.size() != chat::k_features) continue;
+        Sample sample{.label = label.label ? 1.0 : 0.0};
+        std::ranges::copy(values, sample.x.begin());
+        samples.emplace_back(label.chat, sample);
+    }
+    return samples;
+}
+
+const Weights &FittedModels::model_for(const store::ChatKey &chat_key) const {
+    static const Weights k_bootstrap = bootstrap_weights();
+    if (const auto it = groups.find(chat_key); it != groups.end() && it->second.fitted) return it->second.weights;
+    return global.fitted ? global.weights : k_bootstrap;
+}
+
+FittedModels fit_models(std::span<const LabelledSample> samples, const FeedbackConfig &config) {
+    const auto positives = [](const std::vector<Sample> &rows) {
+        return static_cast<usize>(std::ranges::count_if(rows, [](const Sample &sample) { return sample.label > 0.5; }));
+    };
+    std::vector<Sample> all;
+    std::map<store::ChatKey, std::vector<Sample>> per_chat;
+    for (const auto &[chat_key, sample] : samples) {
+        all.push_back(sample);
+        per_chat[chat_key].push_back(sample);
+    }
+    FittedModels out;
+    out.global = {.weights = bootstrap_weights(), .rows = all.size(), .positives = positives(all)};
+    if (all.size() >= config.min_rows_global) {
+        out.global.weights = fit_logistic(all, out.global.weights, k_global_l2);
+        out.global.fitted = true;
+    }
+    out.global.log_loss = log_loss(out.global.weights, all);
+    for (const auto &[chat_key, rows] : per_chat) {
+        FittedModel model{.weights = out.global.weights, .rows = rows.size(), .positives = positives(rows)};
+        if (model.rows >= config.min_rows_group && model.positives >= config.min_positives) {
+            model.weights = fit_logistic(rows, out.global.weights, k_group_l2);
+            model.fitted = true;
+        }
+        model.log_loss = log_loss(model.weights, rows);
+        out.groups[chat_key] = model;
+    }
+    return out;
+}
 
 Feedback::Feedback(const FeedbackConfig &config, const ChatConfig &chat, store::Store &store, provider::Provider judge, Spawn spawn)
     : now([] { return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }),
@@ -364,7 +414,6 @@ Task<bool> Feedback::judge(store::ChatKey chat_key, i64 self_id, usize limit) {
                                               .contribution = verdict.contribution,
                                               .reward = reward,
                                               .time = it->time});
-        if (sticker_id != 0) std::ignore = store.add_sticker_reward(sticker_id, reward);
     }
     std::ignore = store.set_feedback_progress(chat_key, rows.back().row_id);
     log::info("hindsight {}:{}: {} lines labelled, {} of her messages judged", chat_key.type, chat_key.id, labelled,
@@ -378,43 +427,28 @@ void Feedback::refit() {
     labels_since_refit = 0;
     auto labels = store.addressee_labels(chat::k_feature_version);
     if (labels.has_error()) return;
-    std::vector<Sample> all;
-    std::map<store::ChatKey, std::vector<Sample>> per_chat;
-    for (const auto &label : *labels) {
-        std::vector<double> values;
-        if (glz::read_json(values, label.features) || values.size() != chat::k_features) continue;
-        Sample sample{.label = label.label ? 1.0 : 0.0};
-        std::ranges::copy(values, sample.x.begin());
-        all.push_back(sample);
-        per_chat[label.chat].push_back(sample);
-    }
-    const auto positives = [](const std::vector<Sample> &samples) {
-        return static_cast<usize>(std::ranges::count_if(samples, [](const Sample &sample) { return sample.label > 0.5; }));
-    };
+    const auto fitted_models = fit_models(samples_of(*labels), config);
     const i64 fitted_at = now();
-    if (all.size() >= config.min_rows_global) {
-        global = fit_logistic(all, bootstrap_weights(), k_global_l2);
-        global_fitted = true;
-        std::ignore = store.save_addressee_model({.feature_version = chat::k_feature_version,
-                                                  .weights = write_weights(global),
-                                                  .rows = static_cast<i64>(all.size()),
-                                                  .positives = static_cast<i64>(positives(all)),
-                                                  .log_loss = log_loss(global, all),
-                                                  .fitted_at = fitted_at});
-    }
-    for (const auto &[chat_key, samples] : per_chat) {
-        if (samples.size() < config.min_rows_group || positives(samples) < config.min_positives) continue;
-        const auto weights = fit_logistic(samples, global, k_group_l2);
-        models[chat_key] = weights;
+    const auto save = [&](const store::ChatKey &chat_key, const FittedModel &model) {
         std::ignore = store.save_addressee_model({.chat = chat_key,
                                                   .feature_version = chat::k_feature_version,
-                                                  .weights = write_weights(weights),
-                                                  .rows = static_cast<i64>(samples.size()),
-                                                  .positives = static_cast<i64>(positives(samples)),
-                                                  .log_loss = log_loss(weights, samples),
+                                                  .weights = write_weights(model.weights),
+                                                  .rows = static_cast<i64>(model.rows),
+                                                  .positives = static_cast<i64>(model.positives),
+                                                  .log_loss = model.log_loss,
                                                   .fitted_at = fitted_at});
+    };
+    if (fitted_models.global.fitted) {
+        global = fitted_models.global.weights;
+        global_fitted = true;
+        save({}, fitted_models.global);
     }
-    log::info("addressee models refitted from {} labels ({} chats with their own)", all.size(), models.size());
+    for (const auto &[chat_key, model] : fitted_models.groups) {
+        if (!model.fitted) continue;
+        models[chat_key] = model.weights;
+        save(chat_key, model);
+    }
+    log::info("addressee models refitted from {} labels ({} chats with their own)", fitted_models.global.rows, models.size());
 }
 
 Feedback::Hint Feedback::hints(const store::ChatKey &chat_key, const std::vector<store::StoredMessage> &rows,

@@ -26,15 +26,19 @@ Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feelin
     auto pool = r->stickers ? r->store.stickers("registered") : Result<std::vector<store::Sticker>>(std::vector<store::Sticker>{});
     if (pool.has_error() || pool->empty()) co_return std::vector<store::Sticker>{};
     const usize count = std::max<usize>(r->config.stickers.candidates, 1);
-    if (!r->memory) co_return sticker::match(*std::move(pool), feeling, count, r->rng);
+    // How her sends of each went down (hindsight feedback).
+    auto stored = r->store.sticker_rewards();
+    const auto rewards = stored.has_value() ? *std::move(stored) : sticker::Rewards{};
+    if (!r->memory) co_return sticker::match(*std::move(pool), feeling, count, r->rng, rewards);
     std::vector<retrieval::Document> documents;
     for (const auto &sticker : *pool) {
-        documents.push_back({.id = sticker.id,
-                             .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images,
-                                                                r->config.stickers.usage_in_search),
-                             .lexical = sticker::lexical_text(sticker, r->config.stickers.usage_in_search),
-                             // How her sends of it went down (hindsight feedback).
-                             .boost = r->config.feedback.reward_weight * std::clamp(sticker.reward, -3.0, 3.0)});
+        const auto reward = rewards.find(sticker.id);
+        documents.push_back(
+            {.id = sticker.id,
+             .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images,
+                                                r->config.stickers.usage_in_search),
+             .lexical = sticker::lexical_text(sticker, r->config.stickers.usage_in_search),
+             .boost = reward == rewards.end() ? 0.0 : r->config.feedback.reward_weight * std::clamp(reward->second.total, -3.0, 3.0)});
     }
     const auto matches = co_await r->memory->retriever.search(
         retrieval::k_sticker_task, std::move(feeling), documents,

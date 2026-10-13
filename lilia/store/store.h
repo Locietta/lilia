@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -132,8 +133,14 @@ struct Sticker {
     i64 usage_count = 0;
     i64 usage_inferred_count = 0;
     std::string tags_by = "VISION";
-    /// How her sends of it went down (hindsight feedback), summed.
-    double reward = 0;
+};
+
+/// How her sends of a sticker went down, from its reply_effects: sends
+/// judged, those with a positive reward, and the rewards summed.
+struct StickerReward {
+    i64 judged = 0;
+    i64 welcomed = 0;
+    double total = 0;
 };
 
 /// An anonymised snippet of a chat a sticker turned up in; `own` when lilia
@@ -340,7 +347,8 @@ struct Store {
     Result<std::vector<ReplyEffect>> reply_effects(const ChatKey &chat, i64 since);
     Result<void> save_addressee_model(const AddresseeModel &model);
     Result<std::vector<AddresseeModel>> addressee_models();
-    Result<void> add_sticker_reward(i64 id, double reward);
+    /// The reward of every sticker she has sent and had judged, by id.
+    Result<std::map<i64, StickerReward>> sticker_rewards();
 
     /// Input plus output tokens of the calls at or after `since` (unix
     /// seconds): all of them, those made for chats (group and private), or

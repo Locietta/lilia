@@ -3,6 +3,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <lighter/async/io/loop.h>
@@ -166,6 +167,99 @@ lighter::Task<> test_judging() {
     require(!judge.hints(chat, rows, edges, 2).shown.contains("#3 "), "a line that says whom it is for needs no estimate");
 }
 
+void test_gates() {
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    const store::ChatKey even{.type = "group", .id = 1};
+    const store::ChatKey shy{.type = "group", .id = 2};
+    const store::ChatKey small{.type = "group", .id = 3};
+    // even: 4 rows, 2 to her; shy: 4 rows, 1 to her; small: 1 row.
+    const std::vector<std::pair<store::ChatKey, bool>> rows{{even, true}, {even, false}, {even, true}, {even, false}, {shy, true},
+                                                            {shy, false}, {shy, false},  {shy, false}, {small, true}};
+    std::mt19937 rng(5);
+    std::uniform_real_distribution<double> unit(0, 1);
+    for (usize i = 0; i < rows.size(); ++i) {
+        chat::Features x{};
+        for (auto &value : x) value = unit(rng);
+        x[0] = 1;
+        require(db->add_addressee_label({.chat = rows[i].first,
+                                         .message_id = static_cast<i64>(i + 1),
+                                         .row_id = static_cast<i64>(i + 1),
+                                         .time = static_cast<i64>(100 + i),
+                                         .feature_version = chat::k_feature_version,
+                                         .features = feedback::write_weights(x),
+                                         .label = rows[i].second,
+                                         .source = "judge"})
+                    .has_value(),
+                "label");
+    }
+    FeedbackConfig config{.enabled = true, .min_rows_global = 6, .min_rows_group = 4, .min_positives = 2};
+    const auto samples = feedback::samples_of(db->addressee_labels(chat::k_feature_version).value());
+    require(samples.size() == rows.size(), "every label is a sample");
+    const auto fitted = feedback::fit_models(samples, config);
+    require(fitted.global.fitted && fitted.global.rows == 9 && fitted.global.positives == 4, "enough rows: a global model");
+    require(fitted.groups.at(even).fitted && !fitted.groups.at(shy).fitted && !fitted.groups.at(small).fitted,
+            "a group needs its rows and its lines to her");
+    require(fitted.model_for(even) == fitted.groups.at(even).weights && fitted.model_for(shy) == fitted.global.weights &&
+                fitted.model_for({.type = "group", .id = 9}) == fitted.global.weights,
+            "a group without its own model uses the global one");
+    auto strict = config;
+    strict.min_rows_global = 100;
+    strict.min_rows_group = 100;
+    const auto none = feedback::fit_models(samples, strict);
+    require(!none.global.fitted && none.model_for(even) == feedback::bootstrap_weights(), "short of every gate: bootstrap");
+
+    // A refit stores what fit_models fitted, and nothing else.
+    auto state = std::make_shared<test::FakeProvider::State>();
+    const ChatConfig chat_config{};
+    feedback::Feedback refitter(config, chat_config, *db, test::fake_provider(state), [](lighter::Task<>) {});
+    refitter.refit();
+    const auto stored = db->addressee_models().value();
+    require(stored.size() == 2, "the global model and one group's");
+    for (const auto &model : stored) {
+        const auto &expected = model.chat.type.empty() ? fitted.global : fitted.groups.at(model.chat);
+        require(model.chat.type.empty() || model.chat == even, "only the group past its gates");
+        require(feedback::read_weights(model.weights) == expected.weights && model.rows == static_cast<i64>(expected.rows) &&
+                    model.positives == static_cast<i64>(expected.positives),
+                "the stored model is the one fit_models fitted");
+    }
+    for (const auto &chat : {even, shy, small}) {
+        require(refitter.model_for(chat) == fitted.model_for(chat), "the refit uses what --eval scores");
+    }
+}
+
+void test_sticker_rewards() {
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    const store::ChatKey chat{.type = "group", .id = k_group};
+    const auto effect = [&](i64 message, std::string kind, i64 sticker, double reward) {
+        require(db->add_reply_effect({.chat = chat,
+                                      .her_message_id = message,
+                                      .kind = std::move(kind),
+                                      .sticker_id = sticker,
+                                      .for_her = "yes",
+                                      .answered_by_other = "no",
+                                      .stance = "neutral",
+                                      .contribution = "maintain",
+                                      .reward = reward,
+                                      .time = message})
+                    .has_value(),
+                "effect");
+    };
+    effect(1, "sticker", 7, 1.2);
+    effect(2, "sticker", 7, -0.5);
+    effect(3, "text", 0, 1.0);
+    auto rewards = db->sticker_rewards();
+    require(rewards.has_value() && rewards->size() == 1, "only stickers count");
+    require(rewards->at(7).judged == 2 && rewards->at(7).welcomed == 1 && std::abs(rewards->at(7).total - 0.7) < 1e-9,
+            "two sends of one sticker");
+    // Judged again: the effect is replaced, not counted twice.
+    effect(2, "sticker", 7, 0.3);
+    const auto again = db->sticker_rewards();
+    require(again.has_value() && again->at(7).judged == 2 && again->at(7).welcomed == 2 && std::abs(again->at(7).total - 1.5) < 1e-9,
+            "a replaced effect is counted once");
+}
+
 } // namespace
 
 int main() {
@@ -173,6 +267,8 @@ int main() {
         test_features();
         test_logistic();
         test_parse();
+        test_gates();
+        test_sticker_rewards();
         lighter::EventLoop loop;
         auto task = test_judging();
         loop.schedule(task);

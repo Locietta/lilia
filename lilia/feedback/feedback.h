@@ -4,8 +4,10 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <lighter/async/runtime/task.h>
@@ -60,6 +62,36 @@ double reward_of(std::string_view stance, std::string_view contribution);
 
 /// "低" below 0.2, "中" up to 0.6, "高" above.
 std::string_view level(double probability);
+
+/// A label as a training sample, with its chat.
+using LabelledSample = std::pair<store::ChatKey, Sample>;
+
+/// The labels whose features parse, in their order.
+std::vector<LabelledSample> samples_of(const std::vector<store::AddresseeLabel> &labels);
+
+/// One model and what it was fitted from. Not `fitted` (short of the gates):
+/// `weights` is its prior.
+struct FittedModel {
+    Weights weights{};
+    usize rows = 0;
+    usize positives = 0;
+    double log_loss = 0; ///< on its own rows
+    bool fitted = false;
+};
+
+struct FittedModels {
+    FittedModel global;
+    std::map<store::ChatKey, FittedModel> groups; ///< every chat with labels
+
+    /// What production uses for `chat`: its own model, else the global one,
+    /// else bootstrap (each only when fitted).
+    const Weights &model_for(const store::ChatKey &chat) const;
+};
+
+/// The global model (pulled toward bootstrap) once there are min_rows_global
+/// samples, and each group's (pulled toward the global one) once it has
+/// min_rows_group with min_positives to her. Refits and --eval both fit here.
+FittedModels fit_models(std::span<const LabelledSample> samples, const FeedbackConfig &config);
 
 struct Feedback {
     using Spawn = std::move_only_function<void(lighter::Task<>)>;
