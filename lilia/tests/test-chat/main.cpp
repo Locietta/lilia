@@ -629,6 +629,25 @@ void test_clean_reply() {
             "unlabelled lines and short numbers are content");
     const auto bounded = chat::clean_reply(std::string(30, 'a') + "你好你好", info, aliases, 20);
     require(bounded.size() <= 20 && bounded.ends_with("……"), "long replies are bounded with an ellipsis");
+
+    const chat::ReplyLimits roomy{.max_bytes = 1000, .max_code_points = 100};
+    const auto repairs = [&](std::string_view raw, const chat::ReplyLimits &limits = {.max_bytes = 1000, .max_code_points = 100}) {
+        return chat::repair_reply(raw, recent, info, aliases, limits).repairs;
+    };
+    using Kinds = std::vector<std::string_view>;
+    const auto clean = chat::repair_reply("  在的\n", recent, info, aliases, roomy);
+    require(clean.text == "在的" && clean.repairs.empty(), "trimming alone is no repair");
+    require(repairs("Locietta: 啥游戏") == Kinds{"transcript"}, "repair: transcript");
+    require(repairs("[21:05] lilia(她自己): 在的") == Kinds{"label"}, "repair: label");
+    require(repairs("@阿紫 芒果") == Kinds{"mention"}, "repair: mention");
+    require(repairs("**在的**") == Kinds{"markdown"}, "repair: markdown");
+    require(repairs("在的（笑）") == Kinds{"aside"}, "repair: aside");
+    require(repairs(std::string(30, 'a'), {.max_bytes = 20, .max_code_points = 100}) == Kinds{"bytes"}, "repair: bytes");
+    require(repairs("这集作画不错。剧情也推进了！", {.max_bytes = 1000, .max_code_points = 8}) == Kinds{"length"}, "repair: length");
+    require(repairs("好耶😂") == Kinds{"emoji"}, "repair: emoji");
+    require(repairs("lilia: **好耶**😂") == Kinds({"label", "markdown", "emoji"}), "repairs are listed in order");
+    const auto echoed = chat::repair_reply("Locietta: @莉莉娅 玩游戏吗？", recent, info, aliases, roomy);
+    require(echoed.text.empty() && echoed.repairs == Kinds{"transcript"}, "an echo leaves nothing to send");
 }
 
 } // namespace

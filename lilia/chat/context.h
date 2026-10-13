@@ -166,4 +166,25 @@ std::string clean_reply(std::string_view text, const ChatInfo &info, const std::
 /// lines, and drops lines that only repeat a message in `recent`.
 std::string strip_transcript(std::string_view text, const std::vector<store::StoredMessage> &recent);
 
+/// Bounds on a reply: bytes for QQ, characters for its style, and the emoji
+/// people use (the rest go).
+struct ReplyLimits {
+    usize max_bytes = 0;
+    usize max_code_points = 0;
+    std::vector<char32_t> kept_emoji;
+};
+
+/// A writer answer made fit to send, and what had to change: "transcript",
+/// "label", "mention", "markdown", "aside", "bytes", "length", "emoji".
+struct Repaired {
+    std::string text;
+    std::vector<std::string_view> repairs;
+};
+
+/// Every fix a writer answer gets before it is sent, in order:
+/// strip_transcript, a leading speaker label and typed mention, Markdown,
+/// asides, then the byte, length and emoji bounds. Trimming alone is no repair.
+Repaired repair_reply(std::string_view raw, const std::vector<store::StoredMessage> &recent, const ChatInfo &info,
+                      const std::vector<std::string> &aliases, const ReplyLimits &limits);
+
 } // namespace lilia::chat

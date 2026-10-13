@@ -218,25 +218,34 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .presence = std::move(found.presence),
         .previous_reply = previous == state.replied.end() ? std::string() : previous->second,
     });
-    auto written = co_await call_model(r, r->writer, r->config.model.model, "writer", chat, history, {});
-    for (auto &fallback : r->writer_fallbacks) {
-        if (written && !final_text(*written).empty()) break;
-        log::warn("writer fallback for {}: {}", describe(chat), fallback.model);
-        written = co_await call_model(r, fallback.provider, fallback.model, "writer", chat, history, {});
-    }
-    if (!written) co_return Delivered{};
-    log::debug("writer raw: {}", final_text(*written));
-    const auto budget = plan.style == ReplyStyle::SHORT  ? settings.short_reply_chars :
-                        plan.style == ReplyStyle::NORMAL ? settings.normal_reply_chars :
-                                                           settings.long_reply_chars;
     // Emoji go unless people use them (they show up in learned expressions).
     auto styles = r->store.expression_styles();
-    const auto learned = styles.has_value() ? *std::move(styles) : std::vector<std::string>{};
-    std::vector<char32_t> removed;
-    const auto reply = strip_emoji(
-        fit_length(clean_reply(strip_transcript(final_text(*written), log_lines), info, settings.aliases, settings.max_reply_bytes),
-                   budget),
-        emoji_in(learned), removed);
+    const ReplyLimits limits{
+        .max_bytes = settings.max_reply_bytes,
+        .max_code_points = plan.style == ReplyStyle::SHORT  ? settings.short_reply_chars :
+                           plan.style == ReplyStyle::NORMAL ? settings.normal_reply_chars :
+                                                              settings.long_reply_chars,
+        .kept_emoji = emoji_in(styles.has_value() ? *styles : std::vector<std::string>{}),
+    };
+    // The writer, then its fallbacks while nothing usable comes back. Every
+    // repair is logged by kind (never the text) so their rates can be read.
+    Repaired repaired;
+    for (usize attempt = 0; attempt <= r->writer_fallbacks.size() && repaired.text.empty(); ++attempt) {
+        auto &provider = attempt == 0 ? r->writer : r->writer_fallbacks[attempt - 1].provider;
+        const auto &model = attempt == 0 ? r->config.model.model : r->writer_fallbacks[attempt - 1].model;
+        if (attempt > 0) log::warn("writer fallback for {}: {}", describe(chat), model);
+        const auto written = co_await call_model(r, provider, model, "writer", chat, history, {});
+        if (!written) continue;
+        const auto raw = final_text(*written);
+        log::debug("writer raw: {}", raw);
+        repaired = repair_reply(raw, log_lines, info, settings.aliases, limits);
+        if (!repaired.repairs.empty()) {
+            std::string kinds;
+            for (const auto kind : repaired.repairs) kinds += std::format("{}{}", kinds.empty() ? "" : ", ", kind);
+            log::warn("{} writer output repaired ({}): {}", describe(chat), model, kinds);
+        }
+    }
+    const auto &reply = repaired.text;
 
     // Casual replies go out the way MaiBot sends them: split at punctuation,
     // neighbours merged at random, a homophone typo now and then (sometimes

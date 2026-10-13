@@ -5,6 +5,7 @@
 #include <format>
 #include <variant>
 
+#include <lilia/chat/delivery.h>
 #include <lilia/text.h>
 
 namespace lilia::chat {
@@ -379,13 +380,40 @@ std::string strip_asides(std::string_view text) {
     return out;
 }
 
-std::string clean_reply(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases, usize max_bytes) {
-    auto cleaned = strip_asides(strip_markdown(strip_leading_mention(strip_speaker_label(text, info, aliases))));
-    if (cleaned.size() <= max_bytes) return cleaned;
+namespace {
+
+/// `text` cut to `max_bytes` with an ellipsis, when longer.
+std::string bound_bytes(std::string text, usize max_bytes) {
+    if (text.size() <= max_bytes) return text;
     constexpr std::string_view k_ellipsis = "……";
-    auto bounded = bounded_utf8(cleaned, max_bytes > k_ellipsis.size() ? max_bytes - k_ellipsis.size() : 0);
+    auto bounded = bounded_utf8(text, max_bytes > k_ellipsis.size() ? max_bytes - k_ellipsis.size() : 0);
     bounded += k_ellipsis;
     return bounded;
+}
+
+} // namespace
+
+std::string clean_reply(std::string_view text, const ChatInfo &info, const std::vector<std::string> &aliases, usize max_bytes) {
+    return bound_bytes(strip_asides(strip_markdown(strip_leading_mention(strip_speaker_label(text, info, aliases)))), max_bytes);
+}
+
+Repaired repair_reply(std::string_view raw, const std::vector<store::StoredMessage> &recent, const ChatInfo &info,
+                      const std::vector<std::string> &aliases, const ReplyLimits &limits) {
+    Repaired out{.text = std::string(trim(raw))};
+    const auto apply = [&](std::string_view kind, std::string next) {
+        if (trim(next) != trim(out.text)) out.repairs.push_back(kind);
+        out.text = std::move(next);
+    };
+    apply("transcript", strip_transcript(out.text, recent));
+    apply("label", std::string(strip_speaker_label(out.text, info, aliases)));
+    apply("mention", std::string(strip_leading_mention(out.text)));
+    apply("markdown", strip_markdown(out.text));
+    apply("aside", strip_asides(out.text));
+    apply("bytes", bound_bytes(out.text, limits.max_bytes));
+    apply("length", fit_length(out.text, limits.max_code_points));
+    std::vector<char32_t> removed;
+    apply("emoji", strip_emoji(out.text, limits.kept_emoji, removed));
+    return out;
 }
 
 std::string strip_transcript(std::string_view text, const std::vector<store::StoredMessage> &recent) {

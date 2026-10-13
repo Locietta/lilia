@@ -117,7 +117,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     `search_history` and `search_web` found, what she knows about the
     person she answers and anyone `look_up_person` looked up. Then the
     picked expressions. Everything else about how she talks lives in
-    `writer.md`.
+    `writer.md`. Its answer passes one repair step (`repair_reply`, 2026-10-13):
+    a transcript echo, a leading label or typed mention, Markdown, asides, then
+    the byte, length and emoji bounds. Each repair is logged by kind as a
+    warning; an answer with nothing left goes to the next writer fallback.
   - `delivery` sends replies the way MaiBot does (2026-10-10).
     - Casual replies are split at "，,。;", spaces and newlines, then
       neighbours merge at random. `typos` swaps in a homophone now and then
