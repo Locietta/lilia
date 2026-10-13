@@ -344,24 +344,29 @@ Model calls (2026-10-11):
      planner mistakes (a self target became the newest line, a missing wait
      30 s) became receipts, and replay's `must_speak` one guard. A tool that
      was off ended the turn, and `send_sticker` and `poke` were not gated.
-   - Writer rules quote the phrases they forbid, which primes them. A/B a
+   - Prompt rules (done 2026-10-13). Friendliness, not pretending to know,
+     the interests, the wait range and "only that line" each live in one
+     place; the planner no longer offers 草/确实 as good replies. Replayed
+     (about 280 replies per variant), permitting 草 primed it (8 against 0);
+     naming a stock phrase as one to avoid made no clear difference either
+     way. The writer names them as habits to avoid and permits none. A/B a
      rule in replay before adding it.
    - No anti-loop guard: MaiBot replaces an analysis over 90% like the
      previous one with a reflection prompt.
    - People reach the planner only through `look_up_person`, as the newest 6
      facts by date; a near-duplicate update keeps the stale fact. MaiBot
      (with A_Memorix) shows sectioned profiles of up to 3 people per round.
-   - Learning: the expression blocklists match substrings, `learner.md`
-     contradicts itself on 梗, and styles are not checked against the source
-     line.
    - Smaller: she cannot @ anyone; quoting is opt-in, where MaiBot quotes
      by default (its hint says for older targets); facts from private chats
      are not kept out of groups.
-   - Wait for more hindsight labels: whether to speak is prose rate control
-     (fit P(reply) under a budget, as MaiBot's dynamic mode, or a bandit on
-     the hindsight reward), and four delays stack (debounce, presence, busy
-     schedule, image wait) where one latency distribution fitted to real
-     gaps would do.
+   - Wait for more data. Whether to speak is prose rate control (fit
+     P(reply) under a budget, as MaiBot's dynamic mode, or a bandit on the
+     hindsight reward); on 2026-10-13 there were 85 judged replies in 14
+     days. Of the stacked delays, debounce and the image wait are mechanics;
+     the read moment and the busy late reply are drawn from hand-set ranges
+     and could come from real gaps, but the friend group had 82 turn-taking
+     gaps under 10 minutes (median 29 s, middle half 13–74 s) and 6 quote
+     replies.
    - Keep: delivery and typos, the planner history and caching, edges and
      quotes, fact grounding, the jargon and sticker usage cycles, the
      retriever core, the prior fitting, privacy scrubbing.
