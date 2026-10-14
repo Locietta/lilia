@@ -5,6 +5,7 @@
 
 #include <glaze/json.hpp>
 
+#include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/timeout.h>
 
 #include <lilia/log.h>
@@ -34,6 +35,22 @@ std::chrono::seconds call_deadline(const Responder *r, std::string_view purpose)
     return std::chrono::seconds(purpose == "search" ? model.search_timeout_seconds :
                                 purpose == "writer" ? model.writer_timeout_seconds :
                                                       model.timeout_seconds);
+}
+
+/// Claude's cache entry lives 5 minutes from the start of the call that last
+/// wrote or read it; a keep-alive goes out a minute before it would expire.
+constexpr u32 k_warm_minutes = 4;
+
+Task<> warm(Responder *r, store::ChatKey chat, u64 generation) {
+    for (u32 left = r->config.model.cache_keepalive_minutes; left >= k_warm_minutes; left -= k_warm_minutes) {
+        co_await lighter::sleep(std::chrono::minutes(k_warm_minutes));
+        const auto &state = r->chats[chat];
+        // A newer prompt took over, or the fallbacks answer: nothing to keep.
+        if (state.warm_generation != generation || r->now() < r->planner_down_until) co_return;
+        const auto prompt = state.warm_prompt;
+        const auto tools = state.warm_tools;
+        std::ignore = co_await call_model(r, *r->warmer, r->config.model.planner_model, "keep-warm", chat, prompt, tools);
+    }
 }
 
 } // namespace
@@ -100,6 +117,7 @@ Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, 
         .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
     };
     const i64 started = r->now();
+    const auto clock = std::chrono::steady_clock::now();
     // A request that never finishes must not leave her silent: past the
     // deadline it fails like any other error (and the writer falls back).
     auto settled = co_await lighter::with_timeout(settle(provider->complete(history, tools, callbacks)), call_deadline(r, purpose));
@@ -107,12 +125,13 @@ Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, 
                           Result<provider::ProviderCallCompletion>(lighter::outcome_error(Error::api(
                               "timeout", std::format("{} call exceeded {}s", purpose, call_deadline(r, purpose).count()), "", true))) :
                           *std::move(settled);
+    const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - clock).count();
 
     store::LlmCall call{.time = started, .chat = chat, .model = std::move(model)};
     if (completion.has_error()) {
         call.error = completion.error().message();
         call.request_id = completion.error().request_id;
-        log::error("{} call for {} failed: {}", purpose, describe(chat), call.error);
+        log::error("{} call for {} failed after {} ms: {}", purpose, describe(chat), took, call.error);
     } else {
         if (!completion->model.empty()) call.model = completion->model;
         call.input_tokens = completion->usage.input_tokens;
@@ -121,8 +140,8 @@ Task<std::optional<std::vector<provider::OutputItem>>> call_model(Responder *r, 
         call.cache_write_tokens = completion->usage.cache_write_tokens;
         call.stop = completion->stop_detail;
         call.request_id = completion->request_id;
-        log::info("{} call for {}: {} in / {} out / {} cache read / {} cache write tokens", purpose, describe(chat), call.input_tokens,
-                  call.output_tokens, call.cache_read_tokens, call.cache_write_tokens);
+        log::info("{} call for {} in {} ms: {} in / {} out / {} cache read / {} cache write tokens", purpose, describe(chat), took,
+                  call.input_tokens, call.output_tokens, call.cache_read_tokens, call.cache_write_tokens);
     }
     if (auto recorded = r->store.add_llm_call(call); recorded.has_error()) {
         log::error("cannot record model call: {}", recorded.error().message());
@@ -156,6 +175,36 @@ Task<std::optional<std::vector<provider::OutputItem>>> call_planner(Responder *r
         items = co_await call_model(r, fallback.provider, fallback.model, purpose, chat, history, tools);
     }
     co_return items;
+}
+
+Task<std::optional<std::vector<provider::OutputItem>>> call_selector(Responder *r, const store::ChatKey &chat,
+                                                                     const provider::History &history,
+                                                                     const std::vector<provider::ToolDefinition> &tools) {
+    if (r->selector && r->now() >= r->planner_down_until) {
+        if (auto items = co_await call_model(r, *r->selector, r->config.model.planner_model, "select", chat, history, tools))
+            co_return items;
+    }
+    co_return co_await call_planner(r, "select", chat, history, tools);
+}
+
+std::optional<provider::History> warm_prefix(provider::History prompt) {
+    if (prompt.empty() || prompt.back().parts.size() < 2) return std::nullopt;
+    auto &parts = prompt.back().parts;
+    const auto *stable = std::get_if<provider::TextPart>(&parts[parts.size() - 2]);
+    if (!stable || !stable->cache) return std::nullopt;
+    parts.pop_back();
+    return prompt;
+}
+
+void keep_warm(Responder *r, const store::ChatKey &chat, const provider::History &prompt,
+               const std::vector<provider::ToolDefinition> &tools) {
+    if (!r->warmer || !r->realtime) return;
+    auto part = warm_prefix(prompt);
+    if (!part) return;
+    auto &state = r->chats[chat];
+    state.warm_prompt = *std::move(part);
+    state.warm_tools = tools;
+    r->spawn(warm(r, chat, ++state.warm_generation));
 }
 
 std::string final_text(const std::vector<provider::OutputItem> &items) {

@@ -56,10 +56,15 @@ std::string speaker(const Responder *r, const store::StoredMessage &message) {
     return message.sender_name.empty() ? std::to_string(message.sender_id) : message.sender_name;
 }
 
-/// MaiBot's expression selection, after the planner: candidates retrieved by
-/// embedding against the planner's intent and the chat (MMR for variety), or a
-/// weighted sample without embeddings; then a selector call with the recent
-/// chat picks 0 to `max_selected`. Picks are marked active.
+} // namespace
+
+namespace detail {
+
+/// MaiBot's expression selection, after the planner (or beside it when she is
+/// called, without its intent): candidates retrieved by embedding against the
+/// intent and the chat (MMR for variety), or a weighted sample without
+/// embeddings; then a selector call with the recent chat picks 0 to
+/// `max_selected`. Picks are marked active.
 Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, std::vector<store::StoredMessage> log,
                                              store::StoredMessage target, std::string intent) {
     const auto &learning = r->config.learning;
@@ -100,7 +105,7 @@ Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, 
     for (const auto &row : candidates) input.candidates.push_back(std::format("当{}时，可以{}", row.situation, row.style));
     const auto prompt = fill_template(embedded(xmake::select_md), {{"name", r->config.chat.name}});
     const auto request = learn::build_selection_request(prompt, input);
-    const auto items = co_await call_planner(r, "select", chat, request.history, request.tools);
+    const auto items = co_await call_selector(r, chat, request.history, request.tools);
     if (!items) co_return std::vector<std::string>{};
     std::vector<std::string> picked;
     std::vector<i64> ids;
@@ -112,6 +117,10 @@ Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, 
     log::info("{} picks {} of {} learned expression(s)", describe(chat), picked.size(), candidates.size());
     co_return picked;
 }
+
+} // namespace detail
+
+namespace {
 
 /// What she knows about the person she answers, then about anyone else the
 /// planner looked up this turn, for the writer.
@@ -196,9 +205,16 @@ namespace detail {
 
 Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vector<store::StoredMessage> log_lines,
                         store::StoredMessage target, ChatInfo info, i64 started, Findings found) {
+    // She types while the selector and the writer work (see the sending loop).
+    const auto decided = std::chrono::steady_clock::now();
     auto &state = r->chats[chat];
     const auto &settings = r->config.chat;
-    const auto habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
+    std::vector<std::string> habits;
+    if (found.habits && found.habits_for == plan.target) {
+        habits = *std::move(found.habits);
+    } else {
+        habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
+    }
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
     const auto history = build_writer_history({
         .persona = r->persona,
@@ -278,8 +294,14 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     usize sent = 0;
     std::vector<store::StoredMessage> own; ///< what went out, for her own facts
     for (usize i = 0; i < segments.size(); ++i) {
-        // Only later messages wait for "typing"; the first goes out at once.
-        if (r->realtime && i > 0) co_await lighter::sleep(typing_delay(segments[i].text, settings.typing_speed));
+        // Each message waits for its "typing". The first was being typed since
+        // the planner decided, so a short one goes out as soon as it is
+        // written; a deliberate long reply's first goes out at once.
+        if (r->realtime && (i > 0 || plan.style != ReplyStyle::LONG)) {
+            auto typing = typing_delay(segments[i].text, settings.typing_speed);
+            if (i == 0) typing -= std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - decided);
+            if (typing.count() > 0) co_await lighter::sleep(typing);
+        }
         onebot::Message message;
         if (i == 0 && plan.quote && chat.type == "group" && plan.target > 0) {
             message.push_back(onebot::reply_segment(plan.target));
@@ -289,6 +311,10 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         message.push_back(onebot::text_segment(segments[i].text));
         sent_id = co_await send_and_record(r, chat, std::move(message));
         if (!sent_id) break;
+        if (i == 0) {
+            log::info("{} first message out {} ms after the decision", describe(chat),
+                      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - decided).count());
+        }
         own.push_back({.chat = chat, .message_id = *sent_id, .time = r->now(), .text = segments[i].text, .from_self = true});
         ++sent;
     }

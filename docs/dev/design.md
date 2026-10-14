@@ -34,8 +34,9 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     and stores what she missed (not for a chat she has never seen). Whoever
     called her in the last half hour is answered late; the next turn is told
     she just came back online.
-  - The worker waits for the burst to settle (`debounce_seconds`, 2 s when
-    addressed, 15 s at most).
+  - The worker waits for the burst to settle (`debounce_seconds`, 15 s at
+    most). Called, she looks at once (2026-10-14; before, 2 s of quiet): the
+    lines that follow reach the planner's next round.
   - The planner (`prompts/planner.md`, `planner_model`, thinking off) keeps
     one history per chat, as MaiBot's does (`chat/session.*`, 2026-10-11).
     - It is rendered each round from the stored lines after the window's
@@ -154,7 +155,20 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       neighbours merge at random. `typos` swaps in a homophone now and then
       (jieba plus pypinyin), sometimes followed by the correction quoting it.
       Everything is packed into at most 3 messages.
-    - Only later messages wait for typing: 0.3 s per Han character.
+    - Messages wait for typing: 0.3 s per Han character. The first was being
+      typed since the planner decided, so it goes out once the selector and
+      writer are done or once it could have been typed, whichever is later
+      (2026-10-14). MaiBot sends it at once. With the schedule on there is
+      no other delay while she is awake. The random read moment before the
+      planner (3–20 s, 1–8 s when called) was dropped: it did not depend on
+      what she said, so "草" waited as long as a sentence. In the friend
+      group her first message came a median 14 s after the line before it
+      (slowest quarter 24–58 s), 9 s of it before the planner. About 6 s is
+      the model calls: planner, selector, writer, 2 s each, one after
+      another. A Haiku call through the gateway takes 1.1–1.8 s even for one
+      token, and a cache hit on 23k tokens is no faster than a miss, so what
+      costs time is calls in a row, not tokens: the selector now runs beside
+      the planner when she is called (below).
     - A deliberate long reply goes out whole and untouched.
     - The first message quotes only when the planner asks.
   - What the models see (2026-10-11). A quote is stored as part of the text
@@ -175,6 +189,17 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     time, style and notes form the final user part. The planner's tools
     never change between rounds; a tool she cannot use right now answers
     with a receipt instead.
+    - Claude's cache lives 5 minutes, and group turns are often 5–60
+      minutes apart, so nearly every turn wrote its whole log again (9–16k
+      tokens at 1.25×). While a chat is quiet, the planner's last prompt up
+      to its breakpoint (without the tail) goes out again every 4 minutes
+      with one output token (`model.cache_keepalive_minutes`, 2026-10-14):
+      a read at 0.1× that restarts the 5 minutes. Through the gateway such a
+      call at 4 minutes kept a 13k-token entry alive past 8. On the friend
+      group's gaps, warming for 20 minutes costs least, about 30% below none;
+      longer costs a little more. The 1-hour TTL would do the same without
+      the calls, but cannot be relied on to be offered. A hit is no faster
+      than a miss through the gateway: this saves money, not time.
   - `lilia replay <chat.jsonl>` runs the same ingest and turn code on a
     recorded or synthetic log without NapCat and prints every decision;
     `scripts/replay-remote.sh` runs it on cachy with the live keys.
@@ -273,7 +298,11 @@ Model calls (2026-10-11):
      (`expression_groups` decides which chats share them), reviewed before
      storing with every verdict logged, embedded, and picked after the
      planner by a selector call: up to 3 of 30 MMR-ranked candidates
-     (`learning.max_selected`). Jargon is mined
+     (`learning.max_selected`). The selector is the planner model with its
+     tool call forced (2026-10-14: 47 output tokens instead of ~190 of
+     narration, ~0.6 s). When she is called it runs beside the planner's
+     first round for the calling line, without the planner's intent, and a
+     reply to that line uses its picks (about 2 s sooner). Jargon is mined
      from the same batches: each sighting keeps an anonymised ±3-line
      snippet (at most 10 per term), and the meaning is inferred at 4, 8, 25
      and 100 sightings, with and without context; a term counts as slang
@@ -374,11 +403,12 @@ Model calls (2026-10-11):
    - Wait for more data. Whether to speak is prose rate control (fit
      P(reply) under a budget, as MaiBot's dynamic mode, or a bandit on the
      hindsight reward); on 2026-10-13 there were 85 judged replies in 14
-     days. Of the stacked delays, debounce and the image wait are mechanics;
-     the read moment and the busy late reply are drawn from hand-set ranges
-     and could come from real gaps, but the friend group had 82 turn-taking
-     gaps under 10 minutes (median 29 s, middle half 13–74 s) and 6 quote
-     replies.
+     days. Of the stacked delays, debounce and the image wait are mechanics,
+     typing follows the length of what she says, and the busy late reply is
+     drawn from a hand-set range and could come from real gaps. But the
+     friend group had 82 turn-taking gaps under 10 minutes (median 29 s,
+     middle half 13–74 s) and 6 quote replies, and on 2026-10-14 49 answers
+     within a live exchange showed no trend with length.
    - Keep: delivery and typos, the planner history and caching, edges and
      quotes, fact grounding, the jargon and sticker usage cycles, the
      retriever core, the prior fitting, privacy scrubbing.

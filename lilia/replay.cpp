@@ -117,8 +117,11 @@ std::string clock(i64 t) { return std::format("{:02}:{:02}", t / 60, t % 60); }
 
 namespace {
 
+/// Claude caches only when asked; `cache` false for prompts that are never
+/// sent twice, where a cache write only costs more.
 provider::Provider make_client(const ModelConfig &model, const std::string &base_url, const std::string &api_key, const std::string &name,
-                               u32 max_tokens, bool require_tool = false, bool bearer = false, const std::string &thinking_off = {}) {
+                               u32 max_tokens, bool require_tool = false, bool bearer = false, const std::string &thinking_off = {},
+                               bool cache = true) {
     return pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
         .auth = provider::api_key_auth(api_key, bearer),
         .base_url = base_url,
@@ -128,7 +131,7 @@ provider::Provider make_client(const ModelConfig &model, const std::string &base
         .thinking_off = thinking_off.empty() ? "disabled" : thinking_off,
         .require_tool = require_tool,
         .max_tokens = max_tokens,
-        .prompt_cache = name.starts_with("claude"),
+        .prompt_cache = cache && name.starts_with("claude"),
     });
 }
 
@@ -138,6 +141,22 @@ provider::Provider make_planner(const ModelConfig &model) {
     const bool own = !model.planner_base_url.empty();
     return make_client(model, own ? model.planner_base_url : model.base_url, own ? model.planner_api_key : model.api_key,
                        model.planner_model, model.planner_max_tokens, model.planner_force_tool, own && model.planner_bearer,
+                       own ? model.planner_thinking_off : std::string());
+}
+
+provider::Provider make_selector(const ModelConfig &model) {
+    const bool own = !model.planner_base_url.empty();
+    return make_client(model, own ? model.planner_base_url : model.base_url, own ? model.planner_api_key : model.api_key,
+                       model.planner_model, model.planner_max_tokens, true, own && model.planner_bearer,
+                       own ? model.planner_thinking_off : std::string(), false);
+}
+
+provider::Provider make_warmer(const ModelConfig &model) {
+    // The planner's request but one output token: max_tokens is not part of
+    // what the cache matches; tool_choice and thinking are, so they stay.
+    const bool own = !model.planner_base_url.empty();
+    return make_client(model, own ? model.planner_base_url : model.base_url, own ? model.planner_api_key : model.api_key,
+                       model.planner_model, 1, model.planner_force_tool, own && model.planner_bearer,
                        own ? model.planner_thinking_off : std::string());
 }
 
@@ -254,6 +273,7 @@ std::unique_ptr<chat::Responder> probe_responder(const Config &config, store::St
     }
     responder->writer_fallbacks = make_writer_fallbacks(config.model);
     responder->planner_fallbacks = make_planner_fallbacks(config.model);
+    responder->selector = make_selector(config.model);
     responder->planner_prompt = planner_prompt;
     responder->realtime = false;
     return responder;
@@ -314,6 +334,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     }
     responder.writer_fallbacks = make_writer_fallbacks(config.model);
     responder.planner_fallbacks = make_planner_fallbacks(config.model);
+    responder.selector = make_selector(config.model);
     // The addressee prior as live, from its hand-set weights.
     feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
                                 [&tasks](Task<> task) { tasks.spawn(std::move(task)); });

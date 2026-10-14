@@ -55,6 +55,25 @@ lighter::Task<std::optional<std::vector<provider::OutputItem>>> call_planner(Res
                                                                              const store::ChatKey &chat, const provider::History &history,
                                                                              const std::vector<provider::ToolDefinition> &tools);
 
+/// The expression selector: the planner model with its tool call forced, so
+/// it does not narrate first; the planner path (fallbacks and rest included)
+/// when it is unset, resting or fails.
+lighter::Task<std::optional<std::vector<provider::OutputItem>>> call_selector(Responder *r, const store::ChatKey &chat,
+                                                                              const provider::History &history,
+                                                                              const std::vector<provider::ToolDefinition> &tools);
+
+/// A planner prompt up to its cache breakpoint, without the per-round tail
+/// the next turn does not share; nullopt when no breakpoint comes right
+/// before the tail.
+std::optional<provider::History> warm_prefix(provider::History prompt);
+
+/// After a planner call: while `chat` stays quiet, its prompt up to the cache
+/// breakpoint goes out again every 4 minutes on the warmer, for
+/// `model.cache_keepalive_minutes`, so the next turn reads Claude's cache
+/// instead of writing it again. No-op without a warmer or outside live runs.
+void keep_warm(Responder *r, const store::ChatKey &chat, const provider::History &prompt,
+               const std::vector<provider::ToolDefinition> &tools);
+
 /// Text after the last non-text item; earlier text is narration such as
 /// "let me search for that".
 std::string final_text(const std::vector<provider::OutputItem> &items);
@@ -96,7 +115,17 @@ struct Findings {
     std::vector<std::pair<i64, KnownPerson>> people;
     std::string self_notes; ///< what she said about herself before
     std::string presence;   ///< just woke up, was busy, back online
+    /// Expressions picked for the line that called her while the planner
+    /// decided; a reply to that line (`habits_for`) uses them.
+    i64 habits_for = 0;
+    std::optional<std::vector<std::string>> habits;
 };
+
+/// MaiBot's expression selection for a reply to `target`: learned
+/// expressions retrieved against `intent` and the chat, then a selector call
+/// picks 0 to `max_selected`.
+lighter::Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, std::vector<store::StoredMessage> log,
+                                                      store::StoredMessage target, std::string intent);
 
 /// One reply as the planner asked for it: the writer's text (with what the
 /// turn found and the picked expressions) sent the way MaiBot sends replies.

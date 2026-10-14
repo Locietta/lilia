@@ -84,6 +84,12 @@ struct ModelConfig {
     /// read only the first frame. DeepSeek reads GIFs whole (2026-10-12: it
     /// described motion without the grid, and the grid scored no better).
     bool vision_gif_frames = false;
+    /// A Claude planner's cache lives 5 minutes. While a chat stays quiet its
+    /// last planner prompt is sent again every 4 minutes (one output token,
+    /// read from the cache at a tenth of a write) for this long; 0: never.
+    /// 20 cost the least on the friend group's gaps between turns
+    /// (2026-10-14: 30% below none, 40 or 60 a little more than 20).
+    u32 cache_keepalive_minutes = 20;
     /// Offer the provider-hosted web_search server tool. A searched answer
     /// costs tens of thousands of input tokens with DeepSeek.
     bool web_search = true;
@@ -108,8 +114,8 @@ struct TypoConfig {
     bool correction_quote = true;
 };
 
-/// Her day (live only; replay and tests ignore it): asleep at night, a few
-/// busy stretches, and a moment to read before reacting.
+/// Her day (live only; replay and tests ignore it): asleep at night and a few
+/// busy stretches.
 struct ScheduleConfig {
     bool enabled = false;
     /// Local "HH:MM". Asleep she does nothing; whoever called her is answered
@@ -123,11 +129,6 @@ struct ScheduleConfig {
     u32 busy_max_minutes = 60;
     u32 busy_reply_min_seconds = 60;
     u32 busy_reply_max_seconds = 300;
-    /// Before reacting: called, and otherwise.
-    u32 read_called_min_seconds = 1;
-    u32 read_called_max_seconds = 8;
-    u32 read_min_seconds = 3;
-    u32 read_max_seconds = 20;
 };
 
 struct ChatConfig {
@@ -149,12 +150,15 @@ struct ChatConfig {
     /// messages (1, MaiBot's default: every batch); 0 only when called. It
     /// always sees everything that came in; it decides whether she speaks.
     double talk_value = 1;
-    /// Wait for a burst of messages to end before deciding.
+    /// Wait for a burst of messages to end before deciding; not when she is
+    /// called (an @, a quote of hers, her name, a private message).
     u32 debounce_seconds = 3;
     /// What the planner hands the writer: "intent" (a short stance to voice)
     /// or "reference" (notes the writer may use or ignore, like MaiBot).
     std::string handoff = "intent";
-    /// Typing-delay speed for multi-message replies; 0 sends immediately.
+    /// Typing speed: a casual reply's first message waits until it could have
+    /// been typed since the planner decided, each later one for its own
+    /// typing; 0 sends immediately.
     double typing_speed = 1.0;
     TypoConfig typos;
     ScheduleConfig schedule;

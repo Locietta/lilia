@@ -61,9 +61,9 @@ Task<> debounce(Responder *r, const store::ChatKey &chat) {
     const i64 started = r->now();
     for (;;) {
         const auto &flow = r->chats[chat].flow;
-        const i64 quiet =
-            flow.addressed || flow.named ? std::min<i64>(r->config.chat.debounce_seconds, 2) : r->config.chat.debounce_seconds;
-        const i64 wait = flow.last_arrival + quiet - r->now();
+        // Called, she looks at once; what follows reaches the planner's next round.
+        if (flow.addressed || flow.named) co_return;
+        const i64 wait = flow.last_arrival + r->config.chat.debounce_seconds - r->now();
         if (wait <= 0 || r->now() - started >= k_max_debounce_seconds) co_return;
         co_await lighter::sleep(std::chrono::seconds(wait));
     }
@@ -87,8 +87,9 @@ Task<> wait_until(Responder *r, const store::ChatKey &chat, i64 until, bool call
 
 /// Her day, before a turn: asleep she waits until morning (whoever called
 /// her is answered then); busy she waits until she is back, or answers a
-/// call a few minutes late; awake she takes a moment to read. Sets the note
-/// the next turn's planner and writer see.
+/// call a few minutes late. Awake she looks at once: how long a reply takes
+/// is its typing (`deliver`). Sets the note the next turn's planner and
+/// writer see.
 Task<> live_presence(Responder *r, const store::ChatKey &chat) {
     const auto &schedule = r->config.chat.schedule;
     const auto offset = r->config.chat.utc_offset_minutes;
@@ -121,13 +122,6 @@ Task<> live_presence(Responder *r, const store::ChatKey &chat) {
         }
         break;
     }
-    if (!schedule.enabled) co_return;
-    // A moment to read before reacting; quicker when someone is talking to her.
-    const auto &flow = r->chats[chat].flow;
-    const bool called = flow.addressed || flow.named;
-    co_await lighter::sleep(std::chrono::seconds(called ?
-                                                     random_seconds(r, schedule.read_called_min_seconds, schedule.read_called_max_seconds) :
-                                                     random_seconds(r, schedule.read_min_seconds, schedule.read_max_seconds)));
 }
 
 /// What get_group_member_info says about her in one group.

@@ -175,6 +175,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
     const auto &settings = config.chat;
     const i64 started = now();
+    const auto opened = std::chrono::steady_clock::now();
     const i64 day = local_day_start(started, settings.utc_offset_minutes);
     // Learning and sticker tagging have their own budget; they never silence her.
     auto used = store.tokens_since(day, store::TokenScope::CHATS);
@@ -238,6 +239,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         notes.recall = std::move(recalled);
         notes.self_notes = std::move(own);
     }
+    log::info("{} ready to plan in {} ms", describe(chat),
+              std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - opened).count());
     // What the turn finds out reaches the writer as it is, not through the
     // planner's words.
     Findings found{.remembered = notes.recall, .self_notes = notes.self_notes, .presence = notes.presence};
@@ -561,9 +564,23 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         tail.hint = hint.shown;
         const i64 shown = rows.back().row_id;
         const auto earlier = memory ? memory->earlier(chat) : std::string();
-        const auto planned =
-            co_await call_planner(this, "planner", chat, render_session(prompt, info, rows, state.records, tail, edges, earlier), tools);
+        const auto rendered = render_session(prompt, info, rows, state.records, tail, edges, earlier);
+        // Called, she will most likely answer the line that called her: its
+        // expressions are picked while the planner decides, not after it.
+        const auto called = addressed ? addressed : named;
+        const auto calling = called ? std::ranges::find(rows, *called, &store::StoredMessage::message_id) : rows.end();
+        std::optional<std::vector<provider::OutputItem>> planned;
+        if (calling != rows.end() && !calling->from_self && !is_notice(*calling)) {
+            auto [decided, picked] = co_await lighter::when_all(call_planner(this, "planner", chat, rendered, tools),
+                                                                select_habits(this, chat, rows, *calling, {}));
+            planned = std::move(decided);
+            found.habits_for = calling->message_id;
+            found.habits = std::move(picked);
+        } else {
+            planned = co_await call_planner(this, "planner", chat, rendered, tools);
+        }
         if (!planned) break;
+        keep_warm(this, chat, rendered, tools);
         seen_row = shown;
         addressed.reset();
         named.reset();

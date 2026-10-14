@@ -21,6 +21,11 @@ std::vector<chat::Responder::NamedProvider> make_writer_fallbacks(const ModelCon
 /// Planner backups: the planner's tool forcing and token limit, each on its
 /// own endpoint (empty: `base_url`).
 std::vector<chat::Responder::NamedProvider> make_planner_fallbacks(const ModelConfig &model);
+/// Expression selection: the planner's model and endpoint, tool forced, no
+/// prompt cache (its candidates differ every call).
+provider::Provider make_selector(const ModelConfig &model);
+/// Keeps the planner's prompt cache warm: the planner with one output token.
+provider::Provider make_warmer(const ModelConfig &model);
 /// Image and sticker descriptions (`vision_model` on `base_url`).
 provider::Provider make_vision(const ModelConfig &model);
 /// Expression learner: the planner's model, must call record_expressions.

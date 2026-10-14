@@ -722,6 +722,10 @@ Task<int> run_app(const Config &config) {
                               data_dir / "persona.md", [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     responder.writer_fallbacks = make_writer_fallbacks(config.model);
     responder.planner_fallbacks = make_planner_fallbacks(config.model);
+    responder.selector = make_selector(config.model);
+    // Only Claude needs asking to cache, and only its cache needs keeping.
+    if (config.model.cache_keepalive_minutes > 0 && config.model.planner_model.starts_with("claude"))
+        responder.warmer = make_warmer(config.model);
     archive::Archiver archiver(config.archive, data_dir, *store);
     if (!config.model.vision_model.empty()) {
         archiver.vision = make_vision(config.model);

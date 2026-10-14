@@ -14,6 +14,7 @@
 #include <lighter/async/runtime/task_group.h>
 
 #include <lilia/chat/context.h>
+#include <lilia/chat/detail/responder.h>
 #include <lilia/chat/responder.h>
 #include <lilia/onebot/message.h>
 #include <lilia/sticker/sticker.h>
@@ -676,6 +677,57 @@ Task<> test_history_survives_many_turns() {
         require(stable_text(requests[i]).starts_with(stable_text(requests[i - 1])),
                 "nothing is folded while the window has not moved (turn " + std::to_string(i + 1) + ")");
     }
+    // A keep-alive sends a prompt up to its breakpoint: what the next turn
+    // starts with, without the tail.
+    for (usize i = 0; i + 1 < requests.size(); ++i) {
+        const auto warm = chat::detail::warm_prefix(requests[i]);
+        require(warm && !text_of(warm->back()).contains("现在是"), "a planner prompt has a breakpoint right before its tail");
+        std::string sent;
+        for (const auto &item : *warm) sent += text_of(item);
+        std::string next;
+        for (const auto &item : requests[i + 1]) next += text_of(item);
+        require(next.starts_with(sent), "and the next turn's prompt starts with what the keep-alive sends");
+    }
+    co_await tasks.join();
+}
+
+Task<> test_expressions_picked_while_planning() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.config.learning.enabled = true;
+    // Merged by style, so six styles.
+    for (i64 i = 0; i < 6; ++i) std::ignore = h.store.learn_expression(k_chat, std::format("情景{}", i), std::format("说“草{}”", i), 1);
+    auto selector = std::make_shared<test::FakeProvider::State>();
+    selector->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::tool_call("select_expressions", R"({"ids":[1]})")};
+    };
+    h.responder->selector = test::fake_provider(selector);
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
+        const auto newest = line_number(history, "离谱");
+        const auto target = newest != "#0" ? newest : line_number(history, "你看这个");
+        return std::vector{test::tool_call("reply", R"({"target":")" + target + R"(","style":"short","intent":"接一句"})")};
+    };
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("草")};
+    };
+
+    // Called: picked once, beside the planner (without its intent), and used.
+    std::ignore = h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 你看这个")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent == std::vector<std::string>{"草"}, "she replies");
+    require(selector->requests.size() == 1 && !text_of(selector->requests[0].back()).contains("她想表达的意思"),
+            "the expressions were picked once, without the planner's intent");
+    require(text_of(h.writer->requests.back().back()).contains("，可以说“草"), "and reach the writer");
+    require(h.planner->requests.size() == 2, "the selector has its own client");
+
+    // Not called: picked after the planner, with its intent.
+    h.clock += 600;
+    std::ignore = h.say(2, 20001, "小明", {onebot::text_segment("真的离谱")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent.size() == 2 && selector->requests.size() == 2 &&
+                text_of(selector->requests[1].back()).contains("她想表达的意思：接一句"),
+            "a reply nobody asked for picks after the planner decides");
     co_await tasks.join();
 }
 
@@ -686,7 +738,7 @@ int main() {
         for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
                            &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches,
                            &test_pokes_and_repeats, &test_stickers, &test_several_calls_a_round, &test_planner_mistakes, &test_tool_limits,
-                           &test_private_chats, &test_no_pokes_in_private}) {
+                           &test_private_chats, &test_no_pokes_in_private, &test_expressions_picked_while_planning}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

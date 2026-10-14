@@ -133,6 +133,12 @@ struct Responder {
         std::map<i64, LineEdges> edges;
         /// Set when a message comes in; ends a planner wait in a private chat.
         std::shared_ptr<lighter::Event> arrival = std::make_shared<lighter::Event>();
+        /// The cached part of the last planner prompt, which the warmer sends
+        /// again while the chat is quiet; a newer prompt bumps the
+        /// generation and ends the warming of the one before.
+        provider::History warm_prompt;
+        std::vector<provider::ToolDefinition> warm_tools;
+        u64 warm_generation = 0;
     };
 
     /// The chat log a turn shows, oldest first: everything after the chat's
@@ -156,6 +162,12 @@ struct Responder {
     std::vector<NamedProvider> writer_fallbacks;
     /// Tried in order when a `planner` call fails.
     std::vector<NamedProvider> planner_fallbacks;
+    /// The planner model with its tool call forced, for expression
+    /// selection; unset: the planner.
+    std::optional<provider::Provider> selector;
+    /// The planner with one output token, keeping its prompt cache warm
+    /// (`model.cache_keepalive_minutes`); unset: no keep-alives.
+    std::optional<provider::Provider> warmer;
     /// The planner model is skipped until then (unix seconds): it was rate
     /// limited or failed twice in a row. Consecutive failures so far.
     i64 planner_down_until = 0;
