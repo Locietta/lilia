@@ -64,10 +64,6 @@ struct Client {
                                                                     const std::vector<provider::ToolDefinition> &tools,
                                                                     const provider::StreamCallbacks &callbacks);
 
-    /// Anthropic has no remote compaction endpoint; summarizes locally
-    /// through complete() (provider/compact.h).
-    lighter::Task<void, Error> compact(provider::History &history, provider::CompactRequest request);
-
     ClientOptions options;
     lighter::http::Client http_client;
 };

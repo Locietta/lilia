@@ -35,6 +35,9 @@ Local changes since the copy:
 - `provider::TextPart::cache` marks the end of a stable prefix inside the
   messages; with `prompt_cache` the text block gets a breakpoint (lilia: the
   chat log, before the per-call tail).
+- `compact.{h,cpp}` and the `compact` convention of `ProviderFacade` were
+  removed (2026-10-19): lilia keeps its own summaries and never compacts a
+  transcript.
 
 From liminal `main` at `d520ce6`, keeping the relative paths so fixes can be
 ported in either direction:

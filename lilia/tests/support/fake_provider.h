@@ -39,8 +39,6 @@ struct FakeProvider {
         }
         co_return provider::ProviderCallCompletion{.stop = provider::StopKind::DONE};
     }
-
-    lighter::Task<void, Error> compact(provider::History &, provider::CompactRequest) { co_return; }
 };
 
 inline provider::Provider fake_provider(std::shared_ptr<FakeProvider::State> state) {

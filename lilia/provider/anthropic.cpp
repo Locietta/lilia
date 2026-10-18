@@ -15,13 +15,12 @@
 #include <lighter/async/io/watcher.h>
 #include <lighter/codec/json/json.h>
 
-#include <lilia/provider/compact.h>
 #include <lilia/provider/detail/anthropic_protocol.h>
 #include <lilia/provider/detail/completion_retry.h>
 
 // Anthropic Messages API wire types. Internal: the public surface speaks the
 // neutral transcript (provider/history.h); everything here is serialization
-// detail behind complete()/compact().
+// detail behind complete().
 namespace lilia::anthropic::wire {
 
 struct CacheControl {
@@ -1032,11 +1031,6 @@ Task<provider::ProviderCallCompletion, Error> Client::complete(const provider::H
     };
     co_return co_await provider::detail::complete_with_retry(attempts, body, callbacks, options.max_retries, options.initial_retry_delay)
         .or_fail();
-}
-
-Task<void, Error> Client::compact(provider::History &history, provider::CompactRequest request) {
-    // No native compaction endpoint; summarize through our own complete().
-    co_return co_await provider::local_compact(this, history, std::move(request)).or_fail();
 }
 
 Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options) {
