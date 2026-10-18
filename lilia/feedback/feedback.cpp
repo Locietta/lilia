@@ -8,10 +8,9 @@
 
 #include <glaze/json.hpp>
 
-#include <lighter/async/runtime/timeout.h>
-
 #include <xmake/bin2obj/hindsight_md.hpp>
 
+#include <lilia/calls.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/session.h>
 #include <lilia/log.h>
@@ -45,11 +44,6 @@ constexpr std::array<std::pair<std::string_view, double>, 8> k_stances{{{"apprec
                                                                         {"attack", -1.0}}};
 constexpr std::array<std::pair<std::string_view, double>, 6> k_contributions{
     {{"advance", 0.5}, {"maintain", 0.3}, {"acknowledge", 0.0}, {"close", 0.0}, {"wrong_push", -0.7}, {"intrusion", -1.0}}};
-
-Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
-    auto outcome = co_await std::move(call);
-    co_return outcome;
-}
 
 /// "#12", "12" or 12 -> 12; 0 otherwise.
 i64 row_number(const glz::generic *value) {
@@ -330,28 +324,13 @@ Task<bool> Feedback::judge(store::ChatKey chat_key, i64 self_id, usize limit) {
     }
 
     const auto request = build_hindsight_request(prompt, lines, targets, own);
-    std::vector<provider::OutputItem> items;
-    const provider::StreamCallbacks callbacks{.on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); }};
-    const i64 started = now();
-    auto settled =
-        co_await lighter::with_timeout(settle(judge_model->complete(request.history, request.tools, callbacks)), k_call_deadline);
-    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
-                                                Error::api("timeout", "hindsight judging exceeded its deadline", "", true))) :
-                                            *std::move(settled);
-    store::LlmCall call{.time = started, .chat = {.type = "feedback", .id = chat_key.id}, .model = judge_model_name};
-    if (completion.has_error()) {
-        call.error = completion.error().message();
-    } else {
-        call.input_tokens = completion->usage.input_tokens;
-        call.output_tokens = completion->usage.output_tokens;
-        call.request_id = completion->request_id;
-    }
-    std::ignore = store.add_llm_call(call);
-    if (completion.has_error()) {
+    store::LlmCall call{.time = now(), .chat = {.type = "feedback", .id = chat_key.id}, .model = judge_model_name};
+    const auto items = co_await call_recorded(judge_model, request.history, request.tools, k_call_deadline, store, call);
+    if (items.has_error()) {
         log::warn("hindsight judging of {}:{} failed: {}", chat_key.type, chat_key.id, call.error);
         co_return false;
     }
-    const auto hindsight = parse_hindsight(items);
+    const auto hindsight = parse_hindsight(*items);
     if (!hindsight) {
         log::warn("hindsight judging of {}:{}: no answer", chat_key.type, chat_key.id);
         co_return false;

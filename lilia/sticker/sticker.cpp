@@ -10,13 +10,13 @@
 
 #include <glaze/json.hpp>
 
-#include <lighter/async/runtime/timeout.h>
 #include <lighter/http/bound_client.h>
 
 #include <xmake/bin2obj/sticker_md.hpp>
 #include <xmake/bin2obj/sticker_usage_md.hpp>
 
 #include <lilia/archive/archiver.h>
+#include <lilia/calls.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/learn/learner.h>
@@ -39,12 +39,6 @@ constexpr usize k_recent_lines = 8;
 constexpr i64 k_recent_seconds = 600;
 /// A sighting whose sticker never got an id (not downloaded) is dropped.
 constexpr i64 k_unknown_sticker_seconds = 600;
-
-/// with_timeout takes lighter's error type; hand the outcome through as a value.
-Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
-    auto outcome = co_await std::move(call);
-    co_return outcome;
-}
 
 std::string_view trim(std::string_view text) {
     constexpr std::string_view k_space = " \t\r\n";
@@ -92,29 +86,13 @@ std::string sha1_hex(std::string_view bytes) {
 Task<std::optional<std::vector<provider::OutputItem>>>
 call_model(Collector &collector, provider::Provider &provider, const std::string &model, i64 sticker_id, const provider::History &history,
            const std::vector<provider::ToolDefinition> &tools, std::string_view purpose) {
-    std::vector<provider::OutputItem> items;
-    const provider::StreamCallbacks callbacks{
-        .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
-    };
-    const i64 started = collector.now();
-    auto settled = co_await lighter::with_timeout(settle(provider->complete(history, tools, callbacks)), k_vision_deadline);
-    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
-                                                Error::api("timeout", std::format("{} exceeded its deadline", purpose), "", true))) :
-                                            *std::move(settled);
-    store::LlmCall call{.time = started, .chat = {.type = "sticker", .id = sticker_id}, .model = model};
-    if (completion.has_error()) {
-        call.error = completion.error().message();
-    } else {
-        call.input_tokens = completion->usage.input_tokens;
-        call.output_tokens = completion->usage.output_tokens;
-        call.request_id = completion->request_id;
-    }
-    std::ignore = collector.store.add_llm_call(call);
-    if (completion.has_error()) {
+    store::LlmCall call{.time = collector.now(), .chat = {.type = "sticker", .id = sticker_id}, .model = model};
+    auto items = co_await call_recorded(provider, history, tools, k_vision_deadline, collector.store, call);
+    if (items.has_error()) {
         log::warn("sticker: {} failed: {}", purpose, call.error);
         co_return std::nullopt;
     }
-    co_return std::move(items);
+    co_return *std::move(items);
 }
 
 } // namespace
@@ -490,12 +468,7 @@ Task<std::optional<Tagged>> Collector::describe(const store::Sticker &sticker, c
                                  provider::TextPart{.text = text}}});
     const auto items = co_await call_model(*this, *vision, vision_model, sticker.id, history, {}, "sticker tagging");
     if (!items) co_return std::nullopt;
-    std::string answer;
-    for (const auto &item : *items) {
-        if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
-            for (const auto &part : message->parts) answer += part.text;
-        }
-    }
+    const auto answer = answer_text(*items);
     auto tagged = parse_tagging(answer);
     if (!tagged) log::warn("sticker: unexpected tagging answer: {}", answer);
     co_return tagged;

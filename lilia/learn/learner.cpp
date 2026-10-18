@@ -16,8 +16,6 @@
 
 #include <glaze/json.hpp>
 
-#include <lighter/async/runtime/timeout.h>
-
 #include <xmake/bin2obj/jargon_compare_md.hpp>
 #include <xmake/bin2obj/jargon_infer_md.hpp>
 #include <xmake/bin2obj/jargon_infer_word_md.hpp>
@@ -25,6 +23,7 @@
 #include <xmake/bin2obj/learner_md.hpp>
 #include <xmake/bin2obj/review_md.hpp>
 
+#include <lilia/calls.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/learn/frequency.h>
@@ -247,12 +246,6 @@ provider::ToolDefinition pick_tool(std::string name, std::string description, st
 
 std::string prompt_of(std::span<const std::byte> embedded, std::string_view name) {
     return chat::fill_template({reinterpret_cast<const char *>(embedded.data()), embedded.size()}, {{"name", name}});
-}
-
-/// with_timeout takes lighter's error type; hand the outcome through as a value.
-Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
-    auto outcome = co_await std::move(call);
-    co_return outcome;
 }
 
 /// Spawned tasks return nothing; what a batch learns is already stored.
@@ -697,34 +690,13 @@ namespace {
 /// One learning-side model call with a deadline, recorded as chat type "learn".
 Task<std::optional<std::vector<provider::OutputItem>>> run_call(Learner *learner, i64 group, const LearnerRequest &request,
                                                                 std::string_view purpose) {
-    std::vector<provider::OutputItem> items;
-    const provider::StreamCallbacks callbacks{
-        .on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); },
-    };
-    const i64 started = learner->now();
-    auto settled =
-        co_await lighter::with_timeout(settle(learner->provider->complete(request.history, request.tools, callbacks)), k_call_deadline);
-    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
-                                                Error::api("timeout", std::format("{} call exceeded its deadline", purpose), "", true))) :
-                                            *std::move(settled);
-
-    store::LlmCall call{.time = started, .chat = {.type = "learn", .id = group}, .model = "learner"};
-    if (completion.has_error()) {
-        call.error = completion.error().message();
+    store::LlmCall call{.time = learner->now(), .chat = {.type = "learn", .id = group}, .model = "learner"};
+    auto items = co_await call_recorded(learner->provider, request.history, request.tools, k_call_deadline, learner->store, call);
+    if (items.has_error()) {
         log::warn("{} call failed: {}", purpose, call.error);
-    } else {
-        if (!completion->model.empty()) call.model = completion->model;
-        call.input_tokens = completion->usage.input_tokens;
-        call.output_tokens = completion->usage.output_tokens;
-        call.cache_read_tokens = completion->usage.cache_read_tokens;
-        call.cache_write_tokens = completion->usage.cache_write_tokens;
-        call.stop = completion->stop_detail;
-        call.request_id = completion->request_id;
+        co_return std::nullopt;
     }
-    if (auto recorded = learner->store.add_llm_call(call); recorded.has_error())
-        log::error("cannot record model call: {}", recorded.error().message());
-    if (completion.has_error()) co_return std::nullopt;
-    co_return std::move(items);
+    co_return *std::move(items);
 }
 
 } // namespace

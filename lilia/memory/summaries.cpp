@@ -6,11 +6,10 @@
 
 #include <glaze/json.hpp>
 
-#include <lighter/async/runtime/timeout.h>
-
 #include <xmake/bin2obj/summary_md.hpp>
 #include <xmake/bin2obj/window_summary_md.hpp>
 
+#include <lilia/calls.h>
 #include <lilia/chat/context.h>
 #include <lilia/log.h>
 
@@ -41,12 +40,6 @@ provider::ToolDefinition record_summary_tool() {
                                         {"recall_cues", std::move(cues)}},
                          .required = {"summary", "recall_cues"}},
     };
-}
-
-/// with_timeout takes lighter's error type; hand the outcome through as a value.
-Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
-    auto outcome = co_await std::move(call);
-    co_return outcome;
 }
 
 constexpr std::chrono::seconds k_summary_deadline{90};
@@ -120,31 +113,14 @@ std::vector<std::string> summary_texts(const store::ChatSummary &summary) {
 Task<bool> Memory::write_summary(store::ChatKey chat, std::string_view kind, std::string_view prompt,
                                  std::vector<store::ChatSummary> previous, std::vector<store::StoredMessage> messages) {
     const auto request = build_summary_request(prompt, previous, display_text(messages, self_name, utc_offset_minutes));
-    std::vector<provider::OutputItem> items;
-    const provider::StreamCallbacks callbacks{.on_item_completed = [&items](const provider::OutputItem &item) { items.push_back(item); }};
-    const i64 started = now();
+    store::LlmCall call{.time = now(), .chat = chat, .model = summarizer_model};
     // Past the deadline the call counts as failed; a hang must not block indexing.
-    auto settled =
-        co_await lighter::with_timeout(settle((*summarizer)->complete(request.history, request.tools, callbacks)), k_summary_deadline);
-    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
-                                                Error::api("timeout", "summary call exceeded its deadline", "", true))) :
-                                            *std::move(settled);
-    store::LlmCall call{.time = started, .chat = chat, .model = summarizer_model};
-    if (completion.has_error()) {
-        call.error = completion.error().message();
-    } else {
-        call.input_tokens = completion->usage.input_tokens;
-        call.output_tokens = completion->usage.output_tokens;
-        call.cache_read_tokens = completion->usage.cache_read_tokens;
-        call.cache_write_tokens = completion->usage.cache_write_tokens;
-        call.request_id = completion->request_id;
-    }
-    std::ignore = store.add_llm_call(call);
-    if (completion.has_error()) {
+    const auto items = co_await call_recorded(*summarizer, request.history, request.tools, k_summary_deadline, store, call);
+    if (items.has_error()) {
         log::warn("memory: {} summary call failed: {}", kind, call.error);
         co_return false;
     }
-    const auto result = parse_summary(items);
+    const auto result = parse_summary(*items);
     if (!result) {
         log::warn("memory: the {} summary call did not use record_summary", kind);
         co_return false;

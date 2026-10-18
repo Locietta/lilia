@@ -17,6 +17,7 @@
 #include <lighter/async/runtime/timeout.h>
 #include <lighter/http/bound_client.h>
 
+#include <lilia/calls.h>
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
@@ -60,12 +61,6 @@ constexpr std::string_view k_vision_prompt =
     "用一两句中文描述这张图，像跟朋友转述一样简洁。是表情包的话说它表达的情绪或者梗；图上有文字就照写出来。不要用 Markdown，不要换行。";
 
 constexpr std::chrono::seconds k_vision_deadline{60};
-
-/// with_timeout takes lighter's error type; hand the outcome through as a value.
-Task<Result<provider::ProviderCallCompletion>> settle(lighter::Task<provider::ProviderCallCompletion, Error> call) {
-    auto outcome = co_await std::move(call);
-    co_return outcome;
-}
 
 /// Collapses whitespace and newlines and bounds the length.
 std::string one_line(std::string_view text) {
@@ -222,40 +217,17 @@ Task<std::string> describe(Archiver &archiver, const store::ChatKey &chat, const
     history.push_back({.role = provider::Role::USER,
                        .parts = {provider::ImagePart{.media_type = std::string(media_type), .data = net::base64_encode(bytes)},
                                  provider::TextPart{.text = std::string(k_vision_prompt)}}});
-    std::string text;
-    const provider::StreamCallbacks callbacks{
-        .on_item_completed =
-            [&text](const provider::OutputItem &item) {
-                if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
-                    for (const auto &part : message->parts) text += part.text;
-                }
-            },
-    };
-    const auto started = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    store::LlmCall call{.time =
+                            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(),
+                        .chat = chat,
+                        .model = archiver.vision_model};
     // A hung call must not hold an archive slot (and the turns waiting on it).
-    auto settled = co_await lighter::with_timeout(settle((*archiver.vision)->complete(history, {}, callbacks)), k_vision_deadline);
-    auto completion = settled.has_error() ? Result<provider::ProviderCallCompletion>(lighter::outcome_error(
-                                                Error::api("timeout", "image description exceeded its deadline", "", true))) :
-                                            *std::move(settled);
-
-    store::LlmCall call{.time = started, .chat = chat, .model = archiver.vision_model};
-    if (completion.has_error()) {
-        call.error = completion.error().message();
+    const auto items = co_await call_recorded(*archiver.vision, history, {}, k_vision_deadline, archiver.store, call);
+    if (items.has_error()) {
         log::warn("describing an image failed: {}", call.error);
-    } else {
-        if (!completion->model.empty()) call.model = completion->model;
-        call.input_tokens = completion->usage.input_tokens;
-        call.output_tokens = completion->usage.output_tokens;
-        call.cache_read_tokens = completion->usage.cache_read_tokens;
-        call.cache_write_tokens = completion->usage.cache_write_tokens;
-        call.stop = completion->stop_detail;
-        call.request_id = completion->request_id;
+        co_return std::string();
     }
-    if (auto recorded = archiver.store.add_llm_call(call); recorded.has_error()) {
-        log::error("cannot record model call: {}", recorded.error().message());
-    }
-    if (completion.has_error()) co_return std::string();
-    co_return one_line(text);
+    co_return one_line(answer_text(*items));
 }
 
 Task<std::string> archive_one(Archiver &archiver, const std::shared_ptr<onebot::Session> &session, const store::StoredMessage &message,
