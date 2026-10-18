@@ -347,7 +347,8 @@ std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &ch
                     const auto kept = newest();
                     if (kept.empty()) return *std::move(window);
                     state.pending_anchor = kept.front().row_id - 1;
-                    spawn(memory->summarize_window(chat, *state.pending_anchor, 2 * settings.context_messages));
+                    spawn(memory->summarize_window(chat, *state.pending_anchor, 2 * settings.context_messages,
+                                                   render_rounds(state.records, *state.pending_anchor)));
                 }
                 const auto through = store.last_summary_row(chat, store::k_window_summary);
                 const bool written = through.has_value() && *through >= *state.pending_anchor;

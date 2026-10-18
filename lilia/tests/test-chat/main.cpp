@@ -222,6 +222,11 @@ void test_planner() {
                 text_part(summarised[1].parts[0]).cache,
             "earlier summaries come before the lines: " + head);
 
+    // What she thought and did about the lines a trim drops goes to their summary.
+    require(chat::render_rounds(records, 103) == "- 看到 #103 时：c 在问新番，她在追，可以接一句 → 她回复了 #103。\n" &&
+                chat::render_rounds(records, 102).empty(),
+            "her rounds about the dropped lines, for the summary");
+
     // At a trim, rounds about lines no longer shown go; older turns keep their
     // calls and results but not their analyses.
     auto trimmed = records;

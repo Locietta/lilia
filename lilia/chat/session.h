@@ -66,6 +66,12 @@ provider::History render_session(std::string_view prompt, const ChatInfo &info, 
 /// analysis text (their tool calls and results stay).
 void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep_cycles);
 
+/// The rounds about lines up to `through_row`, for the window summary of
+/// those lines: "- 看到 #812 时：analysis → result；result" lines, cut short;
+/// empty when there are none. Only she knows them; the summary keeps what
+/// she meant and promised.
+std::string render_rounds(const std::deque<PlannerRecord> &records, i64 through_row);
+
 /// Which planner tools a chat offers.
 struct PlannerToolSet {
     bool memory = false;   ///< search_history

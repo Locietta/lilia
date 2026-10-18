@@ -85,8 +85,10 @@ struct SummaryResult {
     std::vector<std::string> cues;
 };
 
-/// `previous` (oldest first) are shown for context only.
-FactRequest build_summary_request(std::string_view prompt, const std::vector<store::ChatSummary> &previous, std::string_view lines);
+/// `previous` (oldest first) are shown for context only; `rounds` are her own
+/// thoughts and actions about the lines (chat::render_rounds), when given.
+FactRequest build_summary_request(std::string_view prompt, const std::vector<store::ChatSummary> &previous, std::string_view lines,
+                                  std::string_view rounds = {});
 
 /// Reads record_summary; nullopt when the tool was not called. An empty
 /// summary is a valid "nothing new" answer.
@@ -134,9 +136,10 @@ struct Memory {
 
     /// Before (or once) the planner's window of `chat` moves past
     /// `through_row`: one window summary of the lines up to it that no window
-    /// summary covers yet, at most the newest `span`. One runs per chat at a
-    /// time; a call meanwhile is done after it. Needs `summarizer`.
-    lighter::Task<> summarize_window(store::ChatKey chat, i64 through_row, usize span);
+    /// summary covers yet, at most the newest `span`, with `rounds`: what she
+    /// thought and did about them (chat::render_rounds). One runs per chat at
+    /// a time; a call meanwhile is done after it. Needs `summarizer`.
+    lighter::Task<> summarize_window(store::ChatKey chat, i64 through_row, usize span, std::string rounds = {});
 
     /// The newest `k_earlier_summaries` window summaries, oldest first, one
     /// "[MM-DD HH:MM 至 MM-DD HH:MM] summary" line each; empty when none.
@@ -155,16 +158,18 @@ struct Memory {
     /// Writes summaries; null leaves summarizing off.
     std::optional<provider::Provider> summarizer;
     std::string summarizer_model;
-    std::vector<store::ChatKey> indexing;   ///< chats with an index() running
-    std::vector<store::ChatKey> again;      ///< asked again while running
-    std::vector<store::ChatKey> windowing;  ///< chats with a summarize_window() running
-    std::map<store::ChatKey, i64> rewindow; ///< the row a call meanwhile asked for
+    std::vector<store::ChatKey> indexing;  ///< chats with an index() running
+    std::vector<store::ChatKey> again;     ///< asked again while running
+    std::vector<store::ChatKey> windowing; ///< chats with a summarize_window() running
+    /// What calls meanwhile asked for: the furthest row, their rounds.
+    std::map<store::ChatKey, std::pair<i64, std::string>> rewindow;
 
 private:
     /// One summary call over `messages` (oldest first, at least one), stored
     /// as `kind` and embedded; false when the call failed.
     lighter::Task<bool> write_summary(store::ChatKey chat, std::string_view kind, std::string_view prompt,
-                                      std::vector<store::ChatSummary> previous, std::vector<store::StoredMessage> messages);
+                                      std::vector<store::ChatSummary> previous, std::vector<store::StoredMessage> messages,
+                                      std::string rounds = {});
 
     /// Window summaries of `chat` with something in them, oldest first.
     std::vector<store::ChatSummary> window_summaries(const store::ChatKey &chat);

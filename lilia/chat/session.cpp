@@ -114,6 +114,29 @@ void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep
     std::erase_if(records, [](const PlannerRecord &record) { return record.output.empty(); });
 }
 
+std::string render_rounds(const std::deque<PlannerRecord> &records, i64 through_row) {
+    constexpr usize k_analysis_bytes = 300;
+    constexpr usize k_result_bytes = 120;
+    std::string out;
+    for (const auto &record : records) {
+        if (record.after_row > through_row) continue;
+        std::string analysis;
+        for (const auto &item : record.output) {
+            if (const auto *message = std::get_if<provider::AssistantMessageItem>(&item)) {
+                for (const auto &part : message->parts) analysis += part.text;
+            }
+        }
+        std::string results;
+        for (const auto &outcome : record.outcomes) {
+            results += (results.empty() ? "" : "；") + bounded_utf8(trim(outcome.receipt), k_result_bytes);
+        }
+        if (trim(analysis).empty() && results.empty()) continue;
+        out += std::format("- 看到 #{} 时：{}{}{}\n", record.after_row, bounded_utf8(trim(analysis), k_analysis_bytes),
+                           results.empty() ? "" : " → ", results);
+    }
+    return out;
+}
+
 std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
     std::vector<provider::ToolDefinition> tools;
     tools.push_back({

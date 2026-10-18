@@ -242,7 +242,12 @@ Task<> test_memory() {
     require(db->add_message({.chat = chat, .message_id = 7, .sender_id = 7, .sender_name = "阿紫", .time = 1006, .text = "周末去成都"})
                 .has_value(),
             "add message");
-    co_await memory.summarize_window(chat, 7, 4);
+    co_await memory.summarize_window(chat, 7, 4, "- 看到 #7 时：阿紫要去成都，问问她去几天\n");
+    std::string asked;
+    for (const auto &part : summarizer->requests.back().back().parts) {
+        if (const auto *text = std::get_if<provider::TextPart>(&part)) asked += text->text;
+    }
+    require(asked.contains("她当时的想法和做的事") && asked.contains("问问她去几天"), "her own rounds go to the summary: " + asked);
     auto windows = db->summaries(chat, 0, store::k_window_summary);
     require(windows->size() == 1 && windows->front().first_row == 4 && windows->front().last_row == 7,
             "the newest lines up to the anchor, at most the span");

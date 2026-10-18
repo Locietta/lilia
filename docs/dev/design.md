@@ -129,7 +129,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       the anchor is set, the lines up to it that no window summary covers (at
       most twice `context_messages`) are summarised whole
       (`prompts/window_summary.md`: threads, who thinks what, what was
-      settled, with recall cues). The newest 10 lead the planner's log, in
+      settled, with recall cues). Since 2026-10-19 the summariser also gets
+      her own rounds about those lines (`render_rounds`: analysis and
+      results), which only she knows, and keeps her stances and promises as
+      hers, so she can still stand by what she said once it scrolls out. The newest 10 lead the planner's log, in
       the cached part; older ones come back through recall. MaiBot shows
       none of them, only the one recalled (a cue above 0.8 against the last
       12 lines); showing the newest is lilia's choice.

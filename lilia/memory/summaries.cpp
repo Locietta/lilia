@@ -44,7 +44,8 @@ std::string local_time(i64 unix_seconds, i32 utc_offset_minutes) {
 
 } // namespace
 
-FactRequest build_summary_request(std::string_view prompt, const std::vector<store::ChatSummary> &previous, std::string_view lines) {
+FactRequest build_summary_request(std::string_view prompt, const std::vector<store::ChatSummary> &previous, std::string_view lines,
+                                  std::string_view rounds) {
     FactRequest request;
     provider::append_system(request.history, std::string(prompt));
     std::string user;
@@ -55,6 +56,7 @@ FactRequest build_summary_request(std::string_view prompt, const std::vector<sto
     if (!earlier.empty()) user += "以前的摘要（只用来理解上下文，别照抄）：\n" + earlier + "\n";
     user += "新的聊天记录：\n";
     user += lines;
+    if (!rounds.empty()) user += std::format("\n她当时的想法和做的事（只有她自己知道，群里看不到）：\n{}", rounds);
     provider::append_user(request.history, std::move(user));
     request.tools.push_back(record_summary_tool());
     return request;
@@ -105,8 +107,8 @@ std::vector<std::string> summary_texts(const store::ChatSummary &summary) {
 }
 
 Task<bool> Memory::write_summary(store::ChatKey chat, std::string_view kind, std::string_view prompt,
-                                 std::vector<store::ChatSummary> previous, std::vector<store::StoredMessage> messages) {
-    const auto request = build_summary_request(prompt, previous, display_text(messages, self_name, utc_offset_minutes));
+                                 std::vector<store::ChatSummary> previous, std::vector<store::StoredMessage> messages, std::string rounds) {
+    const auto request = build_summary_request(prompt, previous, display_text(messages, self_name, utc_offset_minutes), rounds);
     store::LlmCall call{.time = now(), .chat = chat, .model = summarizer_model};
     // Past the deadline the call counts as failed; a hang must not block indexing.
     const auto items = co_await call_recorded(*summarizer, request.history, request.tools, k_summary_deadline, store, call);
@@ -157,12 +159,13 @@ Task<> Memory::summarize(store::ChatKey chat) {
     }
 }
 
-Task<> Memory::summarize_window(store::ChatKey chat, i64 through_row, usize span) {
+Task<> Memory::summarize_window(store::ChatKey chat, i64 through_row, usize span, std::string rounds) {
     if (!summarizer) co_return;
     if (std::ranges::contains(windowing, chat)) {
         // The running one takes this on when it is done.
-        auto &queued = rewindow[chat];
-        queued = std::max(queued, through_row);
+        auto &[row, more] = rewindow[chat];
+        row = std::max(row, through_row);
+        more += rounds;
         co_return;
     }
     windowing.push_back(chat);
@@ -174,11 +177,13 @@ Task<> Memory::summarize_window(store::ChatKey chat, i64 through_row, usize span
         auto messages = store.messages_before(chat, through_row + 1, span);
         if (last.has_value() && messages.has_value()) {
             std::erase_if(*messages, [&](const store::StoredMessage &message) { return message.row_id <= *last; });
-            if (!messages->empty()) std::ignore = co_await write_summary(chat, store::k_window_summary, prompt, {}, *std::move(messages));
+            if (!messages->empty())
+                std::ignore = co_await write_summary(chat, store::k_window_summary, prompt, {}, *std::move(messages), std::move(rounds));
         }
         const auto queued = rewindow.find(chat);
         if (queued == rewindow.end()) break;
-        through_row = queued->second;
+        through_row = queued->second.first;
+        rounds = std::move(queued->second.second);
         rewindow.erase(queued);
     }
     std::erase(windowing, chat);
