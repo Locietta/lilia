@@ -68,7 +68,4 @@ struct Client {
     lighter::http::Client http_client;
 };
 
-/// Lists every page from the configured Anthropic-compatible Models API.
-lighter::Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options);
-
 } // namespace lilia::anthropic

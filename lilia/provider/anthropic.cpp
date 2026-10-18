@@ -137,17 +137,6 @@ struct MessageRequest {
     std::optional<CacheControl> cache_control;
 };
 
-struct Model {
-    std::string id;
-    std::string display_name;
-};
-
-struct ModelsResponse {
-    std::vector<Model> data;
-    bool has_more = false;
-    std::optional<std::string> last_id;
-};
-
 struct Usage {
     u64 input_tokens = 0;
     u64 output_tokens = 0;
@@ -1031,63 +1020,6 @@ Task<provider::ProviderCallCompletion, Error> Client::complete(const provider::H
     };
     co_return co_await provider::detail::complete_with_retry(attempts, body, callbacks, options.max_retries, options.initial_retry_delay)
         .or_fail();
-}
-
-Task<std::vector<provider::DiscoveredModel>, Error> list_models(ClientOptions options) {
-    while (!options.base_url.empty() && options.base_url.back() == '/') {
-        options.base_url.pop_back();
-    }
-
-    http::Client client;
-    std::vector<provider::DiscoveredModel> models;
-    std::optional<std::string> after_id;
-    do {
-        auto request = client.on().get(options.base_url + "/v1/models");
-        request.header("anthropic-version", "2023-06-01").query("limit", "1000");
-        if (after_id) {
-            request.query("after_id", *after_id);
-        }
-        if (!options.auth) {
-            co_await fail(Error::config("provider has no authentication resolver"));
-        }
-        auto auth = co_await options.auth().or_fail();
-        if (!auth.api_key.empty()) {
-            request.header("x-api-key", auth.api_key);
-        }
-        if (!auth.bearer_token.empty()) {
-            request.bearer_auth(auth.bearer_token);
-        }
-        for (const auto &header : auth.headers) {
-            request.header(header.name, header.value);
-        }
-
-        auto sent = co_await std::move(request).send();
-        if (!sent) {
-            co_await fail(Error::http(std::move(sent).error()));
-        }
-        if (!sent->ok()) {
-            auto request_id = std::string(sent->header_value("request-id").value_or(""));
-            co_await fail(Error::http_status(sent->status, {}, sent->text_copy(), std::move(request_id)));
-        }
-        auto response = parse_wire<wire::ModelsResponse>(sent->text(), "models response");
-        if (!response) {
-            co_await fail(std::move(response).error());
-        }
-        for (auto &entry : response->data) {
-            if (!entry.id.empty()) {
-                models.push_back({.id = std::move(entry.id), .name = std::move(entry.display_name)});
-            }
-        }
-        if (!response->has_more) {
-            break;
-        }
-        if (!response->last_id || response->last_id->empty() || response->last_id == after_id) {
-            co_await fail(Error::protocol("models response pagination did not advance"));
-        }
-        after_id = std::move(response->last_id);
-    } while (true);
-
-    co_return models;
 }
 
 } // namespace lilia::anthropic
