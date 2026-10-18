@@ -84,12 +84,20 @@ struct Harness {
     i64 clock = 1'791'032'700;
     i64 next_sent = 900;
     std::unique_ptr<chat::Responder> responder;
+    std::vector<std::unique_ptr<chat::Responder>> retired;
 
     explicit Harness(lighter::TaskGroup<> &tasks) : store(std::move(*store::Store::open_memory())) {
         config.chat.groups = {k_group};
         config.chat.typos.enabled = false;
         config.learning.enabled = false;
         config.model.web_search = false;
+        restart(tasks);
+    }
+
+    /// A new Responder on the same store, as after a restart.
+    void restart(lighter::TaskGroup<> &tasks) {
+        // Kept: tasks it spawned may still refer to it.
+        if (responder) retired.push_back(std::move(responder));
         responder = std::make_unique<chat::Responder>(config, store, test::fake_provider(planner), test::fake_provider(writer),
                                                       test::fake_provider(writer), "missing-persona.md",
                                                       [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
@@ -692,6 +700,37 @@ Task<> test_history_survives_many_turns() {
     co_await tasks.join();
 }
 
+/// After a restart her rounds about the lines still shown come back.
+Task<> test_rounds_survive_a_restart() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        std::string seen;
+        for (const auto &item : history) seen += text_of(item);
+        if (seen.contains("她回复了")) return analysed("说过了，等他考完", test::tool_call("stay_silent", R"({"reason":"等他回"})"));
+        if (seen.contains("考试")) {
+            const auto target = line_number(history, "考试");
+            return analysed("小明明天考试，祝他顺利，考完再问",
+                            test::tool_call("reply", R"({"target":")" + target + R"(","style":"short","intent":"祝他顺利"})"));
+        }
+        return analysed("闲聊", test::tool_call("stay_silent", R"({"reason":"闲聊"})"));
+    };
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("加油")};
+    };
+    std::ignore = h.say(1, 20001, "小明", {onebot::at_segment(k_self), onebot::text_segment(" 我明天考试")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent == std::vector<std::string>{"加油"}, "she answers before the restart");
+
+    h.restart(tasks);
+    std::ignore = h.say(2, 20002, "小红", {onebot::text_segment("今天好热")});
+    co_await h.responder->run_turn(k_chat);
+    std::string seen;
+    for (const auto &item : h.planner->requests.back()) seen += text_of(item);
+    require(seen.contains("小明明天考试，祝他顺利，考完再问") && seen.contains("重启前的记录") && seen.contains("等他考完"),
+            "what she thought and did before the restart is in her history:\n" + seen);
+    co_await tasks.join();
+}
 /// The window keeps the lines it would drop until their summary is stored.
 Task<> test_window_waits_for_its_summary() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
@@ -889,11 +928,26 @@ Task<> test_cross_group_frequent_terms() {
 
 int main() {
     try {
-        for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
-                           &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches,
-                           &test_pokes_and_repeats, &test_stickers, &test_several_calls_a_round, &test_planner_mistakes, &test_tool_limits,
-                           &test_private_chats, &test_no_pokes_in_private, &test_window_waits_for_its_summary,
-                           &test_expressions_picked_while_planning, &test_reply_style_long_and_jargon, &test_cross_group_frequent_terms}) {
+        for (auto *test : {&test_quotes_and_recalls,
+                           &test_mutes_and_notices,
+                           &test_the_planner_decides,
+                           &test_cacheable_prompts,
+                           &test_planner_rests,
+                           &test_conversations_go_on,
+                           &test_history_survives_many_turns,
+                           &test_the_planner_searches,
+                           &test_pokes_and_repeats,
+                           &test_stickers,
+                           &test_several_calls_a_round,
+                           &test_planner_mistakes,
+                           &test_tool_limits,
+                           &test_private_chats,
+                           &test_no_pokes_in_private,
+                           &test_window_waits_for_its_summary,
+                           &test_rounds_survive_a_restart,
+                           &test_expressions_picked_while_planning,
+                           &test_reply_style_long_and_jargon,
+                           &test_cross_group_frequent_terms}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

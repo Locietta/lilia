@@ -137,6 +137,47 @@ std::string render_rounds(const std::deque<PlannerRecord> &records, i64 through_
     return out;
 }
 
+std::deque<PlannerRecord> restore_records(const std::vector<store::PlannerTurn> &turns, const std::vector<store::StoredMessage> &rows,
+                                          i64 anchor_row) {
+    std::deque<PlannerRecord> records;
+    std::string calls;
+    std::string analysis;
+    const auto close = [&] {
+        if (records.empty()) return;
+        std::string text = analysis;
+        if (!calls.empty()) text += std::format("{}（重启前的记录。当时：{}）", text.empty() ? "" : "\n", calls);
+        if (!text.empty()) records.back().output.push_back(provider::AssistantMessageItem{.parts = {{.text = std::move(text)}}});
+        if (records.back().output.empty()) records.pop_back();
+        calls.clear();
+        analysis.clear();
+    };
+    u64 last_cycle = 0;
+    i64 last_round = -1;
+    u64 cycle = 0;
+    for (const auto &turn : turns) {
+        if (turn.shown_row <= anchor_row || rows.empty() || turn.shown_row > rows.back().row_id) continue;
+        if (records.empty() || turn.cycle != last_cycle || turn.round != last_round) {
+            close();
+            if (records.empty() || turn.cycle != last_cycle) ++cycle;
+            records.push_back({.after_row = turn.shown_row, .cycle = cycle});
+            analysis = turn.analysis;
+            last_cycle = turn.cycle;
+            last_round = turn.round;
+        }
+        if (turn.tool.empty()) continue;
+        std::string call = turn.tool;
+        if (const auto target = std::ranges::find(rows, turn.target_message_id, &store::StoredMessage::message_id);
+            turn.target_message_id != 0 && target != rows.end()) {
+            call += std::format(" #{}", target->row_id);
+        }
+        if (!turn.argument.empty()) call += std::format("（{}）", turn.argument);
+        if (turn.tool == "stay_silent" && !turn.reason.empty()) call += std::format("（{}）", turn.reason);
+        calls += (calls.empty() ? "" : "、") + call;
+    }
+    close();
+    return records;
+}
+
 std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
     std::vector<provider::ToolDefinition> tools;
     tools.push_back({

@@ -370,6 +370,14 @@ std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &ch
     // (The very first anchor has nothing to trim.)
     if (first) {
         state.log_anchor = recent.front().row_id - 1;
+        // After a restart her rounds about the shown lines come back from
+        // planner_turns, so she still knows why she said what she said.
+        if (state.records.empty()) {
+            if (auto turns = store.planner_turns(chat, recent.front().time); turns.has_value()) {
+                state.records = restore_records(*turns, recent, *state.log_anchor);
+                if (!state.records.empty()) state.cycles = std::max(state.cycles, state.records.back().cycle);
+            }
+        }
     } else {
         move_anchor(recent.front().row_id - 1);
     }

@@ -124,7 +124,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       the summary ends at (at 2.5× it moves anyway). Before, the summary was
       written after the move, so for a turn or two the dropped lines were
       neither shown nor summarised. After a restart the history is the
-      stored lines again.
+      stored lines again, with her rounds about them restored from
+      `planner_turns` (2026-10-19): each its analysis and a note of what it
+      did ("重启前的记录。当时：reply #812"), not the calls themselves.
+      Before, a deploy wiped why she had said what she said.
     - Window summaries (2026-10-12, after MaiBot's mid-term memory): whenever
       the anchor is set, the lines up to it that no window summary covers (at
       most twice `context_messages`) are summarised whole

@@ -227,6 +227,28 @@ void test_planner() {
                 chat::render_rounds(records, 102).empty(),
             "her rounds about the dropped lines, for the summary");
 
+    // After a restart her logged rounds about the shown lines come back.
+    const std::vector<store::PlannerTurn> logged{
+        {.cycle = 40, .round = 0, .shown_row = 101, .tool = "stay_silent", .analysis = "太早了", .reason = "闲聊"},
+        {.cycle = 41, .round = 0, .shown_row = 103, .tool = "reply", .target_message_id = 1030, .analysis = "c 在问新番"},
+        {.cycle = 41, .round = 0, .shown_row = 103, .tool = "find_sticker", .argument = "好耶", .analysis = "c 在问新番"},
+        {.cycle = 41, .round = 1, .shown_row = 104, .tool = "stay_silent", .analysis = "说完了", .reason = "等他回"},
+        {.cycle = 42, .round = 0, .shown_row = 105, .analysis = "不用接"},
+        {.cycle = 43, .round = 0, .shown_row = 900, .tool = "reply", .analysis = "后来的事"},
+    };
+    const auto restored = chat::restore_records(logged, rows, 102);
+    const auto restored_text = [&](usize i) {
+        const auto *message = std::get_if<provider::AssistantMessageItem>(&restored[i].output.front());
+        return message ? message->parts.front().text : std::string();
+    };
+    require(restored.size() == 3 && restored[0].after_row == 103 && restored[0].cycle == 1 && restored[1].cycle == 1 &&
+                restored[2].cycle == 2,
+            "rounds after the anchor and up to the newest line, one turn after another");
+    require(restored_text(0) == "c 在问新番\n（重启前的记录。当时：reply #103、find_sticker（好耶））" &&
+                restored_text(1) == "说完了\n（重启前的记录。当时：stay_silent（等他回））" && restored_text(2) == "不用接" &&
+                restored[0].outcomes.empty(),
+            "each its analysis with what it did, no calls: " + restored_text(0));
+
     // At a trim, rounds about lines no longer shown go; older turns keep their
     // calls and results but not their analyses.
     auto trimmed = records;

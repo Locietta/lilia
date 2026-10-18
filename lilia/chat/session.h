@@ -72,6 +72,13 @@ void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep
 /// she meant and promised.
 std::string render_rounds(const std::deque<PlannerRecord> &records, i64 through_row);
 
+/// After a restart: the logged rounds (planner_turns, oldest first) about
+/// `rows` (after `anchor_row`, up to the newest of them), as records again. Each is its analysis
+/// with what it did noted after it ("当时：reply #812"); the calls themselves
+/// are not restored. Turns are numbered 1, 2, ... in order.
+std::deque<PlannerRecord> restore_records(const std::vector<store::PlannerTurn> &turns, const std::vector<store::StoredMessage> &rows,
+                                          i64 anchor_row);
+
 /// Which planner tools a chat offers.
 struct PlannerToolSet {
     bool memory = false;   ///< search_history
