@@ -1,7 +1,6 @@
 #include "store.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <format>
 #include <utility>
@@ -21,25 +20,11 @@ namespace {
 // addressee_labels, reply_effects, addressee_models, feedback_progress). 17:
 // chat_summaries.kind (window summaries). 18: stickers.heat and heat_time
 // (decayed popularity). 19: addressee_labels.addressee (her, other, group,
-// self).
-constexpr int k_schema_version = 19;
-
-constexpr std::string_view k_expressions_table = R"sql(
-CREATE TABLE expressions (
-    id INTEGER PRIMARY KEY,
-    chat_type TEXT NOT NULL DEFAULT '',
-    chat_id INTEGER NOT NULL DEFAULT 0,
-    situation TEXT NOT NULL,
-    style TEXT NOT NULL,
-    situations TEXT NOT NULL DEFAULT '',
-    count INTEGER NOT NULL DEFAULT 1,
-    first_seen INTEGER NOT NULL,
-    last_active INTEGER NOT NULL,
-    checked INTEGER NOT NULL DEFAULT 0,
-    modified_by TEXT NOT NULL DEFAULT 'AI',
-    UNIQUE (chat_type, chat_id, style)
-);
-)sql";
+// self). 20: stickers.reward dropped (never written).
+constexpr int k_schema_version = 20;
+/// Older databases are not migrated any more (the live one was at 19 when
+/// the steps up to it went, 2026-10-19).
+constexpr int k_oldest_schema_version = 19;
 
 constexpr std::string_view k_schema = R"sql(
 CREATE TABLE IF NOT EXISTS messages (
@@ -92,6 +77,22 @@ CREATE TABLE IF NOT EXISTS media (
     UNIQUE (chat_type, chat_id, message_id, segment_index)
 );
 CREATE INDEX IF NOT EXISTS media_by_sha1 ON media (sha1);
+
+CREATE TABLE IF NOT EXISTS expressions (
+    id INTEGER PRIMARY KEY,
+    chat_type TEXT NOT NULL DEFAULT '',
+    chat_id INTEGER NOT NULL DEFAULT 0,
+    situation TEXT NOT NULL,
+    style TEXT NOT NULL,
+    situations TEXT NOT NULL DEFAULT '',
+    count INTEGER NOT NULL DEFAULT 1,
+    first_seen INTEGER NOT NULL,
+    last_active INTEGER NOT NULL,
+    checked INTEGER NOT NULL DEFAULT 0,
+    modified_by TEXT NOT NULL DEFAULT 'AI',
+    UNIQUE (chat_type, chat_id, style)
+);
+CREATE INDEX IF NOT EXISTS expressions_by_chat ON expressions (chat_type, chat_id);
 
 CREATE TABLE IF NOT EXISTS expression_reviews (
     id INTEGER PRIMARY KEY,
@@ -214,7 +215,6 @@ CREATE TABLE IF NOT EXISTS stickers (
     usage_count INTEGER NOT NULL DEFAULT 0,
     usage_inferred_count INTEGER NOT NULL DEFAULT 0,
     tags_by TEXT NOT NULL DEFAULT 'VISION',
-    reward REAL NOT NULL DEFAULT 0,
     heat REAL NOT NULL DEFAULT 0,
     heat_time INTEGER NOT NULL DEFAULT 0
 );
@@ -312,20 +312,6 @@ CREATE TABLE IF NOT EXISTS embeddings (
 ) WITHOUT ROWID;
 )sql";
 
-/// Columns that held vectors before schema 12, when embeddings moved to their
-/// own table.
-constexpr std::array<std::pair<std::string_view, std::string_view>, 9> k_vector_columns{{
-    {"memory_chunks", "model"},
-    {"memory_chunks", "vector"},
-    {"person_facts", "model"},
-    {"person_facts", "vector"},
-    {"chat_summaries", "model"},
-    {"chat_summaries", "vector"},
-    {"chat_summaries", "cue_vectors"},
-    {"expressions", "model"},
-    {"expressions", "vector"},
-}};
-
 Result<Store> initialize(Result<Database> opened, bool file_backed) {
     if (opened.has_error()) return lighter::outcome_error(std::move(opened).error());
     Store store{.database = std::move(*opened)};
@@ -337,7 +323,6 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
 
     i64 current = 0;
     {
-        // A statement left open blocks the DROP TABLE below.
         auto version = store.database.prepare("PRAGMA user_version");
         if (version.has_error()) return lighter::outcome_error(std::move(version).error());
         auto row = version->step();
@@ -347,106 +332,27 @@ Result<Store> initialize(Result<Database> opened, bool file_backed) {
     if (current > k_schema_version) {
         return lighter::outcome_error(Error::storage("database schema version " + std::to_string(current) + " is newer than this build"));
     }
+    if (current > 0 && current < k_oldest_schema_version) {
+        return lighter::outcome_error(Error::storage("database schema version " + std::to_string(current) +
+                                                     " is too old: open it once with a lilia from before 2026-10-19 to migrate it"));
+    }
 
     auto created = store.database.execute(k_schema);
     if (created.has_error()) return lighter::outcome_error(std::move(created).error());
-    // Version 9 rebuilt expressions (per chat, merged situations, review
-    // flags, embeddings); older rows become shared AI-made patterns. Decided
-    // by what the table looks like, not by the version number.
-    const auto count_of = [&store](std::string_view sql) -> Result<i64> {
-        auto statement = store.database.prepare(sql);
-        if (statement.has_error()) return lighter::outcome_error(std::move(statement).error());
-        auto row = statement->step();
+    // Schema 20 drops stickers.reward (rewards come from reply_effects).
+    bool stale = false;
+    {
+        // Closed before the ALTER TABLE, which an open statement would block.
+        auto reward = store.database.prepare("SELECT COUNT(*) FROM pragma_table_info('stickers') WHERE name = 'reward'");
+        if (reward.has_error()) return lighter::outcome_error(std::move(reward).error());
+        auto row = reward->step();
         if (row.has_error()) return lighter::outcome_error(std::move(row).error());
-        return *row ? statement->column_int(0) : 0;
-    };
-    auto table = count_of("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'expressions'");
-    if (table.has_error()) return lighter::outcome_error(std::move(table).error());
-    if (*table == 0) {
-        auto fresh = store.database.execute(std::string(k_expressions_table));
-        if (fresh.has_error()) return lighter::outcome_error(std::move(fresh).error());
-    } else {
-        auto rebuilt = count_of("SELECT COUNT(*) FROM pragma_table_info('expressions') WHERE name = 'chat_type'");
-        if (rebuilt.has_error()) return lighter::outcome_error(std::move(rebuilt).error());
-        if (*rebuilt == 0) {
-            auto migrated =
-                store.database.execute("BEGIN; ALTER TABLE expressions RENAME TO expressions_old;" + std::string(k_expressions_table) +
-                                       "INSERT INTO expressions (id, situation, style, situations, count, first_seen, last_active) "
-                                       "SELECT id, situation, style, situation, count, first_seen, last_active FROM expressions_old;"
-                                       "DROP TABLE expressions_old; COMMIT;");
-            if (migrated.has_error()) {
-                (void) store.database.execute("ROLLBACK");
-                return lighter::outcome_error(std::move(migrated).error());
-            }
+        stale = *row && reward->column_int(0) > 0;
+    }
+    if (stale) {
+        if (auto dropped = store.database.execute("ALTER TABLE stickers DROP COLUMN reward"); dropped.has_error()) {
+            return lighter::outcome_error(std::move(dropped).error());
         }
-    }
-    // Left behind by the first schema 9 build, whose DROP failed after the copy.
-    auto leftover = store.database.execute("DROP TABLE IF EXISTS expressions_old");
-    if (leftover.has_error()) return lighter::outcome_error(std::move(leftover).error());
-    auto indexed = store.database.execute("CREATE INDEX IF NOT EXISTS expressions_by_chat ON expressions (chat_type, chat_id)");
-    if (indexed.has_error()) return lighter::outcome_error(std::move(indexed).error());
-    // Schema 12 moved vectors into `embeddings` (re-embedded by the
-    // backfill). Chunks are rebuilt to gain their search text; summaries,
-    // facts and expressions keep their rows. Decided by the table's shape.
-    auto old_chunks = count_of("SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name = 'vector'");
-    if (old_chunks.has_error()) return lighter::outcome_error(std::move(old_chunks).error());
-    if (*old_chunks > 0) {
-        std::string sql = "BEGIN; DROP INDEX IF EXISTS memory_chunks_by_chat; DELETE FROM memory_chunks;";
-        for (const auto &[table_name, column] : k_vector_columns) {
-            auto present = count_of(std::format("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'", table_name, column));
-            if (present.has_error()) return lighter::outcome_error(std::move(present).error());
-            if (*present > 0) sql += std::format("ALTER TABLE {} DROP COLUMN {};", table_name, column);
-        }
-        sql += "ALTER TABLE memory_chunks ADD COLUMN search_text TEXT NOT NULL DEFAULT ''; COMMIT;";
-        if (auto migrated = store.database.execute(sql); migrated.has_error()) {
-            (void) store.database.execute("ROLLBACK");
-            return lighter::outcome_error(std::move(migrated).error());
-        }
-    }
-    // Columns added after their table, by shape: absent ones are added.
-    // stickers.reward is no longer written (rewards come from reply_effects).
-    const auto ensure_column = [&](std::string_view table_name, std::string_view column, std::string_view declaration) -> Result<void> {
-        auto present = count_of(std::format("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = '{}'", table_name, column));
-        if (present.has_error()) return lighter::outcome_error(std::move(present).error());
-        if (*present > 0) return {};
-        return store.database.execute(std::format("ALTER TABLE {} ADD COLUMN {} {}", table_name, column, declaration));
-    };
-    for (const auto &[column, declaration] : std::array<std::pair<std::string_view, std::string_view>, 6>{{
-             {"modified_by", "TEXT NOT NULL DEFAULT 'AI'"},
-             {"usage", "TEXT NOT NULL DEFAULT ''"},
-             {"usage_count", "INTEGER NOT NULL DEFAULT 0"},
-             {"usage_inferred_count", "INTEGER NOT NULL DEFAULT 0"},
-             {"tags_by", "TEXT NOT NULL DEFAULT 'VISION'"},
-             {"reward", "REAL NOT NULL DEFAULT 0"},
-         }}) {
-        if (auto added = ensure_column("stickers", column, declaration); added.has_error()) {
-            return lighter::outcome_error(std::move(added).error());
-        }
-    }
-    if (auto added = ensure_column("addressee_labels", "addressee", "TEXT NOT NULL DEFAULT ''"); added.has_error()) {
-        return lighter::outcome_error(std::move(added).error());
-    }
-    if (auto added = ensure_column("chat_summaries", "kind", "TEXT NOT NULL DEFAULT 'rolling'"); added.has_error()) {
-        return lighter::outcome_error(std::move(added).error());
-    }
-    // Schema 18: heat starts from the counts, as of the sticker's last sighting
-    // or send.
-    auto heated = count_of("SELECT COUNT(*) FROM pragma_table_info('stickers') WHERE name = 'heat'");
-    if (heated.has_error()) return lighter::outcome_error(std::move(heated).error());
-    if (*heated == 0) {
-        auto migrated =
-            store.database.execute("BEGIN; ALTER TABLE stickers ADD COLUMN heat REAL NOT NULL DEFAULT 0;"
-                                   "ALTER TABLE stickers ADD COLUMN heat_time INTEGER NOT NULL DEFAULT 0;"
-                                   "UPDATE stickers SET heat = seen + 2 * used, heat_time = max(last_seen, last_used); COMMIT;");
-        if (migrated.has_error()) {
-            (void) store.database.execute("ROLLBACK");
-            return lighter::outcome_error(std::move(migrated).error());
-        }
-    }
-    // The media table predates its description column in versions 2 and 3.
-    if (current == 2 || current == 3) {
-        auto added = store.database.execute("ALTER TABLE media ADD COLUMN description TEXT NOT NULL DEFAULT ''");
-        if (added.has_error()) return lighter::outcome_error(std::move(added).error());
     }
     auto stamped = store.database.execute("PRAGMA user_version = " + std::to_string(k_schema_version));
     if (stamped.has_error()) return lighter::outcome_error(std::move(stamped).error());

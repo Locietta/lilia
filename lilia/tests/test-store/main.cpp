@@ -98,88 +98,40 @@ void test_file_store() {
     std::filesystem::remove_all(dir, ec);
 }
 
-/// A schema 11 database (vectors in their tables) opened by this build.
+/// A schema 19 database becomes 20; anything older is refused.
 void test_migration() {
     const auto dir = std::filesystem::temp_directory_path() /
                      ("lilia-test-migrate-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     const auto path = dir / "lilia.db";
+    std::filesystem::create_directories(dir);
+    const auto count = [](store::Database &database, std::string_view sql) {
+        auto statement = database.prepare(sql);
+        require(statement.has_value() && *statement->step(), "query");
+        return statement->column_int(0);
+    };
     {
-        std::filesystem::create_directories(dir);
-        auto old = store::Database::open(path);
-        require(old.has_value(), "create");
-        require(old->execute(R"sql(
-CREATE TABLE memory_chunks (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL, chat_id INTEGER NOT NULL, first_row INTEGER NOT NULL,
-    last_row INTEGER NOT NULL, start_time INTEGER NOT NULL, end_time INTEGER NOT NULL, text TEXT NOT NULL, model TEXT NOT NULL,
-    vector BLOB NOT NULL);
-CREATE INDEX memory_chunks_by_chat ON memory_chunks (chat_type, chat_id, model, last_row);
-CREATE TABLE person_facts (id INTEGER PRIMARY KEY, person_id INTEGER NOT NULL, fact TEXT NOT NULL, quote TEXT NOT NULL,
-    chat_type TEXT NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, time INTEGER NOT NULL, model TEXT NOT NULL,
-    vector BLOB NOT NULL);
-CREATE TABLE chat_summaries (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL, chat_id INTEGER NOT NULL, first_row INTEGER NOT NULL,
-    last_row INTEGER NOT NULL, start_time INTEGER NOT NULL, end_time INTEGER NOT NULL, summary TEXT NOT NULL, cues TEXT NOT NULL,
-    model TEXT NOT NULL, vector BLOB NOT NULL, cue_vectors BLOB NOT NULL);
-CREATE TABLE expressions (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL DEFAULT '', chat_id INTEGER NOT NULL DEFAULT 0,
-    situation TEXT NOT NULL, style TEXT NOT NULL, situations TEXT NOT NULL DEFAULT '', count INTEGER NOT NULL DEFAULT 1,
-    first_seen INTEGER NOT NULL, last_active INTEGER NOT NULL, checked INTEGER NOT NULL DEFAULT 0,
-    modified_by TEXT NOT NULL DEFAULT 'AI', model TEXT NOT NULL DEFAULT '', vector BLOB NOT NULL DEFAULT x'',
-    UNIQUE (chat_type, chat_id, style));
-CREATE TABLE stickers (id INTEGER PRIMARY KEY, sha1 TEXT NOT NULL UNIQUE, path TEXT NOT NULL, media_type TEXT NOT NULL,
-    bytes INTEGER NOT NULL, description TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
-    seen INTEGER NOT NULL DEFAULT 1, used INTEGER NOT NULL DEFAULT 0, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
-    last_used INTEGER NOT NULL DEFAULT 0);
-INSERT INTO stickers (sha1, path, media_type, bytes, description, tags, status, seen, used, first_seen, last_seen, last_used)
-    VALUES ('s', 'stickers/s.gif', 'image/gif', 9, '猫', '无语', 'registered', 3, 2, 1, 50, 40);
-INSERT INTO stickers (sha1, path, media_type, bytes, status, seen, used, first_seen, last_seen, last_used)
-    VALUES ('t', 'stickers/t.png', 'image/png', 9, 'registered', 1, 1, 1, 50, 70);
-INSERT INTO memory_chunks VALUES (1, 'group', 1, 1, 2, 1, 2, 'x', 'm', x'00');
-INSERT INTO person_facts VALUES (1, 7, 'TA对芒果过敏', '芒果', 'group', 1, 1, 1, 'm', x'00');
-INSERT INTO chat_summaries VALUES (1, 'group', 1, 1, 2, 1, 2, '定了周六去成都', '聊到成都', 'm', x'00', x'00');
-INSERT INTO expressions (situation, style, first_seen, last_active, model, vector) VALUES ('觉得离谱', '用"笑死"', 1, 1, 'm', x'00');
-PRAGMA user_version = 11;
-)sql")
-                    .has_value(),
-                "a schema 11 database");
+        auto db = store::Store::open(path);
+        require(db.has_value(), "create");
+        require(db->add_sticker({.sha1 = "s", .path = "stickers/s.gif", .media_type = "image/gif", .status = "registered"}).has_value(),
+                "add a sticker");
+        require(
+            db->database.execute("ALTER TABLE stickers ADD COLUMN reward REAL NOT NULL DEFAULT 0; PRAGMA user_version = 19;").has_value(),
+            "back to schema 19");
     }
     {
         auto db = store::Store::open(path);
         require(db.has_value(), db ? std::string() : db.error().message());
-        const auto count = [&](std::string_view sql) {
-            auto statement = db->database.prepare(sql);
-            require(statement.has_value() && *statement->step(), "query");
-            return statement->column_int(0);
-        };
-        require(count("PRAGMA user_version") == 19, "now schema 19");
-        require(count("SELECT COUNT(*) FROM pragma_table_info('addressee_labels') WHERE name = 'addressee'") == 1,
-                "addressee labels say whom");
-        auto sticker = db->sticker_by_hash("s");
-        require(sticker.has_value() && *sticker && (*sticker)->modified_by == "AI" && (*sticker)->tags == "无语" &&
-                    (*sticker)->usage.empty() && (*sticker)->usage_count == 0 && (*sticker)->tags_by == "VISION",
-                "stickers gain modified_by (machine-made) and an empty usage");
-        require((*sticker)->heat == 7 && (*sticker)->heat_time == 50, "heat starts from seen + 2 * used, at the last sighting");
-        require((*db->sticker_by_hash("t"))->heat == 3 && (*db->sticker_by_hash("t"))->heat_time == 70, "or at her last send");
-        require(count("SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name IN ('model', 'vector')") == 0 &&
-                    count("SELECT COUNT(*) FROM pragma_table_info('chat_summaries') WHERE name IN ('model', 'vector', 'cue_vectors')") ==
-                        0 &&
-                    count("SELECT COUNT(*) FROM pragma_table_info('person_facts') WHERE name IN ('model', 'vector')") == 0 &&
-                    count("SELECT COUNT(*) FROM pragma_table_info('expressions') WHERE name IN ('model', 'vector')") == 0,
-                "the vector columns are gone");
-        require(db->chunks({.type = "group", .id = 1})->empty() && *db->last_chunk_row({.type = "group", .id = 1}) == 0,
-                "chunks are rebuilt with their search text");
-        require(db->facts(7, 0)->size() == 1 && db->all_summaries()->front().cues == "聊到成都" && db->expressions(0)->size() == 1,
-                "facts, summaries and expressions keep their rows");
-        require(db->all_summaries()->front().kind == store::k_rolling_summary && db->summaries({.type = "group", .id = 1}, 0)->size() == 1,
-                "old summaries are rolling ones");
-        require(db->add_embeddings("p", {{"h", "vvvv"}}).has_value() && db->embeddings("p", {"h", "x"})->size() == 1,
-                "the embeddings table");
+        require(count(db->database, "PRAGMA user_version") == 20 &&
+                    count(db->database, "SELECT COUNT(*) FROM pragma_table_info('stickers') WHERE name = 'reward'") == 0 &&
+                    *db->sticker_by_hash("s"),
+                "schema 20 drops stickers.reward and keeps the rows");
+        require(db->database.execute("PRAGMA user_version = 11").has_value(), "pretend schema 11");
     }
-    {
-        auto again = store::Store::open(path);
-        require(again.has_value(), "a migrated database opens again");
-    }
+    auto old = store::Store::open(path);
+    require(!old.has_value() && old.error().message().contains("too old"), "an older schema is refused");
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 }
-
 void set_env(const char *name, const char *value) {
 #ifdef _WIN32
     _putenv_s(name, value);

@@ -1,6 +1,4 @@
 #include <cstdio>
-#include <filesystem>
-#include <random>
 #include <string>
 
 #include <lilia/archive/archiver.h>
@@ -94,48 +92,6 @@ void test_descriptions() {
     require(db->recent_messages(chat, 1)->front().text == "[图片: 一只猫]", "the message text is replaced");
 }
 
-/// A database created by schema 3 gains media.description in place.
-void test_migration() {
-    const auto dir = std::filesystem::temp_directory_path() / ("lilia-test-migrate-" + std::to_string(std::random_device{}()));
-    std::filesystem::create_directories(dir);
-    const auto path = dir / "lilia.db";
-    {
-        auto old = store::Database::open(path);
-        require(old.has_value(), "open old");
-        require(old->execute("CREATE TABLE media (id INTEGER PRIMARY KEY, chat_type TEXT NOT NULL, chat_id INTEGER NOT NULL, "
-                             "message_id INTEGER NOT NULL, segment_index INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, "
-                             "sha1 TEXT NOT NULL, path TEXT NOT NULL, bytes INTEGER NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, "
-                             "error TEXT NOT NULL, time INTEGER NOT NULL, UNIQUE (chat_type, chat_id, message_id, segment_index)); "
-                             "INSERT INTO media VALUES (1, 'group', 7, 1, 0, 'image', 'stored', 'old', 'p', 1, '', '', '', 1); "
-                             "CREATE TABLE expressions (id INTEGER PRIMARY KEY, situation TEXT NOT NULL, style TEXT NOT NULL UNIQUE, "
-                             "count INTEGER NOT NULL DEFAULT 1, first_seen INTEGER NOT NULL, last_active INTEGER NOT NULL); "
-                             "INSERT INTO expressions VALUES (4, '觉得离谱', '用\"笑死\"', 3, 1, 2); "
-                             "PRAGMA user_version = 3;")
-                    .has_value(),
-                "old schema");
-    }
-    {
-        auto migrated = store::Store::open(path);
-        require(migrated.has_value(), migrated ? std::string() : migrated.error().message());
-        auto rows = migrated->message_media({.type = "group", .id = 7}, 1);
-        require(rows.has_value() && rows->size() == 1 && rows->front().sha1 == "old" && rows->front().description.empty(),
-                "old rows survive with an empty description");
-        auto patterns = migrated->expressions(0);
-        require(patterns.has_value() && patterns->size() == 1 && patterns->front().id == 4 && patterns->front().count == 3 &&
-                    patterns->front().situations == "觉得离谱" && patterns->front().chat.id == 0,
-                "old patterns become shared ones");
-        require(migrated->database.execute("CREATE TABLE expressions_old (id INTEGER)").has_value(), "a leftover table");
-    }
-    {
-        auto reopened = store::Store::open(path);
-        require(reopened.has_value(), reopened ? std::string() : reopened.error().message());
-        auto leftover = reopened->database.prepare("SELECT COUNT(*) FROM sqlite_master WHERE name = 'expressions_old'");
-        require(leftover.has_value() && *leftover->step() && leftover->column_int(0) == 0, "the leftover table is dropped");
-    }
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
-}
-
 void test_media_rows() {
     auto db = store::Store::open_memory();
     require(db.has_value(), "open");
@@ -168,7 +124,6 @@ int main() {
         test_paths();
         test_media_rows();
         test_descriptions();
-        test_migration();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);
