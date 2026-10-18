@@ -158,17 +158,29 @@ Task<> Memory::summarize(store::ChatKey chat) {
 }
 
 Task<> Memory::summarize_window(store::ChatKey chat, i64 through_row, usize span) {
-    if (!summarizer || std::ranges::contains(windowing, chat)) co_return;
-    auto last = store.last_summary_row(chat, store::k_window_summary);
-    // The newest `span` lines up to the anchor; older ones are not picked up.
-    auto messages = store.messages_before(chat, through_row + 1, span);
-    if (last.has_error() || messages.has_error()) co_return;
-    std::erase_if(*messages, [&](const store::StoredMessage &message) { return message.row_id <= *last; });
-    if (messages->empty()) co_return;
+    if (!summarizer) co_return;
+    if (std::ranges::contains(windowing, chat)) {
+        // The running one takes this on when it is done.
+        auto &queued = rewindow[chat];
+        queued = std::max(queued, through_row);
+        co_return;
+    }
     windowing.push_back(chat);
     const auto prompt = chat::fill_template(
         {reinterpret_cast<const char *>(xmake::window_summary_md.data()), xmake::window_summary_md.size()}, {{"name", self_name}});
-    std::ignore = co_await write_summary(chat, store::k_window_summary, prompt, {}, *std::move(messages));
+    for (;;) {
+        auto last = store.last_summary_row(chat, store::k_window_summary);
+        // The newest `span` lines up to the anchor; older ones are not picked up.
+        auto messages = store.messages_before(chat, through_row + 1, span);
+        if (last.has_value() && messages.has_value()) {
+            std::erase_if(*messages, [&](const store::StoredMessage &message) { return message.row_id <= *last; });
+            if (!messages->empty()) std::ignore = co_await write_summary(chat, store::k_window_summary, prompt, {}, *std::move(messages));
+        }
+        const auto queued = rewindow.find(chat);
+        if (queued == rewindow.end()) break;
+        through_row = queued->second;
+        rewindow.erase(queued);
+    }
     std::erase(windowing, chat);
 }
 

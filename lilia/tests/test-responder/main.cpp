@@ -692,6 +692,66 @@ Task<> test_history_survives_many_turns() {
     co_await tasks.join();
 }
 
+/// The window keeps the lines it would drop until their summary is stored.
+Task<> test_window_waits_for_its_summary() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.config.chat.context_messages = 4;
+    retrieval::Retriever retriever(h.config.memory, h.store);
+    retriever.backend = [](std::vector<std::string>, std::string) -> Task<Result<std::vector<retrieval::Vector>>> {
+        co_return lighter::outcome_error(Error::protocol("no embeddings here"));
+    };
+    memory::Memory memory(h.config.memory, "lilia", 480, h.store, retriever);
+    auto summarizer = std::make_shared<test::FakeProvider::State>();
+    bool fails = true;
+    summarizer->answer = [&fails](const provider::History &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (fails) return std::nullopt;
+        return std::vector{test::tool_call("record_summary", R"({"summary":"小明在数数","recall_cues":["数数"]})")};
+    };
+    memory.summarizer = test::fake_provider(summarizer);
+    h.responder->memory = &memory;
+    // Spawned work (indexing, summaries) runs when the test says so.
+    std::vector<Task<>> spawned;
+    h.responder->spawn = [&spawned](Task<> task) { spawned.push_back(std::move(task)); };
+    const auto drain = [&]() -> Task<> {
+        while (!spawned.empty()) {
+            auto task = std::move(spawned.back());
+            spawned.pop_back();
+            co_await std::move(task);
+        }
+    };
+    const auto rows = [&] {
+        std::vector<i64> out;
+        for (const auto &message : h.responder->log_window(k_chat)) out.push_back(message.row_id);
+        return out;
+    };
+    i64 said = 0; // a fresh database: row ids are the message ids
+    const auto say_up_to = [&](i64 last) {
+        while (said < last) std::ignore = h.say(++said, 20001, "小明", {onebot::text_segment(std::to_string(said))});
+    };
+    say_up_to(8);
+    require(rows() == std::vector<i64>({5, 6, 7, 8}), "the first window: the newest four");
+    co_await drain();
+    say_up_to(13);
+    // Past twice the window: the lines up to #9 are to be summarised; the
+    // summary fails, so they stay in view.
+    require(rows().size() == 9, "nothing is dropped before its summary");
+    co_await drain();
+    say_up_to(14);
+    require(rows().size() == 10 && h.responder->chats[k_chat].pending_anchor == 9, "still waiting, up to two and a half windows");
+    say_up_to(15);
+    require(rows() == std::vector<i64>({10, 11, 12, 13, 14, 15}), "past that, the window moves anyway, to where it meant to");
+
+    fails = false;
+    say_up_to(19);
+    require(rows().size() == 10 && h.responder->chats[k_chat].pending_anchor == 15, "the next move waits for its summary too");
+    co_await drain();
+    require(rows() == std::vector<i64>({16, 17, 18, 19}), "stored: the window moves to the summarised row");
+    require(*h.store.last_summary_row(k_chat, store::k_window_summary) == 15, "and the summary covers what it dropped");
+    co_await drain();
+    co_await tasks.join();
+}
+
 Task<> test_expressions_picked_while_planning() {
     lighter::TaskGroup<> tasks(lighter::EventLoop::current());
     Harness h(tasks);
@@ -832,8 +892,8 @@ int main() {
         for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
                            &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches,
                            &test_pokes_and_repeats, &test_stickers, &test_several_calls_a_round, &test_planner_mistakes, &test_tool_limits,
-                           &test_private_chats, &test_no_pokes_in_private, &test_expressions_picked_while_planning,
-                           &test_reply_style_long_and_jargon, &test_cross_group_frequent_terms}) {
+                           &test_private_chats, &test_no_pokes_in_private, &test_window_waits_for_its_summary,
+                           &test_expressions_picked_while_planning, &test_reply_style_long_and_jargon, &test_cross_group_frequent_terms}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

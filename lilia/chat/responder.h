@@ -129,6 +129,9 @@ struct Responder {
         /// The log turns show starts after this row (messages.id); nullopt:
         /// not set yet. See log_window().
         std::optional<i64> log_anchor;
+        /// Where the anchor moves once the window summary of the lines up to
+        /// it is stored; nullopt: no move waiting.
+        std::optional<i64> pending_anchor;
         /// Whom each shown row is said to, by row; a row's never change.
         std::map<i64, LineEdges> edges;
         /// Set when a message comes in; ends a planner wait in a private chat.
@@ -143,10 +146,13 @@ struct Responder {
 
     /// The chat log a turn shows, oldest first: everything after the chat's
     /// anchor. Between trims it only grows, so the prompts built on it share
-    /// a cacheable prefix (MaiBot's 2x-then-1x trimming); past twice
+    /// a cacheable prefix (MaiBot's 2x-then-1x trimming). Past twice
     /// `context_messages` or `context_bytes` the anchor moves to keep the
     /// newest `context_messages` within `context_bytes`, and what it passed
-    /// is summarised (memory::Memory::summarize_window).
+    /// is summarised (memory::Memory::summarize_window). With a summarizer
+    /// the summary comes first: the window keeps growing until it is stored
+    /// (at most 2.5x), so the dropped lines are never neither shown nor
+    /// summarised.
     std::vector<store::StoredMessage> log_window(const store::ChatKey &chat);
 
     const Config &config;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -131,10 +132,10 @@ struct Memory {
     /// are waiting (called by index()). Needs `summarizer`.
     lighter::Task<> summarize(store::ChatKey chat);
 
-    /// After the planner's window of `chat` moved past `through_row`: one
-    /// window summary of the lines up to it that no window summary covers
-    /// yet, at most the newest `span`. Skipped while one runs for the chat
-    /// (the next covers its lines). Needs `summarizer`.
+    /// Before (or once) the planner's window of `chat` moves past
+    /// `through_row`: one window summary of the lines up to it that no window
+    /// summary covers yet, at most the newest `span`. One runs per chat at a
+    /// time; a call meanwhile is done after it. Needs `summarizer`.
     lighter::Task<> summarize_window(store::ChatKey chat, i64 through_row, usize span);
 
     /// The newest `k_earlier_summaries` window summaries, oldest first, one
@@ -154,9 +155,10 @@ struct Memory {
     /// Writes summaries; null leaves summarizing off.
     std::optional<provider::Provider> summarizer;
     std::string summarizer_model;
-    std::vector<store::ChatKey> indexing;  ///< chats with an index() running
-    std::vector<store::ChatKey> again;     ///< asked again while running
-    std::vector<store::ChatKey> windowing; ///< chats with a summarize_window() running
+    std::vector<store::ChatKey> indexing;   ///< chats with an index() running
+    std::vector<store::ChatKey> again;      ///< asked again while running
+    std::vector<store::ChatKey> windowing;  ///< chats with a summarize_window() running
+    std::map<store::ChatKey, i64> rewindow; ///< the row a call meanwhile asked for
 
 private:
     /// One summary call over `messages` (oldest first, at least one), stored

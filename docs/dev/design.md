@@ -118,7 +118,12 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       never what anyone said (2026-10-13).
     - Past twice `context_messages` / `context_bytes` the anchor moves to
       keep 1×; rounds about lines no longer shown go, older turns keep their
-      calls but lose their analyses. After a restart the history is the
+      calls but lose their analyses. The lines it will drop are summarised
+      first (2026-10-19): the window keeps growing, still one cached prefix,
+      until their window summary is stored, and only then moves, to the row
+      the summary ends at (at 2.5× it moves anyway). Before, the summary was
+      written after the move, so for a turn or two the dropped lines were
+      neither shown nor summarised. After a restart the history is the
       stored lines again.
     - Window summaries (2026-10-12, after MaiBot's mid-term memory): whenever
       the anchor is set, the lines up to it that no window summary covers (at

@@ -309,36 +309,73 @@ std::vector<store::StoredMessage> Responder::log_window(const store::ChatKey &ch
     auto &state = chats[chat];
     const auto &settings = config.chat;
     const auto size = [](const store::StoredMessage &message) { return message.text.size() + message.sender_name.size() + 24; };
+    // The newest `context_messages` lines within `context_bytes`.
+    const auto newest = [&]() -> std::vector<store::StoredMessage> {
+        auto recent = store.recent_messages(chat, settings.context_messages);
+        if (!recent.has_value()) {
+            log::error("cannot read chat log: {}", recent.error().message());
+            return {};
+        }
+        usize bytes = 0;
+        usize kept = 0;
+        for (auto it = recent->rbegin(); it != recent->rend(); ++it, ++kept) {
+            if (kept > 0 && bytes + size(*it) > settings.context_bytes) break;
+            bytes += size(*it);
+        }
+        recent->erase(recent->begin(), recent->end() - static_cast<std::ptrdiff_t>(kept));
+        return *std::move(recent);
+    };
+    const bool summarizing = memory && memory->summarizer;
+    const auto move_anchor = [&](i64 anchor) {
+        // The planner's rounds about lines no longer shown go with them; older
+        // turns keep their calls and results but lose their analyses.
+        trim_records(state.records, anchor, k_kept_analyses);
+        state.log_anchor = anchor;
+        state.pending_anchor.reset();
+    };
     if (state.log_anchor) {
-        if (auto window = store.messages_after(chat, *state.log_anchor, 2 * settings.context_messages + 1); window.has_value()) {
+        // While the lines the window would drop are being summarised, it keeps
+        // showing them, up to this far: they are never neither shown nor summarised.
+        const usize most = summarizing ? 5 * settings.context_messages / 2 : 2 * settings.context_messages;
+        const usize most_bytes = summarizing ? 5 * settings.context_bytes / 2 : 2 * settings.context_bytes;
+        if (auto window = store.messages_after(chat, *state.log_anchor, most + 1); window.has_value()) {
             usize bytes = 0;
             for (const auto &message : *window) bytes += size(message);
             if (window->size() <= 2 * settings.context_messages && bytes <= 2 * settings.context_bytes) return *std::move(window);
+            if (summarizing) {
+                if (!state.pending_anchor) {
+                    const auto kept = newest();
+                    if (kept.empty()) return *std::move(window);
+                    state.pending_anchor = kept.front().row_id - 1;
+                    spawn(memory->summarize_window(chat, *state.pending_anchor, 2 * settings.context_messages));
+                }
+                const auto through = store.last_summary_row(chat, store::k_window_summary);
+                const bool written = through.has_value() && *through >= *state.pending_anchor;
+                if (!written && window->size() <= most && bytes <= most_bytes) return *std::move(window);
+                // Written (or too slow: the window cannot wait longer).
+                move_anchor(*state.pending_anchor);
+                if (auto shown = store.messages_after(chat, *state.log_anchor, most); shown.has_value() && !shown->empty()) {
+                    return *std::move(shown);
+                }
+            }
         }
     }
-    auto recent = store.recent_messages(chat, settings.context_messages);
-    if (!recent.has_value() || recent->empty()) {
-        if (recent.has_error()) log::error("cannot read chat log: {}", recent.error().message());
+    auto recent = newest();
+    if (recent.empty()) {
         state.log_anchor.reset();
         return {};
     }
-    usize bytes = 0;
-    usize kept = 0;
-    for (auto it = recent->rbegin(); it != recent->rend(); ++it, ++kept) {
-        if (kept > 0 && bytes + size(*it) > settings.context_bytes) break;
-        bytes += size(*it);
-    }
-    recent->erase(recent->begin(), recent->end() - static_cast<std::ptrdiff_t>(kept));
     const bool first = !state.log_anchor;
-    state.log_anchor = recent->front().row_id - 1;
-    // The planner's rounds about lines no longer shown go with them; older
-    // turns keep their calls and results but lose their analyses. (The very
-    // first anchor has nothing to trim.)
-    if (!first) trim_records(state.records, *state.log_anchor, k_kept_analyses);
+    // (The very first anchor has nothing to trim.)
+    if (first) {
+        state.log_anchor = recent.front().row_id - 1;
+    } else {
+        move_anchor(recent.front().row_id - 1);
+    }
     // What it no longer shows is summarised for it (after a restart too: the
     // lines before the first anchor may never have been).
     if (memory) spawn(memory->summarize_window(chat, *state.log_anchor, 2 * settings.context_messages));
-    return *std::move(recent);
+    return recent;
 }
 
 std::string Responder::self_name(const store::ChatKey &chat) const {
