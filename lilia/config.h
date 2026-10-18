@@ -80,10 +80,6 @@ struct ModelConfig {
     std::optional<double> writer_temperature;
     /// Describes images and stickers (on `base_url`); empty disables it.
     std::string vision_model = "deepseek-flash";
-    /// Send an animated GIF as one grid of its frames, for vision models that
-    /// read only the first frame. DeepSeek reads GIFs whole (2026-10-12: it
-    /// described motion without the grid, and the grid scored no better).
-    bool vision_gif_frames = false;
     /// A Claude planner's cache lives 5 minutes. While a chat stays quiet its
     /// last planner prompt is sent again every 4 minutes (one output token,
     /// read from the cache at a tenth of a write) for this long; 0: never.

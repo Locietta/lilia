@@ -19,7 +19,6 @@
 #include <lilia/archive/archiver.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
-#include <lilia/image/frames.h>
 #include <lilia/learn/learner.h>
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
@@ -487,21 +486,13 @@ Task<> Collector::collect(std::string url, std::string context, std::shared_ptr<
 
 Task<std::optional<Tagged>> Collector::describe(const store::Sticker &sticker, const std::string &bytes, std::string context) {
     if (!vision) co_return std::nullopt;
-    // For vision models that read only a GIF's first frame: a grid of frames.
-    const auto grid = frames && sticker.media_type == "image/gif" ? image::frame_grid(bytes) : std::nullopt;
     const auto text = chat::fill_template(
         prompt_override_or(prompt, {reinterpret_cast<const char *>(xmake::sticker_md.data()), xmake::sticker_md.size()}),
-        {{"frames", grid ?
-                        std::format("它是一个动图：这张图是从动图里按时间顺序抽出的 {} 帧，从左到右、从上到下排列，不是几张不同的表情包。",
-                                    grid->frames) :
-                        std::string()},
-         {"context", context.empty() ? std::string() : std::format("它是在这句话之后发的：「{}」（只帮你理解用法）。", context)}});
-    std::vector<provider::Part> parts;
-    parts.push_back(grid ? provider::ImagePart{.media_type = "image/jpeg", .data = net::base64_encode(grid->jpeg)} :
-                           provider::ImagePart{.media_type = sticker.media_type, .data = net::base64_encode(bytes)});
-    parts.push_back(provider::TextPart{.text = text});
+        {{"context", context.empty() ? std::string() : std::format("它是在这句话之后发的：「{}」（只帮你理解用法）。", context)}});
     provider::History history;
-    history.push_back({.role = provider::Role::USER, .parts = std::move(parts)});
+    history.push_back({.role = provider::Role::USER,
+                       .parts = {provider::ImagePart{.media_type = sticker.media_type, .data = net::base64_encode(bytes)},
+                                 provider::TextPart{.text = text}}});
     const auto items = co_await call_model(*this, *vision, vision_model, sticker.id, history, {}, "sticker tagging");
     if (!items) co_return std::nullopt;
     std::string answer;

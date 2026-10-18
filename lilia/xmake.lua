@@ -9,8 +9,6 @@ if is_os("windows") then
 else
     add_requires("sqlite3 >=3.51.3 <4")
 end
--- GIF frames for vision calls (image/frames.cpp)
-add_requires("stb", {system = false})
 
 target("lilia-core")
     set_kind("static")
@@ -22,9 +20,9 @@ target("lilia-core")
     add_files("data/jieba/*.txt")
     -- pypinyin readings, for chat/typos.cpp
     add_files("data/pinyin/*.txt")
-    add_files("config.cpp", "replay.cpp", "archive/*.cpp", "chat/*.cpp", "feedback/*.cpp", "image/*.cpp", "learn/*.cpp", "memory/*.cpp", "net/*.cpp", "onebot/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "retrieval/*.cpp", "sticker/*.cpp", "store/*.cpp", "tools/*.cpp")
+    add_files("config.cpp", "replay.cpp", "archive/*.cpp", "chat/*.cpp", "feedback/*.cpp","learn/*.cpp", "memory/*.cpp", "net/*.cpp", "onebot/*.cpp", "provider/*.cpp", "provider/detail/*.cpp", "retrieval/*.cpp", "sticker/*.cpp", "store/*.cpp", "tools/*.cpp")
     add_packages("lighter", {public = true})
-    add_packages("sqlite3", "stb")
+    add_packages("sqlite3")
     add_packages("ngcpp-proxy", {public = true})
 
 target("lilia")

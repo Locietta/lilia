@@ -26,8 +26,7 @@ namespace lilia::sticker {
 
 // Sticker learning, after MaiBot's emoji system: stickers posted in any group
 // the account is in are downloaded, deduplicated by content hash and counted;
-// a vision model describes and tags each (within an hourly budget; animated
-// ones as a grid of their frames for models that read only the first) and
+// a vision model describes and tags each (within an hourly budget) and
 // judges whether it is fit to send. Fit stickers fill a capped pool; once it
 // is full, a spare hotter than the coldest member by more than one sighting
 // takes its place (heat:
@@ -136,10 +135,8 @@ struct Collector {
     /// What `sticker` is used for, from its snippets, stored (helper model).
     lighter::Task<> infer_usage(store::Sticker sticker);
 
-    /// One vision call: the picture (an animated GIF as a grid of its frames
-    /// when `frames`)
-    /// and the tagging prompt; nullopt when the call fails or the answer is off
-    /// the format. Records the call.
+    /// One vision call: the picture and the tagging prompt; nullopt when the
+    /// call fails or the answer is off the format. Records the call.
     lighter::Task<std::optional<Tagged>> describe(const store::Sticker &sticker, const std::string &bytes, std::string context);
 
     /// Describes and tags `sticker` within the hourly and background budgets,
@@ -164,9 +161,7 @@ struct Collector {
     std::string vision_model;
     /// learning.daily_token_budget: background tokens in 24 h (0: no limit).
     u64 background_budget = 0;
-    /// GIFs as grids of their frames (model.vision_gif_frames), and for
-    /// experiments a tagging prompt in place of prompts/sticker.md.
-    bool frames = false;
+    /// For experiments, a tagging prompt in place of prompts/sticker.md.
     std::string prompt;
     /// Usage inference: the helper model, its prompt, her name for [SELF].
     std::optional<provider::Provider> helper;
