@@ -196,10 +196,10 @@ std::vector<store::ChatSummary> Memory::window_summaries(const store::ChatKey &c
     return *std::move(summaries);
 }
 
-std::string Memory::earlier(const store::ChatKey &chat) {
+std::string Memory::earlier(const store::ChatKey &chat, usize count) {
     const auto summaries = window_summaries(chat);
     std::string text;
-    for (usize i = summaries.size() > k_earlier_summaries ? summaries.size() - k_earlier_summaries : 0; i < summaries.size(); ++i) {
+    for (usize i = summaries.size() > count ? summaries.size() - count : 0; i < summaries.size(); ++i) {
         const auto &summary = summaries[i];
         text += std::format("[{} 至 {}] {}\n", local_time(summary.start_time, utc_offset_minutes),
                             local_time(summary.end_time, utc_offset_minutes), summary.summary);

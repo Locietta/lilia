@@ -243,7 +243,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
               std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - opened).count());
     // What the turn finds out reaches the writer as it is, not through the
     // planner's words.
-    Findings found{.remembered = notes.recall, .self_notes = notes.self_notes, .presence = notes.presence, .jargon = notes.jargon};
+    Findings found{.remembered = notes.recall,
+                   .earlier = memory ? memory->earlier(chat, 1) : std::string(),
+                   .self_notes = notes.self_notes,
+                   .presence = notes.presence,
+                   .jargon = notes.jargon};
 
     const auto row_of = [&rows](i64 message_id) -> i64 {
         const auto it = std::ranges::find(rows, message_id, &store::StoredMessage::message_id);

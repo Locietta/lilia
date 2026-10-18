@@ -155,7 +155,8 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     turns (her lines are assistant turns) plus the planner's style and
     intent ("#n" becomes the line it names), never its analysis: that is
     decision talk, and MaiBot stopped passing it on (2026-10-09, `908dfa6e`).
-    What the turn found reaches it as facts: the recalled summary, what
+    What the turn found reaches it as facts: the newest window summary (what
+    just scrolled out of its log, as background; 2026-10-19), the recalled summary, what
     `search_history` and `search_web` found, jargon reference notes
     (`Findings::jargon` -> `WriterInput::jargon`), what she knows about the
     person she answers and anyone `look_up_person` looked up. Then the

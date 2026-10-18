@@ -284,6 +284,10 @@ provider::History build_writer_history(const WriterInput &input) {
         note += std::format("\n【你以前说过的关于你自己的事，说话要和这些一致、别自相矛盾（同一件事以日期新的为准），不用特意提起】\n{}",
                             input.self_notes);
     }
+    if (!input.earlier.empty()) {
+        note += std::format("\n【刚才更早的聊天（已经不在上面的记录里，这是摘要；只是背景，好让你前后说的一致，别主动提）】\n{}",
+                            input.earlier);
+    }
     if (!input.remembered.empty()) {
         note += std::format("\n【你想起来的以前的聊天，用得上就自然地用，别照抄，也别说你查过记录】\n{}", input.remembered);
     }

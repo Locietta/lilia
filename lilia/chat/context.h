@@ -98,6 +98,8 @@ struct WriterInput {
     /// Older chat this turn brought back: the recalled summary and what
     /// search_history found.
     std::string remembered;
+    /// The newest window summary: what just scrolled out of the log above.
+    std::string earlier;
     /// The person she answers, then anyone the planner looked up this turn.
     std::vector<KnownPerson> known;
     /// What she has said about herself before ("- [MM-DD] 她……"), to stay

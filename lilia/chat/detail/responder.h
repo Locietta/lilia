@@ -110,6 +110,7 @@ struct Delivered {
 /// whatever the planner's intent mentions.
 struct Findings {
     std::string remembered; ///< the recalled summary and search_history hits
+    std::string earlier;    ///< the newest window summary: what just scrolled out
     std::string online;     ///< what search_web found
     /// Whom look_up_person looked up (QQ number) and what she knows of them.
     std::vector<std::pair<i64, KnownPerson>> people;

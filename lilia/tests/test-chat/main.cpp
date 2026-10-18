@@ -364,6 +364,20 @@ void test_writer() {
                 last.contains("【你要回应b的这条") && last.ends_with("现在，你说："),
             "where, when, the style and the note come last: " + last);
     require(last.find("说在追") != std::string::npos, "the intent reaches the writer");
+    require(!last.contains("刚才更早的聊天"), "no window summary, no section for it");
+    const auto with_earlier = text_of(chat::build_writer_history({
+                                                                     .persona = "PERSONA",
+                                                                     .rules = "RULES",
+                                                                     .info = group_info(),
+                                                                     .recent = {stored(205, t - 60, "b", "莉莉娅你追吗")},
+                                                                     .target = stored(205, t - 60, "b", "莉莉娅你追吗"),
+                                                                     .plan = {.reply = true, .target = 205, .intent = "说在追"},
+                                                                     .now = t,
+                                                                     .earlier = "[10-03 20:00 至 20:30] 她说过她不追新番",
+                                                                 })
+                                          .back());
+    require(with_earlier.contains("刚才更早的聊天") && with_earlier.contains("她说过她不追新番"),
+            "the writer knows what just scrolled out, to stay consistent");
     require(last.find("旁观者") == std::string::npos, "no analysis, no section for it");
 
     auto asked = stored(205, t - 60, "b", "莉莉娅你追吗，第三集作画崩成这样");

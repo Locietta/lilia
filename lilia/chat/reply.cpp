@@ -276,6 +276,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .jargon = found.jargon,
         .habits = habits,
         .remembered = std::move(found.remembered),
+        .earlier = std::move(found.earlier),
         .known = people,
         .self_notes = std::move(found.self_notes),
         .presence = std::move(found.presence),

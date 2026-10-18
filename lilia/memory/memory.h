@@ -141,9 +141,9 @@ struct Memory {
     /// a time; a call meanwhile is done after it. Needs `summarizer`.
     lighter::Task<> summarize_window(store::ChatKey chat, i64 through_row, usize span, std::string rounds = {});
 
-    /// The newest `k_earlier_summaries` window summaries, oldest first, one
+    /// The newest `count` window summaries, oldest first, one
     /// "[MM-DD HH:MM 至 MM-DD HH:MM] summary" line each; empty when none.
-    std::string earlier(const store::ChatKey &chat);
+    std::string earlier(const store::ChatKey &chat, usize count = k_earlier_summaries);
 
     /// A window summary whose cues match the last few messages of `log` well
     /// enough, among the older ones earlier() leaves out; empty when none does.
