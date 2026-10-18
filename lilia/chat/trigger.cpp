@@ -3,20 +3,13 @@
 #include <algorithm>
 
 #include <lilia/onebot/message.h>
+#include <lilia/text.h>
 
 namespace lilia::chat {
 
 namespace {
 
 char fold(char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; }
-
-std::string_view trim(std::string_view text) {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\n' || text.front() == '\r' || text.front() == '\t'))
-        text.remove_prefix(1);
-    while (!text.empty() && (text.back() == ' ' || text.back() == '\n' || text.back() == '\r' || text.back() == '\t'))
-        text.remove_suffix(1);
-    return text;
-}
 
 } // namespace
 

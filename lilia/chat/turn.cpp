@@ -24,6 +24,7 @@
 #include <lilia/chat/delivery.h>
 #include <lilia/learn/frequency.h>
 #include <lilia/log.h>
+#include <lilia/json.h>
 
 // A turn: the planner's rounds and what each tool call does.
 
@@ -71,14 +72,6 @@ std::optional<onebot::Segment> sticker_again(const store::StoredMessage &message
     onebot::Message segments;
     if (glz::read<onebot::k_read_opts>(segments, message.segments_json)) return std::nullopt;
     return sticker::resend_segment(segments);
-}
-
-/// A string argument of a tool call; empty when missing.
-std::string string_input(const glz::generic &input, std::string_view key) {
-    if (!input.is_object()) return {};
-    const auto &object = input.get_object();
-    const auto it = object.find(key);
-    return it != object.end() && it->second.is_string() ? it->second.get_string() : std::string();
 }
 
 std::string_view style_name(ReplyStyle style) {
@@ -391,7 +384,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             .available = offered.stickers,
             .limit = k_max_sticker_finds,
             .run = [&](const provider::ToolCall &call, Plan, i64) -> Task<Step> {
-                const auto feeling = string_input(call.input, "feeling");
+                const auto feeling = string_field(call.input, "feeling");
                 const auto candidates = co_await find_stickers(this, feeling);
                 log::info("{} looks for stickers for \"{}\": {} found", describe(chat), feeling, candidates.size());
                 co_return Step{.receipt = candidates.empty() ? std::string("没找到能发的表情包。") :
@@ -503,7 +496,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             .available = offered.memory,
             .limit = config.memory.max_searches,
             .run = [&](const provider::ToolCall &call, Plan, i64) -> Task<Step> {
-                const auto hits = co_await memory->search(chat, string_input(call.input, "query"));
+                const auto hits = co_await memory->search(chat, string_field(call.input, "query"));
                 const auto rendered = memory::render_hits(hits);
                 if (!hits.empty()) found.remembered += rendered;
                 co_return Step{.receipt = rendered};
@@ -536,7 +529,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             .available = offered.web,
             .limit = k_max_web_searches,
             .run = [&](const provider::ToolCall &call, Plan, i64) -> Task<Step> {
-                const auto online = co_await search_web(this, chat, info, string_input(call.input, "query"));
+                const auto online = co_await search_web(this, chat, info, string_field(call.input, "query"));
                 if (!online.empty()) found.online += (found.online.empty() ? "" : "\n") + online;
                 co_return Step{.receipt = online.empty() ? std::string("没查到。") : "查到的：" + online};
             },
@@ -657,9 +650,9 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                 continue;
             }
             auto parsed = parse_call(*call, rows);
-            auto what = string_input(call->input, "feeling");
-            if (what.empty()) what = string_input(call->input, "query");
-            if (what.empty()) what = string_input(call->input, "sticker");
+            auto what = string_field(call->input, "feeling");
+            if (what.empty()) what = string_field(call->input, "query");
+            if (what.empty()) what = string_field(call->input, "sticker");
             const i64 turn_id = log_turn(call->name, std::move(what), parsed ? *parsed : Plan{.reason = parsed.error()});
             const auto step = co_await act(*call, std::move(parsed), turn_id);
             record.outcomes.push_back({.call_id = call->id, .receipt = step.receipt});

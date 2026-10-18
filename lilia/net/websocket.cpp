@@ -10,6 +10,7 @@
 #include <lighter/async/runtime/sync.h>
 
 #include <lilia/net/codec.h>
+#include <lilia/text.h>
 
 namespace lilia::net {
 
@@ -39,12 +40,6 @@ bool known_opcode(u8 value) {
 bool equals_ignore_case(std::string_view a, std::string_view b) {
     return std::ranges::equal(
         a, b, [](char x, char y) { return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y)); });
-}
-
-std::string_view trim(std::string_view text) {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
-    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) text.remove_suffix(1);
-    return text;
 }
 
 /// True when the comma-separated header value lists `token` (case-insensitive).

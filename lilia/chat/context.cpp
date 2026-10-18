@@ -12,14 +12,6 @@ namespace lilia::chat {
 
 namespace {
 
-std::string_view trim(std::string_view text) {
-    constexpr std::string_view k_space = " \t\r\n";
-    const auto first = text.find_first_not_of(k_space);
-    if (first == std::string_view::npos) return {};
-    const auto last = text.find_last_not_of(k_space);
-    return text.substr(first, last - first + 1);
-}
-
 std::chrono::sys_seconds local_seconds(i64 unix_seconds, i32 utc_offset_minutes) {
     return std::chrono::sys_seconds(std::chrono::seconds(unix_seconds + i64{utc_offset_minutes} * 60));
 }

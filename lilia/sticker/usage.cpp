@@ -7,6 +7,7 @@
 
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
+#include <lilia/json.h>
 
 namespace lilia::sticker {
 
@@ -127,9 +128,7 @@ learn::LearnerRequest build_usage_request(std::string_view prompt, const store::
 std::optional<Usage> parse_usage(const std::vector<provider::OutputItem> &items) {
     const auto *input = learn::tool_input(items, "record_sticker_usage");
     if (!input) return std::nullopt;
-    Usage usage{.usage = learn::text_field(*input, "usage"),
-                .tags = learn::text_field(*input, "tags"),
-                .no_info = learn::bool_field(*input, "no_info")};
+    Usage usage{.usage = text_field(*input, "usage"), .tags = text_field(*input, "tags"), .no_info = bool_field(*input, "no_info")};
     if (usage.usage.empty()) usage.no_info = true;
     // At most five tags, separated the one way the pool uses.
     replace_all(usage.tags, "，", "、");

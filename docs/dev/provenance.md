@@ -38,6 +38,7 @@ Local changes since the copy:
 - `compact.{h,cpp}` and the `compact` convention of `ProviderFacade` were
   removed (2026-10-19): lilia keeps its own summaries and never compacts a
   transcript.
+- `text.h` gains `trim()`, shared by lilia's own files (2026-10-19).
 
 From liminal `main` at `d520ce6`, keeping the relative paths so fixes can be
 ported in either direction:

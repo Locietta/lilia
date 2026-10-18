@@ -23,6 +23,7 @@
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
+#include <lilia/text.h>
 
 namespace lilia::sticker {
 
@@ -39,13 +40,6 @@ constexpr usize k_recent_lines = 8;
 constexpr i64 k_recent_seconds = 600;
 /// A sighting whose sticker never got an id (not downloaded) is dropped.
 constexpr i64 k_unknown_sticker_seconds = 600;
-
-std::string_view trim(std::string_view text) {
-    constexpr std::string_view k_space = " \t\r\n";
-    const auto first = text.find_first_not_of(k_space);
-    if (first == std::string_view::npos) return {};
-    return text.substr(first, text.find_last_not_of(k_space) - first + 1);
-}
 
 /// The value after "key：" (or "key:") on one of `answer`'s lines.
 std::optional<std::string> line_value(std::string_view answer, std::string_view key) {

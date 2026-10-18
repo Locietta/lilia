@@ -7,37 +7,11 @@
 #include <set>
 #include <variant>
 
+#include <lilia/json.h>
+
 namespace lilia::chat {
 
 namespace {
-
-std::string_view trim(std::string_view text) {
-    constexpr std::string_view k_space = " \t\r\n";
-    const auto first = text.find_first_not_of(k_space);
-    if (first == std::string_view::npos) return {};
-    const auto last = text.find_last_not_of(k_space);
-    return text.substr(first, last - first + 1);
-}
-
-const glz::generic *field(const glz::generic &input, std::string_view key) {
-    if (!input.is_object()) return nullptr;
-    const auto &object = input.get_object();
-    const auto it = object.find(key);
-    return it == object.end() ? nullptr : &it->second;
-}
-
-std::string string_field(const glz::generic &input, std::string_view key) {
-    const auto *value = field(input, key);
-    return value && value->is_string() ? value->get_string() : std::string();
-}
-
-bool bool_field(const glz::generic &input, std::string_view key) {
-    const auto *value = field(input, key);
-    if (!value) return false;
-    if (value->is_boolean()) return value->get_boolean();
-    if (value->is_string()) return value->get_string() == "true";
-    return false;
-}
 
 /// "#18345", "18345" or "#18345 小明: ..." -> the row shown under that number.
 const store::StoredMessage *find_target(std::string_view text, const std::vector<store::StoredMessage> &rows) {

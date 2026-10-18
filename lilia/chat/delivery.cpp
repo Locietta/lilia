@@ -5,18 +5,11 @@
 #include <set>
 
 #include <lilia/learn/segment.h>
+#include <lilia/text.h>
 
 namespace lilia::chat {
 
 namespace {
-
-std::string_view trim(std::string_view text) {
-    constexpr std::string_view k_space = " \t\r\n";
-    const auto first = text.find_first_not_of(k_space);
-    if (first == std::string_view::npos) return {};
-    const auto last = text.find_last_not_of(k_space);
-    return text.substr(first, last - first + 1);
-}
 
 /// What is actually sent: no trailing comma, semicolon, period or space.
 std::string finish(std::string_view text) {

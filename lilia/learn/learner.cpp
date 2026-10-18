@@ -30,6 +30,7 @@
 #include <lilia/learn/segment.h>
 #include <lilia/log.h>
 #include <lilia/onebot/message.h>
+#include <lilia/json.h>
 
 namespace lilia::learn {
 
@@ -50,37 +51,7 @@ constexpr std::array<i64, 4> k_inference_thresholds{4, 8, 25, 100};
 constexpr i64 k_complete_count = 100;
 constexpr std::chrono::seconds k_call_deadline{90};
 
-std::string_view trim(std::string_view text) {
-    constexpr std::string_view k_space = " \t\r\n";
-    const auto first = text.find_first_not_of(k_space);
-    if (first == std::string_view::npos) return {};
-    const auto last = text.find_last_not_of(k_space);
-    return text.substr(first, last - first + 1);
-}
-
 } // namespace
-
-const glz::generic *field(const glz::generic &object, std::string_view key) {
-    if (!object.is_object()) return nullptr;
-    const auto &map = object.get_object();
-    const auto it = map.find(key);
-    return it == map.end() ? nullptr : &it->second;
-}
-
-std::string text_field(const glz::generic &object, std::string_view key) {
-    const auto *value = field(object, key);
-    if (!value) return {};
-    if (value->is_string()) return std::string(trim(value->get_string()));
-    if (value->is_number()) return std::to_string(static_cast<i64>(value->get_number()));
-    return {};
-}
-
-bool bool_field(const glz::generic &object, std::string_view key) {
-    const auto *value = field(object, key);
-    if (!value) return false;
-    if (value->is_boolean()) return value->get_boolean();
-    return value->is_string() && (value->get_string() == "true" || value->get_string() == "是");
-}
 
 namespace {
 

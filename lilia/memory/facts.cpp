@@ -9,6 +9,7 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/delivery.h>
 #include <lilia/log.h>
+#include <lilia/json.h>
 
 namespace lilia::memory {
 
@@ -28,21 +29,6 @@ std::string without_spaces(std::string_view text) {
         if (c != ' ' && c != '\t' && c != '\n' && c != '\r') out.push_back(c);
     }
     return out;
-}
-
-const glz::generic *field(const glz::generic &object, std::string_view key) {
-    if (!object.is_object()) return nullptr;
-    const auto &map = object.get_object();
-    const auto it = map.find(key);
-    return it == map.end() ? nullptr : &it->second;
-}
-
-std::string text_field(const glz::generic &object, std::string_view key) {
-    const auto *value = field(object, key);
-    if (!value) return {};
-    if (value->is_string()) return value->get_string();
-    if (value->is_number()) return std::to_string(static_cast<i64>(value->get_number()));
-    return {};
 }
 
 /// "TA 在成都。" -> "TA在成都": one spelling, so repeats are caught.

@@ -14,6 +14,7 @@
 #include <lilia/chat/context.h>
 #include <lilia/chat/session.h>
 #include <lilia/log.h>
+#include <lilia/json.h>
 
 namespace lilia::feedback {
 
@@ -137,21 +138,21 @@ std::optional<Hindsight> parse_hindsight(const std::vector<provider::OutputItem>
     for (const auto &[name, score] : k_stances) stances.push_back(name);
     std::vector<std::string_view> contributions;
     for (const auto &[name, score] : k_contributions) contributions.push_back(name);
-    if (const auto *lines = learn::field(*input, "lines"); lines && lines->is_array()) {
+    if (const auto *lines = field(*input, "lines"); lines && lines->is_array()) {
         for (const auto &entry : lines->get_array()) {
-            const i64 row = row_number(learn::field(entry, "row"));
-            if (row > 0) out.lines.push_back({.row = row, .to = one_of(learn::text_field(entry, "to"), k_addressees)});
+            const i64 row = row_number(field(entry, "row"));
+            if (row > 0) out.lines.push_back({.row = row, .to = one_of(text_field(entry, "to"), k_addressees)});
         }
     }
-    if (const auto *replies = learn::field(*input, "replies"); replies && replies->is_array()) {
+    if (const auto *replies = field(*input, "replies"); replies && replies->is_array()) {
         for (const auto &entry : replies->get_array()) {
-            const i64 row = row_number(learn::field(entry, "row"));
+            const i64 row = row_number(field(entry, "row"));
             if (row <= 0) continue;
             out.replies.push_back({.row = row,
-                                   .for_her = one_of(learn::text_field(entry, "for_her"), k_answers),
-                                   .answered_by_other = one_of(learn::text_field(entry, "answered_by_other"), k_answers),
-                                   .stance = one_of(learn::text_field(entry, "stance"), stances),
-                                   .contribution = one_of(learn::text_field(entry, "contribution"), contributions)});
+                                   .for_her = one_of(text_field(entry, "for_her"), k_answers),
+                                   .answered_by_other = one_of(text_field(entry, "answered_by_other"), k_answers),
+                                   .stance = one_of(text_field(entry, "stance"), stances),
+                                   .contribution = one_of(text_field(entry, "contribution"), contributions)});
         }
     }
     return out;

@@ -12,6 +12,7 @@
 #include <lilia/calls.h>
 #include <lilia/chat/context.h>
 #include <lilia/log.h>
+#include <lilia/json.h>
 
 namespace lilia::memory {
 
@@ -20,13 +21,6 @@ using lighter::Task;
 namespace {
 
 constexpr usize k_max_cues = 5;
-
-const glz::generic *field(const glz::generic &object, std::string_view key) {
-    if (!object.is_object()) return nullptr;
-    const auto &map = object.get_object();
-    const auto it = map.find(key);
-    return it == map.end() ? nullptr : &it->second;
-}
 
 provider::ToolDefinition record_summary_tool() {
     glz::generic cue_schema;
