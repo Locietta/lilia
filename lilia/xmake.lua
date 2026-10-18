@@ -1,6 +1,14 @@
 includes("xmake/rules/*.lua")
 
-add_requires("lighter 0.2.0", "ngcpp-proxy", "sqlite3 >=3.51.3 <4")
+add_requires("lighter 0.2.0", "ngcpp-proxy")
+if is_os("windows") then
+    -- sqlite3 links its shell too; it needs the startup-object path the root
+    -- xmake.lua gives our own targets.
+    add_requires("sqlite3 >=3.51.3 <4", {configs = {ldflags = "-B" .. path.join(os.getenv("CONDA_PREFIX") or "", "Library",
+        "x86_64-w64-mingw32", "sysroot", "usr", "lib") .. "/"}})
+else
+    add_requires("sqlite3 >=3.51.3 <4")
+end
 -- GIF frames for vision calls (image/frames.cpp)
 add_requires("stb", {system = false})
 
