@@ -278,6 +278,46 @@ Task<> test_memory() {
     fact.fact = "TA周末去成都";
     const bool added = co_await memory.remember(fact);
     require(added && db->facts(7, 0)->size() == 2, "a different fact");
+
+    // Person notes: private-chat fact isolation and contextual retrieval.
+    const store::ChatKey group_chat{.type = "group", .id = 9001};
+    const store::ChatKey private_a{.type = "private", .id = 10001};
+    const store::ChatKey private_b{.type = "private", .id = 10002};
+
+    require(db->add_fact({.person_id = 7, .fact = "TA在上海读大学", .quote = "上海", .chat = private_a, .time = 30}).has_value(),
+            "add private fact a");
+    require(db->add_fact({.person_id = 7, .fact = "TA的小号是12345", .quote = "12345", .chat = private_b, .time = 35}).has_value(),
+            "add private fact b");
+
+    const auto notes_group = co_await memory.person_notes(7, group_chat, "", 10);
+    require(!notes_group.contains("在上海读大学") && !notes_group.contains("小号是12345"), "private facts are hidden from group chat");
+    require(notes_group.contains("周末去成都") && notes_group.contains("吃芒果会过敏"), "group facts can be shown in any chat");
+
+    const auto notes_pa = co_await memory.person_notes(7, private_a, "", 10);
+    require(notes_pa.contains("在上海读大学") && !notes_pa.contains("小号是12345"),
+            "private chat A sees its own fact, but not chat B's fact");
+
+    const auto notes_pb = co_await memory.person_notes(7, private_b, "", 10);
+    require(!notes_pb.contains("在上海读大学") && notes_pb.contains("小号是12345"),
+            "private chat B sees its own fact, but not chat A's fact");
+
+    // Contextual retrieval when facts > limit
+    require(db->add_fact({.person_id = 8, .fact = "TA喜欢玩MC", .quote = "MC", .chat = group_chat, .time = 10}).has_value(), "fact 1");
+    require(db->add_fact({.person_id = 8, .fact = "TA养了一只猫", .quote = "猫", .chat = group_chat, .time = 20}).has_value(), "fact 2");
+    require(db->add_fact({.person_id = 8, .fact = "TA是程序员", .quote = "程序员", .chat = group_chat, .time = 30}).has_value(), "fact 3");
+    require(db->add_fact({.person_id = 8, .fact = "TA经常熬夜", .quote = "熬夜", .chat = group_chat, .time = 40}).has_value(), "fact 4");
+    require(db->add_fact({.person_id = 8, .fact = "TA爱喝可乐", .quote = "可乐", .chat = group_chat, .time = 50}).has_value(), "fact 5");
+
+    const auto notes_mc = co_await memory.person_notes(8, group_chat, "MC", 4);
+    require(notes_mc.contains("喜欢玩MC") && notes_mc.contains("爱喝可乐") && notes_mc.contains("经常熬夜") &&
+                notes_mc.contains("是程序员") && !notes_mc.contains("养了一只猫"),
+            "contextual retrieval keeps newest facts and picks relevant older fact: " + notes_mc);
+
+    const auto notes_empty_ctx = co_await memory.person_notes(8, group_chat, "", 3);
+    require(notes_empty_ctx == "爱喝可乐；经常熬夜；是程序员", "empty context falls back to newest facts: " + notes_empty_ctx);
+
+    require((co_await memory.person_notes(8, group_chat, "MC", 0)).empty(), "limit 0 returns empty");
+    require((co_await memory.person_notes(999, group_chat, "MC", 5)).empty(), "unknown person returns empty");
 }
 
 } // namespace

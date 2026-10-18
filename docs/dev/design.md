@@ -63,7 +63,9 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       The calls of a round run in order, as MaiBot runs them (2026-10-12): a
       reply and a sticker, or a look-up and a reply, take one round; `wait`
       and `stay_silent` end the round, and the calls after them are answered
-      as not run. In a private chat a new message ends a wait (MaiBot's).
+      as not run. In a private chat a new message ends a wait (MaiBot's); in
+      group chats a wait wakes early when someone @s or replies to her
+      (`state.flow.addressed`).
       Results are short ("她回复了 #n", "等了 N 秒", what a search found);
       her bubbles show up as her own lines. Side actions are its calls too:
       it is told that people are repeating a line or that someone poked her,
@@ -143,7 +145,8 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     intent ("#n" becomes the line it names), never its analysis: that is
     decision talk, and MaiBot stopped passing it on (2026-10-09, `908dfa6e`).
     What the turn found reaches it as facts: the recalled summary, what
-    `search_history` and `search_web` found, what she knows about the
+    `search_history` and `search_web` found, jargon reference notes
+    (`Findings::jargon` -> `WriterInput::jargon`), what she knows about the
     person she answers and anyone `look_up_person` looked up. Then the
     picked expressions. Everything else about how she talks lives in
     `writer.md`. Its answer passes one repair step (`repair_reply`, 2026-10-13):
@@ -169,7 +172,11 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       token, and a cache hit on 23k tokens is no faster than a miss, so what
       costs time is calls in a row, not tokens: the selector now runs beside
       the planner when she is called (below).
-    - A deliberate long reply goes out whole and untouched.
+    - A deliberate long reply (`ReplyStyle::LONG`) goes out whole and
+      untouched: it relaxes casual prose and punctuation rules, allows
+      concrete facts/dates from `search_web`, preserves CJK parenthetical
+      explanations (`keep_asides`), and skips casual expression habits
+      (`select_habits`).
     - The first message quotes only when the planner asks.
   - What the models see (2026-10-11). A quote is stored as part of the text
     ("[回复 小明: 前二十字…] 内容"). QQ faces render by name, cards by their
@@ -280,12 +287,15 @@ Model calls (2026-10-11):
    - Facts about people (done 2026-10-08), from the person she answers, each
      with a verbatim quote checked in code; never her own lines, jokes,
      rumours, or relationships inferred from sharing a group. Her own facts
-     from what she says about herself (2026-10-10).
-   - Next: per-person profiles.
+     from what she says about herself (2026-10-10). `Memory::person_notes`
+     (2026-10-17) isolates private-chat facts from groups, uses semantic
+     retrieval for older facts when a person has more than `facts_per_person`
+     facts, and replaces stale facts on update (`replace = true` on
+     `learn_facts` writeback).
    - Summaries of chat that scrolls out of context, with recall cues (done
      2026-10-12: window summaries, above). Recall's threshold was measured
      on the rolling summaries' cues; re-measure it on window summaries.
-   - Then: ranking by recency and use; private memories never reach groups.
+   - Then: ranking by recency and use.
 3. **lilia's own style.**
    - Expression learning (done 2026-10-07, `learn/`). Every group the
      account is in feeds an in-memory buffer; batches of 30 lines become
@@ -304,10 +314,13 @@ Model calls (2026-10-11):
      first round for the calling line, without the planner's intent, and a
      reply to that line uses its picks (about 2 s sooner). Jargon is mined
      from the same batches: each sighting keeps an anonymised ±3-line
-     snippet (at most 10 per term), and the meaning is inferred at 4, 8, 25
+     snippet (at most 10 per term), filtering out common `jieba` dictionary
+     words (`dictionary_frequency >= 500`) and pure numbers
+     (`ordinary_jargon_word`), and the meaning is inferred at 4, 8, 25
      and 100 sightings, with and without context; a term counts as slang
      only when the two readings differ. Known terms in the recent chat reach
-     the planner as notes. Not ported: clustering, and behaviour learning,
+     both the planner and the writer as reference notes (`Findings::jargon` ->
+     `WriterInput::jargon`). Not ported: clustering, and behaviour learning,
      which MaiBot itself removed on 2026-10-10.
    - High-frequency terms (2026-10-09). `learn/segment.*` ports jieba's
      default `cut` (dictionary DAG plus HMM, jieba's own data embedded);
@@ -394,12 +407,14 @@ Model calls (2026-10-11):
      rule in replay before adding it.
    - No anti-loop guard: MaiBot replaces an analysis over 90% like the
      previous one with a reflection prompt.
-   - People reach the planner only through `look_up_person`, as the newest 6
-     facts by date; a near-duplicate update keeps the stale fact. MaiBot
-     (with A_Memorix) shows sectioned profiles of up to 3 people per round.
+   - People reach the planner through `look_up_person` and the writer through
+     `Memory::person_notes` (resolved 2026-10-17: semantic retrieval of older
+     facts when over `facts_per_person`, near-duplicate updates replace stale
+     facts with `replace = true` on `learn_facts` writeback, and private-chat
+     facts are kept out of groups). MaiBot (with A_Memorix) shows sectioned
+     profiles of up to 3 people per round.
    - Smaller: she cannot @ anyone; quoting is opt-in, where MaiBot quotes
-     by default (its hint says for older targets); facts from private chats
-     are not kept out of groups.
+     by default (its hint says for older targets).
    - Wait for more data. Whether to speak is prose rate control (fit
      P(reply) under a budget, as MaiBot's dynamic mode, or a bandit on the
      hindsight reward); on 2026-10-13 there were 85 judged replies in 14

@@ -15,6 +15,7 @@
 
 #include <lilia/chat/delivery.h>
 #include <lilia/chat/typos.h>
+#include <lilia/learn/frequency.h>
 #include <lilia/log.h>
 
 // One reply: the writer's text, sent the way MaiBot sends it; expression
@@ -56,6 +57,26 @@ std::string speaker(const Responder *r, const store::StoredMessage &message) {
     return message.sender_name.empty() ? std::to_string(message.sender_id) : message.sender_name;
 }
 
+std::string_view quoted_phrase(std::string_view style) {
+    for (const auto [open, close] : {
+             std::pair{std::string_view("\""), std::string_view("\"")},
+             std::pair{std::string_view("“"), std::string_view("”")},
+             std::pair{std::string_view("「"), std::string_view("」")},
+             std::pair{std::string_view("『"), std::string_view("』")},
+             std::pair{std::string_view("‘"), std::string_view("’")},
+             std::pair{std::string_view("'"), std::string_view("'")},
+         }) {
+        const auto start = style.find(open);
+        if (start != std::string_view::npos) {
+            const auto end = style.find(close, start + open.size());
+            if (end != std::string_view::npos) {
+                return style.substr(start + open.size(), end - (start + open.size()));
+            }
+        }
+    }
+    return style;
+}
+
 } // namespace
 
 namespace detail {
@@ -71,8 +92,22 @@ Task<std::vector<std::string>> select_habits(Responder *r, store::ChatKey chat, 
     if (!learning.enabled) co_return std::vector<std::string>{};
     auto rows = r->store.expressions(0);
     if (rows.has_error()) co_return std::vector<std::string>{};
+    const auto frequent = r->store.frequent_terms(chat);
     std::erase_if(*rows, [&](const store::Expression &row) {
-        return (learning.checked_only && !row.checked) || !learn::shares(learning.expression_groups, chat.id, row.chat.id);
+        if (learning.checked_only && !row.checked) return true;
+        if (learn::shares(learning.expression_groups, chat.id, row.chat.id)) return false;
+        if (!learning.expression_groups.empty() && row.chat.type != "private" && chat.type != "private" && frequent.has_value()) {
+            const auto phrase = quoted_phrase(row.style);
+            const auto norm_phrase = learn::normalize_match_text(phrase);
+            const auto norm_style = learn::normalize_match_text(row.style);
+            if (std::ranges::any_of(*frequent, [&](const store::FrequentTerm &ft) {
+                    const auto norm_ft = learn::normalize_match_text(ft.term);
+                    return (!norm_phrase.empty() && norm_ft == norm_phrase) || norm_ft == norm_style;
+                })) {
+                return false;
+            }
+        }
+        return true;
     });
     if (rows->size() < k_min_candidates) co_return std::vector<std::string>{};
 
@@ -124,18 +159,24 @@ namespace {
 
 /// What she knows about the person she answers, then about anyone else the
 /// planner looked up this turn, for the writer.
-std::vector<KnownPerson> known_people(Responder *r, const store::StoredMessage &target,
-                                      const std::vector<std::pair<i64, KnownPerson>> &looked_up) {
+Task<std::vector<KnownPerson>> known_people(Responder *r, const store::ChatKey &chat, const store::StoredMessage &target,
+                                            const std::vector<store::StoredMessage> &log,
+                                            const std::vector<std::pair<i64, KnownPerson>> &looked_up) {
     std::vector<KnownPerson> known;
-    if (!r->memory || !r->config.memory.facts) return known;
+    if (!r->memory || !r->config.memory.facts) co_return known;
     if (!target.from_self && !is_notice(target)) {
-        auto facts = r->store.facts(target.sender_id, r->config.memory.facts_per_person);
-        if (facts.has_value() && !facts->empty()) known.push_back({.name = display_name(target), .facts = memory::render_facts(*facts)});
+        std::string context;
+        const usize count = std::min<usize>(log.size(), 5);
+        for (auto it = log.end() - static_cast<std::ptrdiff_t>(count); it != log.end(); ++it) {
+            context += it->text + "\n";
+        }
+        const auto facts = co_await r->memory->person_notes(target.sender_id, chat, std::move(context), r->config.memory.facts_per_person);
+        if (!facts.empty()) known.push_back({.name = display_name(target), .facts = facts});
     }
     for (const auto &[user, person] : looked_up) {
         if (user != target.sender_id || target.from_self) known.push_back(person);
     }
-    return known;
+    co_return known;
 }
 
 /// MaiBot's person-fact writeback: after she answers someone, learn stable
@@ -161,14 +202,16 @@ Task<> learn_facts(Responder *r, store::ChatKey chat, store::StoredMessage targe
     const auto facts = memory::parse_facts(*items, own);
     for (const auto &fact : facts) {
         const auto &source = own[fact.source];
-        std::ignore = co_await r->memory->remember({
-            .person_id = target.sender_id,
-            .fact = fact.fact,
-            .quote = fact.quote,
-            .chat = chat,
-            .message_id = source.message_id,
-            .time = source.time,
-        });
+        std::ignore = co_await r->memory->remember(
+            {
+                .person_id = target.sender_id,
+                .fact = fact.fact,
+                .quote = fact.quote,
+                .chat = chat,
+                .message_id = source.message_id,
+                .time = source.time,
+            },
+            true);
     }
 }
 
@@ -210,12 +253,15 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     auto &state = r->chats[chat];
     const auto &settings = r->config.chat;
     std::vector<std::string> habits;
-    if (found.habits && found.habits_for == plan.target) {
-        habits = *std::move(found.habits);
-    } else {
-        habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
+    if (plan.style != ReplyStyle::LONG) {
+        if (found.habits && found.habits_for == plan.target) {
+            habits = *std::move(found.habits);
+        } else {
+            habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
+        }
     }
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
+    const auto people = co_await known_people(r, chat, target, log_lines, found.people);
     const auto history = build_writer_history({
         .persona = r->persona,
         .rules = situated(r->writer_rules, chat, {}, embedded(xmake::writer_group_md), embedded(xmake::writer_private_md)),
@@ -227,9 +273,10 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .utc_offset_minutes = settings.utc_offset_minutes,
         .log_bytes = std::numeric_limits<usize>::max(), // log_window() bounds it
         .reference = std::move(found.online),
+        .jargon = found.jargon,
         .habits = habits,
         .remembered = std::move(found.remembered),
-        .known = known_people(r, target, found.people),
+        .known = people,
         .self_notes = std::move(found.self_notes),
         .presence = std::move(found.presence),
         .previous_reply = previous == state.replied.end() ? std::string() : previous->second,
@@ -242,6 +289,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
                            plan.style == ReplyStyle::NORMAL ? settings.normal_reply_chars :
                                                               settings.long_reply_chars,
         .kept_emoji = emoji_in(styles.has_value() ? *styles : std::vector<std::string>{}),
+        .keep_asides = plan.style == ReplyStyle::LONG,
     };
     // The writer, then its fallbacks while nothing usable comes back. Every
     // repair is logged by kind (never the text) so their rates can be read.
@@ -269,7 +317,9 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     // purpose (an explanation, a copypasta): one message, untouched.
     std::vector<Segment> segments;
     if (plan.style == ReplyStyle::LONG) {
-        for (auto &whole : whole_message(reply)) segments.push_back({.text = std::move(whole)});
+        if (auto clean = first_lines(reply, std::numeric_limits<usize>::max()); !clean.empty()) {
+            segments.push_back({.text = std::move(clean)});
+        }
     } else {
         // Every line, trimmed, blank ones dropped; no spaces around English
         // words, which the split would take for breaks.

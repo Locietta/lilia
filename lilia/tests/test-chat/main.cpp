@@ -382,6 +382,37 @@ void test_writer() {
     require(analysed.contains("b 说周六去成都") && analysed.contains("关于b的事") && analysed.contains("住在杭州") &&
                 analysed.contains("关于c的事") && analysed.contains("在学吉他"),
             "what the turn recalled and looked up reaches the writer as it is: " + analysed);
+
+    const auto long_writer = chat::build_writer_history({
+        .persona = "PERSONA",
+        .rules = "RULES",
+        .info = group_info(),
+        .recent = {stored(205, t - 60, "b", "莉莉娅你知道吗")},
+        .target = stored(205, t - 60, "b", "莉莉娅你知道吗"),
+        .plan = {.reply = true, .target = 205, .style = chat::ReplyStyle::LONG, .intent = "详细解释一下"},
+        .now = t,
+        .reference = "2026年10月新番共有50部",
+        .jargon = "1. xswl：笑死我了",
+    });
+    const auto long_note = text_of(long_writer.back());
+    require(long_note.contains("可以用里面的具体数字和日期") && long_note.contains("2026年10月新番共有50部"),
+            "long reply reference allows numbers and dates");
+    require(long_note.contains("群里常见黑话和梗：\n1. xswl：笑死我了"), "jargon notes are rendered in writer history");
+    require(long_note.contains("这次是在认真回答问题或解释事情"), "long style instruction is register-aware");
+
+    const auto short_writer = chat::build_writer_history({
+        .persona = "PERSONA",
+        .rules = "RULES",
+        .info = group_info(),
+        .recent = {stored(205, t - 60, "b", "莉莉娅你知道吗")},
+        .target = stored(205, t - 60, "b", "莉莉娅你知道吗"),
+        .plan = {.reply = true, .target = 205, .style = chat::ReplyStyle::SHORT, .intent = "说知道"},
+        .now = t,
+        .reference = "2026年10月新番共有50部",
+    });
+    const auto short_note = text_of(short_writer.back());
+    require(short_note.contains("不报数字、日期和来源") && short_note.contains("2026年10月新番共有50部"),
+            "short reply reference discourages numbers and dates");
 }
 
 void test_flow() {
@@ -634,6 +665,11 @@ void test_clean_reply() {
     require(repairs("@阿紫 芒果") == Kinds{"mention"}, "repair: mention");
     require(repairs("**在的**") == Kinds{"markdown"}, "repair: markdown");
     require(repairs("在的（笑）") == Kinds{"aside"}, "repair: aside");
+    require(repairs("在的（笑）", {.max_bytes = 1000, .max_code_points = 100, .keep_asides = false}) == Kinds{"aside"},
+            "repair: aside when keep_asides = false");
+    const auto kept_aside = chat::repair_reply("认真解释（这是背景）很清楚", recent, info, aliases,
+                                               {.max_bytes = 1000, .max_code_points = 100, .keep_asides = true});
+    require(kept_aside.text == "认真解释（这是背景）很清楚" && kept_aside.repairs.empty(), "CJK asides are kept when keep_asides = true");
     require(repairs(std::string(30, 'a'), {.max_bytes = 20, .max_code_points = 100}) == Kinds{"bytes"}, "repair: bytes");
     require(repairs("这集作画不错。剧情也推进了！", {.max_bytes = 1000, .max_code_points = 8}) == Kinds{"length"}, "repair: length");
     require(repairs("好耶😂") == Kinds{"emoji"}, "repair: emoji");

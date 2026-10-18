@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -387,6 +388,18 @@ LearnerRequest build_jargon_request(std::string_view prompt, const std::vector<L
     return request;
 }
 
+bool ordinary_jargon_word(std::string_view term) {
+    if (term.empty()) return true;
+    const bool all_ascii_punct_digit_space = std::ranges::all_of(term, [](char c) {
+        const auto u = static_cast<unsigned char>(c);
+        return u < 0x80 && (std::isdigit(u) || std::ispunct(u) || std::isspace(u));
+    });
+    if (all_ascii_punct_digit_space) return true;
+    if (dictionary_frequency(term) >= k_max_jargon_dict_frequency) return true;
+    if (const auto norm = normalize_match_text(term); dictionary_frequency(norm) >= k_max_jargon_dict_frequency) return true;
+    return false;
+}
+
 std::vector<Candidate> parse_jargon(const std::vector<provider::OutputItem> &items, const std::vector<Line> &lines,
                                     const std::vector<std::string> &names) {
     std::vector<Candidate> found;
@@ -402,6 +415,7 @@ std::vector<Candidate> parse_jargon(const std::vector<provider::OutputItem> &ite
         if (source == 0 || source > lines.size() || !occurs(lines[source - 1].text, content)) continue;
         if (contains(content, "群友") || contains(content, "SELF") || contains(content, "@")) continue;
         if (std::ranges::any_of(names, [&](const std::string &name) { return !name.empty() && contains(content, name); })) continue;
+        if (ordinary_jargon_word(content)) continue;
         if (std::ranges::contains(found, content, &Candidate::content)) continue;
         found.push_back({.content = std::move(content), .source = source - 1});
         if (found.size() == k_max_jargon_items) break;
@@ -412,7 +426,7 @@ std::vector<Candidate> parse_jargon(const std::vector<provider::OutputItem> &ite
 std::vector<Candidate> known_hits(const std::vector<Line> &lines, const std::vector<std::string> &terms) {
     std::vector<Candidate> hits;
     for (const auto &term : terms) {
-        if (chat::count_code_points(term) < k_min_jargon_code_points) continue;
+        if (chat::count_code_points(term) < k_min_jargon_code_points || ordinary_jargon_word(term)) continue;
         for (usize i = 0; i < lines.size(); ++i) {
             if (!lines[i].self && occurs(lines[i].text, term)) {
                 hits.push_back({.content = term, .source = i});
@@ -539,6 +553,7 @@ std::string jargon_reference(const std::vector<store::Jargon> &terms, const std:
     std::vector<std::pair<const store::Jargon *, std::string>> candidates;
     for (const auto &term : terms) {
         if (term.is_jargon != 1 || term.meaning.empty() || chat::count_code_points(term.content) < k_min_jargon_code_points) continue;
+        if (term.created_by != "MANUAL" && ordinary_jargon_word(term.content)) continue;
         if (auto key = normalize_match_text(term.content); !key.empty()) candidates.emplace_back(&term, std::move(key));
     }
     std::unordered_map<std::string, const store::FrequentTerm *> frequent_by_term;

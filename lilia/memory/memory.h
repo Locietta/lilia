@@ -122,6 +122,11 @@ struct Memory {
     /// first, each "- [MM-DD] 她……"; empty when there is none.
     lighter::Task<std::string> self_notes(i64 self_id, std::string context, usize limit);
 
+    /// Facts about `person_id` that can be shown in `chat` (private-chat facts stay
+    /// in their own private chat), up to `limit`: the newest few plus the closest
+    /// to `context` when there are more, rendered with render_facts().
+    lighter::Task<std::string> person_notes(i64 person_id, store::ChatKey chat, std::string context, usize limit);
+
     /// Summarizes the next `summary_messages` messages of `chat` if that many
     /// are waiting (called by index()). Needs `summarizer`.
     lighter::Task<> summarize(store::ChatKey chat);

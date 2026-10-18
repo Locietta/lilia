@@ -106,6 +106,14 @@ std::optional<std::vector<Rejected>> parse_review(const std::vector<provider::Ou
 
 LearnerRequest build_jargon_request(std::string_view prompt, const std::vector<Line> &lines, std::string_view self_name);
 
+/// Words in the jieba dictionary with frequency >= 500 are common everyday words.
+inline constexpr i64 k_max_jargon_dict_frequency = 500;
+
+/// Returns true if term is all ASCII digits/punctuation/spaces (e.g. "200"),
+/// or if dictionary_frequency(term) >= k_max_jargon_dict_frequency (checked
+/// for both term and normalize_match_text(term)).
+bool ordinary_jargon_word(std::string_view term);
+
 /// Reads record_jargon: 2-12 characters, a real line that contains the term,
 /// not a name; at most 30, deduplicated.
 std::vector<Candidate> parse_jargon(const std::vector<provider::OutputItem> &items, const std::vector<Line> &lines,

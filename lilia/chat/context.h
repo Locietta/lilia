@@ -96,6 +96,8 @@ struct WriterInput {
     usize log_bytes = 12'000;
     /// Facts from the search step; the writer picks one point from them.
     std::string reference;
+    /// Slang meanings for terms in recent lines.
+    std::string jargon;
     /// Learned patterns the selector picked for this reply, "当X时，可以Y".
     std::vector<std::string> habits;
     /// Older chat this turn brought back: the recalled summary and what
@@ -173,6 +175,7 @@ struct ReplyLimits {
     usize max_bytes = 0;
     usize max_code_points = 0;
     std::vector<char32_t> kept_emoji;
+    bool keep_asides = false;
 };
 
 /// A writer answer made fit to send, and what had to change: "transcript",

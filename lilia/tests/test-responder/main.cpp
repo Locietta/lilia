@@ -397,7 +397,8 @@ Task<> test_the_planner_searches() {
     require(second.contains("查到的：西湖区今天下午有小雨"), "it sees what it found before deciding");
     require(h.sent == std::vector<std::string>{"下午有点小雨"}, "then replies");
     const auto &writer = h.writer->requests.back();
-    require(text_of(writer.back()).contains("你刚去查过了，情况如下：西湖区今天下午有小雨"), "the writer knows what was found");
+    require(text_of(writer.back()).contains("下面是刚查到的资料") && text_of(writer.back()).contains("西湖区今天下午有小雨"),
+            "the writer knows what was found");
     co_await tasks.join();
 }
 
@@ -731,6 +732,99 @@ Task<> test_expressions_picked_while_planning() {
     co_await tasks.join();
 }
 
+Task<> test_reply_style_long_and_jargon() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    h.config.learning.enabled = true;
+    h.config.learning.jargon = true;
+    for (i64 i = 0; i < 6; ++i) std::ignore = h.store.learn_expression(k_chat, std::format("情景{}", i), std::format("说“草{}”", i), 1);
+    std::ignore = h.store.set_jargon_manual("T0", "最强一档", h.clock);
+
+    auto selector = std::make_shared<test::FakeProvider::State>();
+    selector->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::tool_call("select_expressions", R"({"ids":[1]})")};
+    };
+    h.responder->selector = test::fake_provider(selector);
+
+    learn::Learner learner(h.config.learning, h.config.chat.name, h.config.chat.aliases, h.store, test::fake_provider(selector),
+                           [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    h.responder->learner = &learner;
+
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
+        const auto target = line_number(history, "详细讲讲");
+        return std::vector{test::tool_call("reply", R"({"target":")" + target + R"(","style":"long","intent":"详细解释背景"})")};
+    };
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("\n\n事情是这样的（这是背景说明），需要注意两点。\n\n第一点是……\n\n第二点是……。\n\n")};
+    };
+
+    std::ignore = h.say(1, 20001, "小明", {onebot::text_segment("T0 是什么意思，详细讲讲")});
+    co_await h.responder->run_turn(k_chat);
+    require(h.sent == std::vector<std::string>{"事情是这样的（这是背景说明），需要注意两点。\n第一点是……\n第二点是……。"},
+            "long reply keeps CJK asides in parenthetical explanation, trims blank lines, and keeps trailing punctuation");
+    require(selector->requests.empty(), "select_habits was skipped for ReplyStyle::LONG");
+    require(!h.writer->requests.empty() && text_of(h.writer->requests.back().back()).contains("群里常见黑话和梗：\n"),
+            "jargon notes reached writer history");
+    require(text_of(h.writer->requests.back().back()).contains("T0：最强一档"), "specific jargon term reached writer history");
+    co_await tasks.join();
+}
+
+Task<> test_cross_group_frequent_terms() {
+    lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+    Harness h(tasks);
+    const store::ChatKey other_chat{.type = "group", .id = 9999};
+    h.config.learning.enabled = true;
+    h.config.learning.jargon = true;
+    h.config.learning.expression_groups = {{k_chat.id}};
+    h.config.learning.jargon_groups = {{k_chat.id}};
+
+    // Learn expressions in other_chat (not shared with k_chat by default)
+    for (i64 i = 0; i < 6; ++i) {
+        std::ignore = h.store.learn_expression(other_chat, std::format("情景{}", i), std::format("用“热词{}”", i), 1);
+    }
+    // But k_chat has "热词0" through "热词5" in frequent_terms
+    std::vector<store::TermTally> tallies;
+    for (i64 i = 0; i < 6; ++i) {
+        tallies.push_back({.term = std::format("热词{}", i), .count = 10, .message_count = 10});
+    }
+    std::ignore = h.store.merge_frequent_terms(k_chat, tallies, h.clock, 100);
+
+    // Also jargon in other_chat
+    auto jargon = h.store.add_jargon_hit("T0", other_chat, "这个T0太强了", h.clock, 5);
+    require(jargon.has_value(), "add jargon hit");
+    std::ignore = h.store.set_jargon_inference(jargon->id, "最强一档", 1, 4, false);
+    // And k_chat has lowercase "t0" in frequent_terms
+    std::ignore = h.store.merge_frequent_terms(k_chat, {{.term = "t0", .count = 10, .message_count = 10}}, h.clock, 100);
+
+    auto selector = std::make_shared<test::FakeProvider::State>();
+    selector->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::tool_call("select_expressions", R"({"ids":[1]})")};
+    };
+    h.responder->selector = test::fake_provider(selector);
+
+    learn::Learner learner(h.config.learning, h.config.chat.name, h.config.chat.aliases, h.store, test::fake_provider(selector),
+                           [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    h.responder->learner = &learner;
+
+    h.planner->answer = [](const provider::History &history, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        if (after_tool_result(history)) return std::vector{test::tool_call("stay_silent", R"({"reason":"说完了"})")};
+        const auto target = line_number(history, "你看这个");
+        return std::vector{test::tool_call("reply", R"({"target":")" + target + R"(","style":"short","intent":"接一句"})")};
+    };
+    h.writer->answer = [](const auto &, const auto &) -> std::optional<std::vector<provider::OutputItem>> {
+        return std::vector{test::text_answer("确实")};
+    };
+
+    std::ignore = h.say(1, 20001, "小明", {onebot::text_segment("T0 真的很强，你看这个")});
+    co_await h.responder->run_turn(k_chat);
+    require(!selector->requests.empty(), "expressions were selected because frequent_terms bridged the groups");
+    require(text_of(selector->requests.front().back()).contains("用“热词"), "frequent terms allowed expressions from other group");
+    require(!h.writer->requests.empty() && text_of(h.writer->requests.back().back()).contains("T0：最强一档"),
+            "cross-group jargon with lowercase frequent term was retained");
+    co_await tasks.join();
+}
+
 } // namespace
 
 int main() {
@@ -738,7 +832,8 @@ int main() {
         for (auto *test : {&test_quotes_and_recalls, &test_mutes_and_notices, &test_the_planner_decides, &test_cacheable_prompts,
                            &test_planner_rests, &test_conversations_go_on, &test_history_survives_many_turns, &test_the_planner_searches,
                            &test_pokes_and_repeats, &test_stickers, &test_several_calls_a_round, &test_planner_mistakes, &test_tool_limits,
-                           &test_private_chats, &test_no_pokes_in_private, &test_expressions_picked_while_planning}) {
+                           &test_private_chats, &test_no_pokes_in_private, &test_expressions_picked_while_planning,
+                           &test_reply_style_long_and_jargon, &test_cross_group_frequent_terms}) {
             lighter::EventLoop loop;
             auto task = test();
             loop.schedule(task);

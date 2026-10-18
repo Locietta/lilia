@@ -115,6 +115,7 @@ struct Findings {
     std::vector<std::pair<i64, KnownPerson>> people;
     std::string self_notes; ///< what she said about herself before
     std::string presence;   ///< just woke up, was busy, back online
+    std::string jargon;     ///< slang meanings for terms in recent lines
     /// Expressions picked for the line that called her while the planner
     /// decided; a reply to that line (`habits_for`) uses them.
     i64 habits_for = 0;

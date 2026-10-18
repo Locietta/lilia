@@ -195,6 +195,57 @@ void test_jargon() {
                                           {.content = "xswl", .meaning = "b", .is_jargon = 1, .count = 5}};
     require(learn::jargon_reference(even, later, {}, 10).find("1. xswl：b\n2. T0：a\n") != std::string::npos,
             "equal counts: the term seen earlier first");
+
+    // ordinary_jargon_word: dictionary frequency >= 500 or all digits/punct/spaces
+    require(learn::ordinary_jargon_word("系统"), "系统 is ordinary word");
+    require(learn::ordinary_jargon_word("环境"), "环境 is ordinary word");
+    require(learn::ordinary_jargon_word("展开"), "展开 is ordinary word");
+    require(learn::ordinary_jargon_word("少女"), "少女 is ordinary word");
+    require(learn::ordinary_jargon_word("额外"), "额外 is ordinary word");
+    require(learn::ordinary_jargon_word("健康"), "健康 is ordinary word");
+    require(learn::ordinary_jargon_word("解放"), "解放 is ordinary word");
+    require(learn::ordinary_jargon_word("大姐"), "大姐 is ordinary word");
+    require(learn::ordinary_jargon_word("区别"), "区别 is ordinary word");
+    require(learn::ordinary_jargon_word("200"), "200 is pure number");
+    require(learn::ordinary_jargon_word("  200  "), "200 with spaces is pure number");
+    require(!learn::ordinary_jargon_word("卡手"), "卡手 is slang");
+    require(!learn::ordinary_jargon_word("展开链"), "展开链 is slang");
+    require(!learn::ordinary_jargon_word("墓地指"), "墓地指 is slang");
+    require(!learn::ordinary_jargon_word("yyds"), "yyds is slang");
+    require(!learn::ordinary_jargon_word("绝绝子"), "绝绝子 is slang");
+
+    const std::vector<learn::Line> lines_with_common{
+        {.sender = 7, .text = "这个系统环境不太行，展开链直接卡手，抽了200抽"},
+    };
+    const auto jargon_filtered = learn::parse_jargon({tool_call("record_jargon", R"({"items": [
+            {"content": "系统", "source": "1"},
+            {"content": "环境", "source": "1"},
+            {"content": "200", "source": "1"},
+            {"content": "展开链", "source": "1"},
+            {"content": "卡手", "source": "1"}
+        ]})")},
+                                                     lines_with_common, k_names);
+    require(jargon_filtered.size() == 2 && jargon_filtered[0].content == "展开链" && jargon_filtered[1].content == "卡手",
+            "common dictionary words and pure numbers are filtered out from jargon candidates");
+
+    const auto common_hits = learn::known_hits(lines_with_common, {"系统", "环境", "200", "卡手", "展开链"});
+    require(common_hits.size() == 2 && common_hits[0].content == "卡手" && common_hits[1].content == "展开链",
+            "known_hits ignores common words and pure numbers");
+
+    const std::vector<store::Jargon> old_terms{
+        {.content = "系统", .meaning = "游戏机制", .is_jargon = 1, .count = 10, .created_by = "AI"},
+        {.content = "200", .meaning = "两百", .is_jargon = 1, .count = 10, .created_by = "AI"},
+        {.content = "卡手", .meaning = "起手牌不好", .is_jargon = 1, .count = 10, .created_by = "AI"},
+        {.content = "环境", .meaning = "当前主流卡组生态", .is_jargon = 1, .count = 10, .created_by = "MANUAL"},
+    };
+    const std::vector<store::StoredMessage> sample_log{
+        {.text = "这个系统在当前环境下很容易卡手 200"},
+    };
+    const auto ref = learn::jargon_reference(old_terms, sample_log, {}, 10);
+    require(ref.find("卡手：起手牌不好") != std::string::npos, "real slang included");
+    require(ref.find("环境：当前主流卡组生态") != std::string::npos, "MANUAL common word included");
+    require(ref.find("系统") == std::string::npos, "AI common word skipped");
+    require(ref.find("200") == std::string::npos, "AI number skipped");
 }
 
 void test_sharing() {

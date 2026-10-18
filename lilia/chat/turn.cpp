@@ -22,6 +22,7 @@
 #include <xmake/bin2obj/planner_private_md.hpp>
 
 #include <lilia/chat/delivery.h>
+#include <lilia/learn/frequency.h>
 #include <lilia/log.h>
 
 // A turn: the planner's rounds and what each tool call does.
@@ -98,14 +99,22 @@ std::string jargon_notes(Responder *r, const store::ChatKey &chat, const std::ve
     if (!r->learner || !r->config.learning.jargon) return {};
     auto terms = r->store.jargon_terms();
     if (terms.has_error()) return {};
+    auto frequent = r->store.frequent_terms(chat);
     if (!r->config.learning.jargon_groups.empty()) {
         std::erase_if(*terms, [&](const store::Jargon &term) {
+            if (term.created_by == "MANUAL") return false;
+            if (frequent.has_value()) {
+                const auto norm_term = learn::normalize_match_text(term.content);
+                if (std::ranges::any_of(*frequent,
+                                        [&](const store::FrequentTerm &ft) { return learn::normalize_match_text(ft.term) == norm_term; })) {
+                    return false;
+                }
+            }
             auto chats = r->store.jargon_chats(term.id);
-            return term.created_by != "MANUAL" && chats.has_value() &&
+            return chats.has_value() &&
                    std::ranges::none_of(*chats, [&](i64 id) { return learn::shares(r->config.learning.jargon_groups, chat.id, id); });
         });
     }
-    auto frequent = r->store.frequent_terms(chat);
     return learn::jargon_reference(*terms, log, frequent.has_value() ? *frequent : std::vector<store::FrequentTerm>{},
                                    r->config.learning.jargon_matches);
 }
@@ -243,7 +252,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
               std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - opened).count());
     // What the turn finds out reaches the writer as it is, not through the
     // planner's words.
-    Findings found{.remembered = notes.recall, .self_notes = notes.self_notes, .presence = notes.presence};
+    Findings found{.remembered = notes.recall, .self_notes = notes.self_notes, .presence = notes.presence, .jargon = notes.jargon};
 
     const auto row_of = [&rows](i64 message_id) -> i64 {
         const auto it = std::ranges::find(rows, message_id, &store::StoredMessage::message_id);
@@ -312,7 +321,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         addressed = std::exchange(state.flow.addressed, std::nullopt);
         named = std::exchange(state.flow.named, std::nullopt);
         co_await settle_images(arrived);
-        if (auto latest = log_window(chat); !latest.empty()) rows = std::move(latest);
+        if (auto latest = log_window(chat); !latest.empty()) {
+            rows = std::move(latest);
+            notes.jargon = jargon_notes(this, chat, rows);
+            found.jargon = notes.jargon;
+        }
         if (!arrived.empty()) newest = arrived.back().message_id;
     };
     const auto reply_to = [&](Plan plan) -> Task<Delivered> {
@@ -446,12 +459,27 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                     if (state.flow.unseen.empty())
                         std::ignore = co_await lighter::with_timeout(arrival->wait(), std::chrono::seconds(plan.wait));
                 } else if (realtime) {
-                    co_await lighter::sleep(std::chrono::seconds(plan.wait));
+                    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(plan.wait);
+                    auto arrival = state.arrival;
+                    while (!state.flow.addressed) {
+                        arrival->reset();
+                        if (state.flow.addressed) break;
+                        const auto remaining =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+                        if (remaining <= std::chrono::milliseconds::zero()) break;
+                        auto arrived = co_await lighter::with_timeout(arrival->wait(), remaining);
+                        if (!arrived.has_value()) break;
+                    }
                 }
-                co_return Step{.receipt = state.flow.unseen.empty() || chat.type != "private" ?
-                                              std::format("等了 {} 秒。", now() - before) :
-                                              std::format("等了 {} 秒，对方发来了新消息。", now() - before),
-                               .next = Next::PAUSE};
+                std::string receipt;
+                if (chat.type == "private" && !state.flow.unseen.empty()) {
+                    receipt = std::format("等了 {} 秒，对方发来了新消息。", now() - before);
+                } else if (chat.type == "group" && state.flow.addressed) {
+                    receipt = std::format("等了 {} 秒，有人叫了她。", now() - before);
+                } else {
+                    receipt = std::format("等了 {} 秒。", now() - before);
+                }
+                co_return Step{.receipt = std::move(receipt), .next = Next::PAUSE};
             },
         },
         ToolHandler{
@@ -492,10 +520,14 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             .run = [&](const provider::ToolCall &, Plan plan, i64) -> Task<Step> {
                 const i64 user = author_of(plan.target);
                 if (user == 0) co_return Step{.receipt = "这条找不到是谁发的。"};
+                if (!memory) co_return Step{.receipt = "现在用不了 look_up_person。"};
                 const auto name = person(this, chat, user);
-                auto known = store.facts(user, config.memory.facts_per_person);
-                if (!known.has_value() || known->empty()) co_return Step{.receipt = std::format("她对{}还没记下什么。", name)};
-                const auto rendered = memory::render_facts(*known);
+                std::string context;
+                for (auto it = rows.end() - static_cast<std::ptrdiff_t>(std::min<usize>(rows.size(), k_self_context)); it != rows.end();
+                     ++it)
+                    context += it->text + "\n";
+                const auto rendered = co_await memory->person_notes(user, chat, std::move(context), config.memory.facts_per_person);
+                if (rendered.empty()) co_return Step{.receipt = std::format("她对{}还没记下什么。", name)};
                 if (!std::ranges::contains(found.people, user, &std::pair<i64, KnownPerson>::first))
                     found.people.push_back({user, {.name = name, .facts = rendered}});
                 co_return Step{.receipt = std::format("她记得的关于{}的事：{}", name, rendered)};

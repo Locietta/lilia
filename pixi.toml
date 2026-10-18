@@ -34,7 +34,7 @@ ruff = "==0.16.1"
 prettier = "==3.9.3"
 taplo = "==0.10.0"
 pytest = ">=8"
-websockets = ">=15" # fake OneBot server in integration tests
+websockets = ">=15"       # fake OneBot server in integration tests
 # C dependencies. These are C ABI only, so the MSVC-built Windows builds link
 # fine from GCC; see lighter/xmake.lua for the libuv import-library caveat.
 libuv = ">=1.52.1,<2"

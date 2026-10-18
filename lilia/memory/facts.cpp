@@ -178,4 +178,39 @@ Task<std::string> Memory::self_notes(i64 self_id, std::string context, usize lim
     co_return notes;
 }
 
+Task<std::string> Memory::person_notes(i64 person_id, store::ChatKey chat, std::string context, usize limit) {
+    auto facts = store.facts(person_id, 0); // newest first
+    if (facts.has_error() || facts->empty() || limit == 0) co_return std::string();
+
+    std::erase_if(*facts, [&](const store::PersonFact &fact) { return fact.chat.type == "private" && fact.chat != chat; });
+    if (facts->empty()) co_return std::string();
+
+    if (facts->size() <= limit || context.empty()) {
+        if (facts->size() > limit) facts->resize(limit);
+        co_return render_facts(*facts);
+    }
+
+    const usize newest = std::min<usize>(k_newest_self_facts, limit);
+    std::vector<usize> picked;
+    picked.reserve(limit);
+    for (usize i = 0; i < newest; ++i) picked.push_back(i);
+
+    std::vector<retrieval::Document> documents;
+    documents.reserve(facts->size());
+    for (const auto &fact : *facts) documents.push_back({.id = fact.id, .texts = {fact.fact}});
+    const auto matches = co_await retriever.search(retrieval::k_self_task, std::move(context), documents, {.top_k = limit});
+    for (const auto &match : matches) {
+        if (picked.size() >= limit) break;
+        if (!std::ranges::contains(picked, match.index)) picked.push_back(match.index);
+    }
+    for (usize i = 0; picked.size() < limit && i < facts->size(); ++i) {
+        if (!std::ranges::contains(picked, i)) picked.push_back(i);
+    }
+    std::ranges::sort(picked);
+    std::vector<store::PersonFact> selected;
+    selected.reserve(picked.size());
+    for (const auto i : picked) selected.push_back((*facts)[i]);
+    co_return render_facts(selected);
+}
+
 } // namespace lilia::memory
