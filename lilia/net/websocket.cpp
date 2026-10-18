@@ -388,26 +388,11 @@ Task<WsMessage, WsError> receive_impl(WebSocket::State *s) {
     }
 }
 
-Task<void, WsError> close_impl(WebSocket::State *s, u16 code, std::string reason) {
-    if (s->close_sent) co_return;
-    s->close_sent = true;
-    std::string payload;
-    payload.push_back(static_cast<char>(code >> 8));
-    payload.push_back(static_cast<char>(code & 0xff));
-    payload += reason.substr(0, 123);
-    auto sent = co_await write_frame(s, ws::Opcode::CLOSE, std::move(payload));
-    if (sent.has_error()) co_await lighter::fail(std::move(sent).error());
-}
-
 } // namespace
 
 Task<WsMessage, WsError> WebSocket::receive() { return receive_impl(state.get()); }
 
 Task<void, WsError> WebSocket::send_text(std::string text) { return write_frame(state.get(), ws::Opcode::TEXT, std::move(text)); }
-
-Task<void, WsError> WebSocket::send_ping(std::string payload) { return write_frame(state.get(), ws::Opcode::PING, std::move(payload)); }
-
-Task<void, WsError> WebSocket::close(u16 code, std::string reason) { return close_impl(state.get(), code, std::move(reason)); }
 
 void WebSocket::abort() noexcept { abort_state(state.get()); }
 

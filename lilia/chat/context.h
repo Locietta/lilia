@@ -14,7 +14,6 @@ struct ChatInfo {
     store::ChatKey chat;
     std::string chat_name; ///< group name, or the peer's nickname in private chats
     std::string name;      ///< lilia's persona name, e.g. 莉莉娅
-    i64 self_id = 0;
     std::string self_name; ///< the account's QQ nickname
 };
 
@@ -45,8 +44,6 @@ struct Plan {
     bool repeat = false;
     /// The poke tool: poke whoever wrote `target` (or poked her, for a poke notice).
     bool poke = false;
-    /// The look_up_person tool: what she knows about whoever wrote `target`.
-    bool look_up = false;
     std::string reason; ///< why she stays silent or waits
     /// What the planner wrote before its tool calls (its view of the chat);
     /// logged, never shown to the writer.

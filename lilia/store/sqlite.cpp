@@ -33,13 +33,6 @@ void Statement::bind_blob(int index, std::string_view bytes) {
     sqlite3_bind_blob(value, index, bytes.data(), static_cast<int>(bytes.size()), SQLITE_TRANSIENT);
 }
 
-void Statement::bind_optional(int index, const std::optional<std::string> &text) {
-    if (text)
-        bind(index, std::string_view(*text));
-    else
-        sqlite3_bind_null(value, index);
-}
-
 Result<bool> Statement::step() {
     const auto code = sqlite3_step(value);
     if (code == SQLITE_ROW) return true;

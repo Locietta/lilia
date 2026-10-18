@@ -204,8 +204,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
 
     auto rows = log_window(chat);
     if (rows.empty()) co_return;
-    const ChatInfo info{
-        .chat = chat, .chat_name = state.name, .name = settings.name, .self_id = self.user_id, .self_name = self_name(chat)};
+    const ChatInfo info{.chat = chat, .chat_name = state.name, .name = settings.name, .self_name = self_name(chat)};
     const bool knows_people = memory && config.memory.facts;
     const bool has_stickers = stickers_ready(this);
     const auto rule = memory_rule(memory != nullptr, knows_people);

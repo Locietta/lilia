@@ -97,8 +97,6 @@ std::string to_utf8(std::u32string_view text) {
     return out;
 }
 
-bool has_cjk(std::u32string_view text) { return std::ranges::any_of(text, is_cjk); }
-
 /// What the frequency rules need to know about a token, in one pass.
 struct Shape {
     usize length = 0; ///< characters
@@ -280,8 +278,6 @@ std::string normalize_match_text(std::string_view text) {
     if (!out.empty() && out.back() == ' ') out.pop_back();
     return out;
 }
-
-bool meaningful_term(std::string_view token) { return meaningful(token); }
 
 std::vector<std::string> meaningful_terms(std::string_view text) {
     const auto cleaned = remove_noise(text);

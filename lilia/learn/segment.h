@@ -23,9 +23,6 @@ char32_t next_char(std::string_view text, usize &at);
 /// Decodes UTF-8 (see next_char).
 std::vector<Utf8Char> utf8_chars(std::string_view text);
 
-/// One code point as UTF-8.
-std::string encode_utf8(char32_t c);
-
 /// Chinese word segmentation: a port of jieba 0.42.1's `jieba.cut` in its
 /// default mode (accurate, with the HMM for runs the dictionary does not
 /// know), over jieba's own dictionary and model, vendored in lilia/data/jieba

@@ -95,7 +95,7 @@ std::string text_of(const provider::Item &item) {
 }
 
 chat::ChatInfo group_info() {
-    return {.chat = {.type = "group", .id = k_group}, .chat_name = "测试群", .name = "莉莉娅", .self_id = k_self, .self_name = "闭锁"};
+    return {.chat = {.type = "group", .id = k_group}, .chat_name = "测试群", .name = "莉莉娅", .self_name = "闭锁"};
 }
 
 provider::ToolCallItem tool_call(std::string name, std::string json) {
@@ -268,7 +268,7 @@ void test_planner() {
     const auto repeated = chat::parse_plan({OutputItem(tool_call("repeat", R"({"target":"#103"})"))}, rows);
     require(repeated.repeat && !repeated.reply && repeated.target == 1030, "repeat a message");
     const auto looked = chat::parse_plan({OutputItem(tool_call("look_up_person", R"({"target":"#103"})"))}, rows);
-    require(looked.look_up && !looked.reply && looked.target == 1030, "look up whoever wrote a message");
+    require(!looked.reply && looked.target == 1030, "look up whoever wrote a message");
     const auto reply = chat::parse_plan(
         {OutputItem(tool_call("reply", R"({"target":"#105 c: 哪部","quote":true,"style":"normal","intent":"说是哪部"})"))}, rows);
     require(reply.reply && reply.target == 1050 && reply.quote && reply.style == chat::ReplyStyle::NORMAL && reply.intent == "说是哪部",
@@ -654,7 +654,7 @@ void test_typos() {
     require(quoted, "a correction follows its typo, quoting it");
 }
 void test_clean_reply() {
-    const chat::ChatInfo info{.self_id = k_self, .self_name = "lilia"};
+    const chat::ChatInfo info{.self_name = "lilia"};
     const std::vector<std::string> aliases{"莉莉娅"};
     require(chat::clean_reply("  好的呀\n", info, aliases, 100) == "好的呀", "trim");
     require(chat::clean_reply("[21:05] lilia(你): 在的", info, aliases, 100) == "在的", "copied log prefix is stripped");

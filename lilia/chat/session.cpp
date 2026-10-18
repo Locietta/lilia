@@ -272,10 +272,7 @@ std::expected<Plan, std::string> parse_call(const provider::ToolCall &call, cons
     if (call.name == "repeat" || call.name == "poke" || call.name == "look_up_person") {
         const auto *target = find_target(string_field(input, "target"), rows);
         if (!target) return no_target();
-        return Plan{.target = target->message_id,
-                    .repeat = call.name == "repeat",
-                    .poke = call.name == "poke",
-                    .look_up = call.name == "look_up_person"};
+        return Plan{.target = target->message_id, .repeat = call.name == "repeat", .poke = call.name == "poke"};
     }
     if (call.name == "send_sticker") return Plan{.sticker = string_field(input, "sticker")};
     if (call.name == "wait") {

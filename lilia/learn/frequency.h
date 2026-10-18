@@ -30,10 +30,6 @@ std::string normalize_term(std::string_view token);
 /// runs collapsed to one space, trimmed.
 std::string normalize_match_text(std::string_view text);
 
-/// _is_meaningful_token: not a stop word, number or punctuation; at least
-/// two Han characters when it has any, otherwise at least two characters.
-bool meaningful_term(std::string_view token);
-
 /// _tokenize_meaningful_terms: the meaningful jieba tokens of `text` (URLs,
 /// CQ codes and @mentions removed first) in order, then ASCII tech terms
 /// (e.g. "c++", "node.js") jieba split apart.

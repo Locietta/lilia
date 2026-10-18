@@ -41,26 +41,6 @@ char32_t next_char(std::string_view text, usize &at) {
     return cp;
 }
 
-std::string encode_utf8(char32_t c) {
-    std::string out;
-    if (c < 0x80) {
-        out += static_cast<char>(c);
-    } else if (c < 0x800) {
-        out += static_cast<char>(0xC0 | (c >> 6));
-        out += static_cast<char>(0x80 | (c & 0x3F));
-    } else if (c < 0x10000) {
-        out += static_cast<char>(0xE0 | (c >> 12));
-        out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (c & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (c >> 18));
-        out += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (c & 0x3F));
-    }
-    return out;
-}
-
 std::vector<Utf8Char> utf8_chars(std::string_view text) {
     std::vector<Utf8Char> chars;
     chars.reserve(text.size());

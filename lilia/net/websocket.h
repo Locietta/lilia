@@ -118,11 +118,6 @@ struct WebSocket {
     /// Sends are serialized internally, so any task may call these while
     /// another task is blocked in receive().
     lighter::Task<void, WsError> send_text(std::string text);
-    lighter::Task<void, WsError> send_ping(std::string payload = {});
-
-    /// Sends a close frame. The connection is finished once receive() reports
-    /// the peer's close (or the stream ends).
-    lighter::Task<void, WsError> close(u16 code = 1000, std::string reason = {});
 
     /// Drops the TCP connection without a closing handshake and wakes a
     /// pending receive().
