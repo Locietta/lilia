@@ -220,13 +220,11 @@ Task<> Responder::run_turn(store::ChatKey chat) {
                                  {{"name", settings.name},
                                   {"hint_rule", feedback && config.feedback.hint ? std::string_view(k_hint_rule) : std::string_view()},
                                   {"persona", persona},
-                                  {"handoff", handoff_rule(settings.handoff == "reference")},
                                   {"memory_rule", rule},
                                   {"search_rule", search_rule(config.model.web_search)},
                                   {"sticker_rule", sticker_rule(has_stickers)}},
                                  embedded(xmake::planner_group_md), embedded(xmake::planner_private_md));
-    const PlannerToolSet offered{.reference_handoff = settings.handoff == "reference",
-                                 .memory = memory != nullptr,
+    const PlannerToolSet offered{.memory = memory != nullptr,
                                  .people = knows_people,
                                  .web = config.model.web_search,
                                  .stickers = has_stickers,
@@ -344,7 +342,7 @@ Task<> Responder::run_turn(store::ChatKey chat) {
             co_return Delivered{.refused = "那条消息已经被撤回了，没有回。"};
         }
         log::info("{} replies to {} ({}, to her {}, quote {}): {}", describe(chat), plan.target, style_name(plan.style),
-                  plan.to_her.empty() ? "?" : plan.to_her, plan.quote, plan.intent.empty() ? plan.brief : plan.intent);
+                  plan.to_her.empty() ? "?" : plan.to_her, plan.quote, plan.intent);
         co_return co_await deliver(this, chat, plan, rows, *target, info, now(), found);
     };
 

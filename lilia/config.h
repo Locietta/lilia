@@ -149,9 +149,6 @@ struct ChatConfig {
     /// Wait for a burst of messages to end before deciding; not when she is
     /// called (an @, a quote of hers, her name, a private message).
     u32 debounce_seconds = 3;
-    /// What the planner hands the writer: "intent" (a short stance to voice)
-    /// or "reference" (notes the writer may use or ignore, like MaiBot).
-    std::string handoff = "intent";
     /// Typing speed: a casual reply's first message waits until it could have
     /// been typed since the planner decided, each later one for its own
     /// typing; 0 sends immediately.

@@ -68,12 +68,11 @@ void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep
 
 /// Which planner tools a chat offers.
 struct PlannerToolSet {
-    bool reference_handoff = false; ///< reply asks for `brief` instead of `intent`
-    bool memory = false;            ///< search_history
-    bool people = false;            ///< look_up_person
-    bool web = false;               ///< search_web
-    bool stickers = false;          ///< find_sticker and send_sticker
-    bool poke = false;              ///< poke (groups only)
+    bool memory = false;   ///< search_history
+    bool people = false;   ///< look_up_person
+    bool web = false;      ///< search_web
+    bool stickers = false; ///< find_sticker and send_sticker
+    bool poke = false;     ///< poke (groups only)
 };
 
 /// The planner's tools; the same every round, so they never break the cache.

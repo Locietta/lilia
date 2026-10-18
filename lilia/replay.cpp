@@ -397,8 +397,8 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         } else if (!plan.reply) {
             print(std::format("        · {}：{}", plan.follow_up ? "到此为止" : "不说话", plan.reason));
         } else {
-            print(std::format("        · 回复 {}（{}{}）：{}", plan.target, style_name(plan.style), plan.quote ? "，引用" : "",
-                              plan.intent.empty() ? plan.brief : plan.intent));
+            print(
+                std::format("        · 回复 {}（{}{}）：{}", plan.target, style_name(plan.style), plan.quote ? "，引用" : "", plan.intent));
         }
     };
 

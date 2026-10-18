@@ -141,7 +141,6 @@ void trim_records(std::deque<PlannerRecord> &records, i64 anchor_row, usize keep
 }
 
 std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
-    const bool reference_handoff = set.reference_handoff;
     std::vector<provider::ToolDefinition> tools;
     tools.push_back({
         .name = "reply",
@@ -150,10 +149,8 @@ std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
                                         {"to_her", property("string", "那条消息是不是在对她说：called | likely | group | unsure | no")},
                                         {"quote", property("boolean", "是否引用那条消息")},
                                         {"style", property("string", "short | normal | long")},
-                                        {reference_handoff ? "brief" : "intent",
-                                         reference_handoff ? property("string", "给她的参考信息，不是台词，也不规定她怎么说") :
-                                                             property("string", "一句话描述她想表达的意思，不是台词")}},
-                         .required = {"target", "to_her", "style", reference_handoff ? "brief" : "intent"}},
+                                        {"intent", property("string", "一句话描述她想表达的意思，不是台词")}},
+                         .required = {"target", "to_her", "style", "intent"}},
     });
     if (set.stickers) {
         // Tools of their own, like MaiBot's send_emoji: buried in reply, a
@@ -272,7 +269,6 @@ std::expected<Plan, std::string> parse_call(const provider::ToolCall &call, cons
                  style == "normal" ? ReplyStyle::NORMAL :
                                      ReplyStyle::SHORT,
         .intent = string_field(input, "intent"),
-        .brief = string_field(input, "brief"),
     };
 }
 

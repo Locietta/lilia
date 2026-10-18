@@ -276,14 +276,6 @@ void test_planner() {
                 std::vector<std::string>{"reply", "find_sticker", "send_sticker", "repeat", "wait", "poke", "search_history",
                                          "look_up_person", "search_web", "stay_silent"},
             "with stickers, pokes, memory, people and the web");
-    const auto briefed = chat::planner_tools({.reference_handoff = true});
-    require(std::ranges::contains(briefed[0].input_schema.required, std::string("brief")) &&
-                !std::ranges::contains(briefed[0].input_schema.required, std::string("intent")),
-            "the reference handoff asks for brief instead of intent");
-    require(chat::handoff_rule(true).find("brief") != std::string_view::npos &&
-                chat::handoff_rule(false).find("intent") != std::string_view::npos,
-            "the planner rule follows the handoff");
-
     auto notice_line = stored(-5, t, std::string(chat::k_notice_sender), "小明戳了戳闭锁");
     notice_line.sender_id = 0;
     require(chat::is_notice(notice_line) && chat::render_line(notice_line, 480) == "[21:05] （群通知）小明戳了戳闭锁", "notice lines");
@@ -345,19 +337,6 @@ void test_writer() {
                 last.contains("【你要回应b的这条") && last.ends_with("现在，你说："),
             "where, when, the style and the note come last: " + last);
     require(last.find("说在追") != std::string::npos, "the intent reaches the writer");
-    const auto briefed = chat::build_writer_history({
-        .persona = "PERSONA",
-        .rules = "RULES",
-        .info = group_info(),
-        .recent = {stored(205, t - 60, "b", "莉莉娅你追吗")},
-        .target = stored(205, t - 60, "b", "莉莉娅你追吗"),
-        .plan = {.reply = true, .target = 205, .brief = "b 在问她追不追第三集"},
-        .now = t,
-    });
-    const auto briefed_note = text_of(briefed.back());
-    require(briefed_note.find("回复信息参考：b 在问她追不追第三集") != std::string::npos &&
-                briefed_note.find("不用完全遵守") != std::string::npos && briefed_note.find("你想表达的意思") == std::string::npos,
-            "a brief reaches the writer as optional reference");
     require(last.find("旁观者") == std::string::npos, "no analysis, no section for it");
 
     auto asked = stored(205, t - 60, "b", "莉莉娅你追吗，第三集作画崩成这样");

@@ -35,8 +35,6 @@ struct Plan {
     bool quote = false;
     ReplyStyle style = ReplyStyle::SHORT;
     std::string intent;
-    /// "reference" handoff: the planner's notes for the writer.
-    std::string brief;
     /// The send_sticker tool: the sticker to send ("s12").
     std::string sticker;
     /// The wait tool: seconds to wait before looking again (0: not waiting).
@@ -72,9 +70,6 @@ std::string_view search_rule(bool enabled);
 /// The planner.md rule about stickers; empty when she has none to send.
 std::string_view sticker_rule(bool enabled);
 
-/// The planner.md line describing what it hands the writer.
-std::string_view handoff_rule(bool reference);
-
 /// What she knows about one person, for the writer.
 struct KnownPerson {
     std::string name;
@@ -87,7 +82,7 @@ struct WriterInput {
     ChatInfo info;
     std::vector<store::StoredMessage> recent;
     store::StoredMessage target;
-    /// Its intent (or brief) reaches the writer, "#row" numbers replaced by
+    /// Its intent reaches the writer, "#row" numbers replaced by
     /// the lines they stand for. Its analysis does not: that is decision talk
     /// (MaiBot stopped passing it on, 908dfa6e).
     Plan plan;

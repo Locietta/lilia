@@ -257,7 +257,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         if (found.habits && found.habits_for == plan.target) {
             habits = *std::move(found.habits);
         } else {
-            habits = co_await select_habits(r, chat, log_lines, target, plan.intent.empty() ? plan.brief : plan.intent);
+            habits = co_await select_habits(r, chat, log_lines, target, plan.intent);
         }
     }
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
