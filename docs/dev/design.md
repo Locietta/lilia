@@ -275,9 +275,9 @@ Model calls (2026-10-11):
        `Instruct:` or as the request's `instruction` field
        (`memory.instruction_mode`, qvl puts it in the system turn);
        documents are bare; vectors are normalized, so similarity is a dot
-       product. With `memory.embed_images` a sticker is also embedded by
-       its picture (a tagged file path), and a search takes the better of
-       its text and picture.
+       product. Stickers are embedded as text only: their pictures (2026-10-12)
+       won 1 of 480 query pairs and pulled in look-alikes, and a
+       cross-encoder reranker scored below plain fusion at 2–5 s a search.
      - Dense (brute force) and, for chat search and stickers, BM25 over
        jieba words and Han pairs in memory (FTS5 cannot segment Chinese).
        Each leg ranks 4x what is wanted; RRF (k 60, 0.7/0.3) fuses them.

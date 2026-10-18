@@ -59,13 +59,10 @@ void test_usage_helpers() {
                 request.tools.size() == 1 && request.tools[0].name == "record_sticker_usage",
             "the request carries the picture, the previous usage and the snippets");
 
-    require(sticker::render_candidates({known}, 0) == "s5 标签：摇头｜画面：猫摇头｜常用于：当拒绝时发\n" &&
-                sticker::render_candidates({known}, 0, false) == "s5 标签：摇头｜画面：猫摇头\n",
-            "candidates show the usage, unless it is switched off");
-    require(sticker::embedding_inputs(known, "data", false, true) == std::vector<std::string>({"摇头：猫摇头", "用法：当拒绝时发"}) &&
-                sticker::embedding_inputs(known, "data", false, false).size() == 1 &&
-                sticker::lexical_text(known, true) == "摇头 猫摇头 当拒绝时发",
-            "searches can use the usage");
+    require(sticker::render_candidates({known}, 0) == "s5 标签：摇头｜画面：猫摇头｜常用于：当拒绝时发\n", "candidates show the usage");
+    require(sticker::embedding_inputs(known) == std::vector<std::string>({"摇头：猫摇头", "用法：当拒绝时发"}) &&
+                sticker::lexical_text(known) == "摇头 猫摇头 当拒绝时发",
+            "searches use the usage");
 }
 
 void test_usage_store() {

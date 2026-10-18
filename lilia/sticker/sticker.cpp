@@ -23,7 +23,6 @@
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
-#include <lilia/retrieval/retriever.h>
 
 namespace lilia::sticker {
 
@@ -169,19 +168,15 @@ std::string embedding_text(const store::Sticker &sticker) { return std::format("
 
 std::string usage_text(const store::Sticker &sticker) { return sticker.usage.empty() ? std::string() : "用法：" + sticker.usage; }
 
-std::vector<std::string> embedding_inputs(const store::Sticker &sticker, const std::filesystem::path &data_dir, bool images, bool usage) {
+std::vector<std::string> embedding_inputs(const store::Sticker &sticker) {
     std::vector<std::string> out{embedding_text(sticker)};
-    if (usage && !sticker.usage.empty()) out.push_back(usage_text(sticker));
-    // A missing file would fail the embedding call of every text sent with it.
-    if (std::error_code ec; images && std::filesystem::exists(data_dir / sticker.path, ec)) {
-        out.push_back(retrieval::image_input(data_dir / sticker.path));
-    }
+    if (!sticker.usage.empty()) out.push_back(usage_text(sticker));
     return out;
 }
 
-std::string lexical_text(const store::Sticker &sticker, bool usage) {
+std::string lexical_text(const store::Sticker &sticker) {
     auto text = sticker.tags + " " + sticker.description;
-    if (usage && !sticker.usage.empty()) text += " " + sticker.usage;
+    if (!sticker.usage.empty()) text += " " + sticker.usage;
     return text;
 }
 
@@ -236,12 +231,12 @@ std::optional<i64> parse_handle(std::string_view text) {
     return id;
 }
 
-std::string render_candidates(const std::vector<store::Sticker> &candidates, i64 now, bool usage) {
+std::string render_candidates(const std::vector<store::Sticker> &candidates, i64 now) {
     constexpr i64 k_recent_seconds = 86'400;
     std::string out;
     for (const auto &sticker : candidates) {
         out += std::format("{} 标签：{}｜画面：{}{}{}\n", handle(sticker), sticker.tags, sticker.description,
-                           !usage || sticker.usage.empty() ? std::string() : "｜常用于：" + sticker.usage,
+                           sticker.usage.empty() ? std::string() : "｜常用于：" + sticker.usage,
                            sticker.last_used > 0 && now - sticker.last_used < k_recent_seconds ? "（她一天内发过）" : "");
     }
     return out;

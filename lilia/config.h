@@ -242,19 +242,6 @@ struct MemoryConfig {
     /// Qwen3-Embedding's "Instruct: …\nQuery:…" form; "field" sends it as the
     /// request's "instruction", which qvl puts in Qwen3-VL-Embedding's system turn.
     std::string instruction_mode = "inline";
-    /// Also embed each sticker's picture (by its file path), for a multimodal
-    /// service such as qvl that may read lilia's sticker files.
-    bool embed_images = false;
-    /// A Cohere-style reranker (qvl's /v3/rerank); empty url: none.
-    std::string rerank_url;
-    std::string rerank_path = "/v3/rerank";
-    /// Sent as the request's model; empty lets the service choose.
-    std::string rerank_model;
-    /// Sticker searches rerank this many fused candidates down to
-    /// stickers.candidates (0: no reranking).
-    usize rerank_stickers = 0;
-    /// Show the reranker pictures too, not only text (about 2.4x the time).
-    bool rerank_images = true;
     /// Messages per chunk, and the pause that starts a new chunk.
     usize chunk_messages = 6;
     i64 chunk_gap_seconds = 1800;
@@ -302,15 +289,14 @@ struct StickerConfig {
     /// Stickers find_sticker shows the planner, and the pause between hers.
     usize candidates = 8;
     i64 cooldown_seconds = 60;
-    /// Learn what stickers are used for from the lines around them: snippets
-    /// kept per sticker, lines on each side, how long to wait for the lines
-    /// after, inference calls per hour, and whether searches use the usage.
+    /// Learn what stickers are used for from the lines around them (searched
+    /// and shown to the planner): snippets kept per sticker, lines on each
+    /// side, how long to wait for the lines after, inference calls per hour.
     bool usage = true;
     usize usage_evidence = 12;
     usize usage_context_lines = 3;
     i64 usage_after_seconds = 180;
     usize usage_inferences_per_hour = 20;
-    bool usage_in_search = true;
 };
 
 struct FeedbackConfig {

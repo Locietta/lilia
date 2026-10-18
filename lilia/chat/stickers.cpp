@@ -36,14 +36,12 @@ Task<std::vector<store::Sticker>> find_stickers(Responder *r, std::string feelin
     for (const auto &sticker : *pool) {
         documents.push_back(
             {.id = sticker.id,
-             .texts = sticker::embedding_inputs(sticker, r->stickers->data_dir, r->config.memory.embed_images,
-                                                r->config.stickers.usage_in_search),
-             .lexical = sticker::lexical_text(sticker, r->config.stickers.usage_in_search),
+             .texts = sticker::embedding_inputs(sticker),
+             .lexical = sticker::lexical_text(sticker),
              .boost = sticker::reward_boost(sticker::reward_mean(weighing.rewards, sticker.id), r->config.feedback.reward_weight)});
     }
-    const auto matches = co_await r->memory->retriever.search(
-        retrieval::k_sticker_task, std::move(feeling), documents,
-        {.top_k = count, .lexical = true, .rerank = r->config.memory.rerank_stickers, .rerank_task = retrieval::k_sticker_rerank_task});
+    const auto matches =
+        co_await r->memory->retriever.search(retrieval::k_sticker_task, std::move(feeling), documents, {.top_k = count, .lexical = true});
     std::vector<store::Sticker> found;
     for (const auto &match : matches) found.push_back((*pool)[match.index]);
     co_return found;

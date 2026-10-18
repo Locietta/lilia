@@ -79,14 +79,12 @@ std::string embedding_text(const store::Sticker &sticker);
 /// "用法：…", its learned usage as embedded; empty when none is known.
 std::string usage_text(const store::Sticker &sticker);
 
-/// The retrieval inputs of a sticker: embedding_text(), usage_text() when
-/// `usage` and known, and its picture (under `data_dir`) when `images`. A
-/// search scores the best of them.
-std::vector<std::string> embedding_inputs(const store::Sticker &sticker, const std::filesystem::path &data_dir, bool images, bool usage);
+/// The retrieval inputs of a sticker: embedding_text() and, when known,
+/// usage_text(). A search scores the better of them.
+std::vector<std::string> embedding_inputs(const store::Sticker &sticker);
 
-/// The words a lexical search matches: tags, description and, when
-/// `usage`, the learned usage.
-std::string lexical_text(const store::Sticker &sticker, bool usage);
+/// The words a lexical search matches: tags, description, learned usage.
+std::string lexical_text(const store::Sticker &sticker);
 
 /// Without embeddings: stickers whose tags or description contain words of
 /// `feeling` ("无语、震惊"), most matched and hottest first, then a
@@ -101,9 +99,9 @@ std::string handle(const store::Sticker &sticker);
 std::optional<i64> parse_handle(std::string_view text);
 
 /// "s12 标签：无语、震惊｜画面：……｜常用于：……" lines (the usage when
-/// `usage` and known); stickers she sent within the last day are marked so
-/// she does not keep sending the same one.
-std::string render_candidates(const std::vector<store::Sticker> &candidates, i64 now, bool usage = true);
+/// known); stickers she sent within the last day are marked so she does not
+/// keep sending the same one.
+std::string render_candidates(const std::vector<store::Sticker> &candidates, i64 now);
 
 /// A message that is a single sticker, as a segment to send again (复读):
 /// an image sticker by its URL, an mface as it came; nullopt otherwise.
