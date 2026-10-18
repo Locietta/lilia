@@ -6,7 +6,6 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <iostream>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -25,13 +24,9 @@
 #include <lighter/async/runtime/interrupt.h>
 
 #include <lilia/archive/archiver.h>
-#include <lilia/chat/delivery.h>
 #include <lilia/chat/responder.h>
-#include <lilia/chat/typos.h>
 #include <lilia/config.h>
-#include <lilia/learn/frequency.h>
 #include <lilia/learn/learner.h>
-#include <lilia/learn/segment.h>
 #include <lilia/log.h>
 #include <lilia/onebot/session.h>
 #include <lilia/replay.h>
@@ -62,7 +57,6 @@ void print_usage(FILE *output) {
                "                      [--apply-from <retagged.db>] [--learn-usage] [--forget-group <id>] [--config <path>]\n"
                "       lilia feedback [--backfill [--days <n>]] [--eval] [--report [--days <n>]] [--import-manual <labels.json>]\n"
                "                      [--db <lilia.db>] [--config <path>]\n"
-               "       lilia segment [--terms | --count <n> | --bench | --pieces | --homophones] < lines.txt\n"
                "       lilia --version | --help\n",
                output);
 }
@@ -777,89 +771,6 @@ int main(int argc, char **argv) {
     StickerTool stickers;
     bool feedback_tool = false;
     FeedbackTool feedback_options;
-    if (argc >= 2 && std::string_view(argv[1]) == "segment") {
-        // Debugging aids, one stdin line per message: jieba words of each
-        // line joined by "/"; --terms: its meaningful terms; --count <n>: the
-        // frequent-term tallies of every n lines ("term<TAB>count<TAB>messages").
-        const std::string_view mode = argc >= 3 ? argv[2] : "";
-        const auto batch = static_cast<usize>(argc >= 4 ? std::max(1, std::atoi(argv[3])) : 30);
-        const auto join = [](const auto &words) {
-            std::string joined;
-            for (const auto &word : words) {
-                if (!joined.empty()) joined += '/';
-                joined += word;
-            }
-            return joined;
-        };
-        std::vector<std::string> lines;
-        const auto flush = [&] {
-            for (const auto &tally : learn::count_terms(lines))
-                std::printf("%s\t%lld\t%lld\n", tally.term.c_str(), static_cast<long long>(tally.count),
-                            static_cast<long long>(tally.message_count));
-            std::printf("--\n");
-            lines.clear();
-        };
-        std::string line;
-        if (mode == "--bench") {
-            // Timings without output: loading, cutting, terms, 30-line tallies.
-            std::vector<std::string> all;
-            usize bytes = 0;
-            while (std::getline(std::cin, line)) {
-                bytes += line.size() + 1;
-                all.push_back(line);
-            }
-            const auto time = [](auto &&work) {
-                const auto started = std::chrono::steady_clock::now();
-                work();
-                return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-            };
-            usize tokens = 0;
-            const double load = time([] { learn::cut("好"); });
-            const double cut = time([&] {
-                for (const auto &text : all) tokens += learn::cut(text).size();
-            });
-            const double terms = time([&] {
-                for (const auto &text : all) learn::meaningful_terms(text);
-            });
-            const double tallies = time([&] {
-                for (usize start = 0; start < all.size(); start += 30)
-                    learn::count_terms({all.begin() + static_cast<std::ptrdiff_t>(start),
-                                        all.begin() + static_cast<std::ptrdiff_t>(std::min(all.size(), start + 30))});
-            });
-            std::fprintf(stderr, "%zu lines, %.1f MB, %zu tokens\nload %.0f ms\ncut %.0f ms (%.1f MB/s)\nterms %.0f ms\ntallies %.0f ms\n",
-                         all.size(), static_cast<double>(bytes) / 1e6, tokens, load, cut, static_cast<double>(bytes) / 1e3 / cut, terms,
-                         tallies);
-            return 0;
-        }
-        while (std::getline(std::cin, line)) {
-            if (mode == "--pieces") {
-                // Reply pieces before merging: text \x1f separator, pieces split by \x1e.
-                std::string out;
-                for (const auto &piece : chat::split_pieces(line)) out += piece.text + "\x1f" + piece.separator + "\x1e";
-                std::printf("%s\n", out.c_str());
-            } else if (mode == "--homophones") {
-                // Typo candidates for a character or a word (min_freq 9, no tone errors).
-                const auto chars = learn::utf8_chars(line);
-                std::vector<std::string> out;
-                if (chars.size() == 1) {
-                    for (const auto c : chat::similar_chars(chars[0].cp, chat::reading_of(chars[0].cp), "", 9))
-                        out.push_back(learn::encode_utf8(c));
-                } else {
-                    out = chat::word_homophones(line, 9);
-                }
-                std::printf("%s\n", join(out).c_str());
-            } else if (mode == "--terms") {
-                std::printf("%s\n", join(learn::meaningful_terms(line)).c_str());
-            } else if (mode == "--count") {
-                lines.push_back(line);
-                if (lines.size() == batch) flush();
-            } else {
-                std::printf("%s\n", join(learn::cut(line)).c_str());
-            }
-        }
-        if (!lines.empty()) flush();
-        return 0;
-    }
     int first = 1;
     if (argc > 1 && std::string_view(argv[1]) == "replay") {
         // `--probe-db` probes stored chat instead of a log.
