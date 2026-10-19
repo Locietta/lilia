@@ -28,6 +28,9 @@ struct ModelFallback {
     std::string api_key;  ///< secret; empty means ModelConfig::api_key
     bool bearer = false;
     std::string thinking_off; ///< empty means "disabled"
+    /// Thinking with this effort ("low", "medium", "high"); unset: as the
+    /// role it stands in for.
+    std::optional<std::string> reasoning_effort;
 };
 
 struct ModelConfig {
@@ -35,7 +38,12 @@ struct ModelConfig {
     std::string model = "deepseek-flash";
     std::string api_key; ///< secret; usually "$DEEPSEEK_API_KEY"
     u32 max_tokens = 2048;
+    /// Adaptive thinking with this effort ("low", "medium", "high") for every
+    /// model; unset: thinking is off (see `thinking`). The planner and the
+    /// writer may each have their own.
     std::optional<std::string> reasoning_effort;
+    std::optional<std::string> planner_reasoning_effort;
+    std::optional<std::string> writer_reasoning_effort;
     /// Decides whether and how lilia speaks; small and fast is enough.
     std::string planner_model = "deepseek-flash";
     u32 planner_max_tokens = 400;

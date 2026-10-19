@@ -126,12 +126,12 @@ namespace {
 /// sent twice, where a cache write only costs more.
 provider::Provider make_client(const ModelConfig &model, const std::string &base_url, const std::string &api_key, const std::string &name,
                                u32 max_tokens, bool require_tool = false, bool bearer = false, const std::string &thinking_off = {},
-                               bool cache = true) {
+                               bool cache = true, const std::optional<std::string> &effort = {}) {
     return pro::make_proxy<provider::ProviderFacade, anthropic::Client>(anthropic::ClientOptions{
         .auth = provider::api_key_auth(api_key, bearer),
         .base_url = base_url,
         .model = name,
-        .reasoning_effort = model.reasoning_effort,
+        .reasoning_effort = effort ? effort : model.reasoning_effort,
         .disable_thinking = !model.thinking,
         .thinking_off = thinking_off.empty() ? "disabled" : thinking_off,
         .require_tool = require_tool,
@@ -146,14 +146,14 @@ provider::Provider make_planner(const ModelConfig &model) {
     const bool own = !model.planner_base_url.empty();
     return make_client(model, own ? model.planner_base_url : model.base_url, own ? model.planner_api_key : model.api_key,
                        model.planner_model, model.planner_max_tokens, model.planner_force_tool, own && model.planner_bearer,
-                       own ? model.planner_thinking_off : std::string());
+                       own ? model.planner_thinking_off : std::string(), true, model.planner_reasoning_effort);
 }
 
 provider::Provider make_selector(const ModelConfig &model) {
     const bool own = !model.planner_base_url.empty();
     return make_client(model, own ? model.planner_base_url : model.base_url, own ? model.planner_api_key : model.api_key,
                        model.planner_model, model.planner_max_tokens, true, own && model.planner_bearer,
-                       own ? model.planner_thinking_off : std::string(), false);
+                       own ? model.planner_thinking_off : std::string(), false, model.planner_reasoning_effort);
 }
 
 provider::Provider make_warmer(const ModelConfig &model) {
@@ -162,7 +162,7 @@ provider::Provider make_warmer(const ModelConfig &model) {
     const bool own = !model.planner_base_url.empty();
     return make_client(model, own ? model.planner_base_url : model.base_url, own ? model.planner_api_key : model.api_key,
                        model.planner_model, 1, model.planner_force_tool, own && model.planner_bearer,
-                       own ? model.planner_thinking_off : std::string());
+                       own ? model.planner_thinking_off : std::string(), true, model.planner_reasoning_effort);
 }
 
 std::vector<chat::Responder::NamedProvider> make_planner_fallbacks(const ModelConfig &model) {
@@ -172,7 +172,8 @@ std::vector<chat::Responder::NamedProvider> make_planner_fallbacks(const ModelCo
             .model = fallback.model,
             .provider = make_client(model, fallback.base_url.empty() ? model.base_url : fallback.base_url,
                                     fallback.api_key.empty() ? model.api_key : fallback.api_key, fallback.model, model.planner_max_tokens,
-                                    model.planner_force_tool, !fallback.api_key.empty() && fallback.bearer, fallback.thinking_off),
+                                    model.planner_force_tool, !fallback.api_key.empty() && fallback.bearer, fallback.thinking_off, true,
+                                    fallback.reasoning_effort),
         });
     }
     return fallbacks;
@@ -201,7 +202,7 @@ provider::Provider make_writer(const ModelConfig &model) {
                                        !model.writer_api_key.empty() && model.writer_bearer),
         .base_url = model.writer_base_url.empty() ? model.base_url : model.writer_base_url,
         .model = model.model,
-        .reasoning_effort = model.reasoning_effort,
+        .reasoning_effort = model.writer_reasoning_effort ? model.writer_reasoning_effort : model.reasoning_effort,
         .disable_thinking = !model.thinking,
         .thinking_off = model.writer_thinking_off.empty() ? "disabled" : model.writer_thinking_off,
         .temperature = model.writer_temperature,
@@ -220,7 +221,7 @@ std::vector<chat::Responder::NamedProvider> make_writer_fallbacks(const ModelCon
                                                !fallback.api_key.empty() && fallback.bearer),
                 .base_url = fallback.base_url.empty() ? model.base_url : fallback.base_url,
                 .model = fallback.model,
-                .reasoning_effort = model.reasoning_effort,
+                .reasoning_effort = fallback.reasoning_effort ? fallback.reasoning_effort : model.reasoning_effort,
                 .disable_thinking = !model.thinking,
                 .thinking_off = fallback.thinking_off.empty() ? "disabled" : fallback.thinking_off,
                 .temperature = model.writer_temperature,
