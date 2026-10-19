@@ -229,7 +229,10 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     `--continue-at <n>` she gets one turn right before line n, after its
     pictures are archived and, with memory, the chat indexed and what lies
     above her window summarised; she must reply, or with `--free` may stay
-    silent. Synthetic logs stay text (`tests/replay/*.jsonl`).
+    silent. `--habits <db>` brings what she learned live (expressions, the
+    slang she knows, the fitted addressee prior), and the replay chat joins
+    every sharing group so it reaches her as in the real groups. Synthetic
+    logs stay text (`tests/replay/*.jsonl`).
 - **`archive/`**: copies the media of allowed chats (pictures, stickers,
   voice, video, files) into `<data_dir>/media/<sha1[:2]>/<sha1><ext>`.
   - **Why:** the QQ client cache on the host is pruned after a few days, and
