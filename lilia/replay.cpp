@@ -364,7 +364,12 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     responder.self = {.user_id = k_replay_self, .nickname = config.chat.name};
     responder.realtime = false;
 
-    const i64 base = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    // Logs keep only relative times: the chat plays out from 20:00 local time
+    // today, the same whenever the replay runs (a run at 3 am had her remark
+    // on the hour in chats that were never that late).
+    const i64 offset = i64{config.chat.utc_offset_minutes} * 60;
+    const i64 wall = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const i64 base = (wall + offset) / 86'400 * 86'400 - offset + 20 * 3600;
     i64 sim = 0;
     responder.now = [&sim, base] { return base + sim; };
     retrieval::Retriever retriever(config.memory, *store);
