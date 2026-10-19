@@ -378,6 +378,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         memory.now = [&sim, base] { return base + sim; };
         memory.summarizer = make_learner(config.model);
         memory.summarizer_model = config.model.helper();
+        memory.data_dir = config.data_dir;
         responder.memory = &memory;
     }
     i64 next_id = 1'000'000;

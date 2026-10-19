@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <format>
+#include <iterator>
 
 #include <glaze/json.hpp>
 
@@ -45,7 +46,7 @@ std::string local_time(i64 unix_seconds, i32 utc_offset_minutes) {
 } // namespace
 
 FactRequest build_summary_request(std::string_view prompt, const std::vector<store::ChatSummary> &previous, std::string_view lines,
-                                  std::string_view rounds) {
+                                  std::string_view rounds, const std::vector<provider::ImagePart> &pictures) {
     FactRequest request;
     provider::append_system(request.history, std::string(prompt));
     std::string user;
@@ -57,7 +58,9 @@ FactRequest build_summary_request(std::string_view prompt, const std::vector<sto
     user += "新的聊天记录：\n";
     user += lines;
     if (!rounds.empty()) user += std::format("\n她当时的想法和做的事（只有她自己知道，群里看不到）：\n{}", rounds);
+    if (!pictures.empty()) user += "\n记录里写 [图片] 的地方，图按出现的顺序附在下面：";
     provider::append_user(request.history, std::move(user));
+    for (const auto &picture : pictures) request.history.back().parts.push_back(picture);
     request.tools.push_back(record_summary_tool());
     return request;
 }
@@ -108,7 +111,12 @@ std::vector<std::string> summary_texts(const store::ChatSummary &summary) {
 
 Task<bool> Memory::write_summary(store::ChatKey chat, std::string_view kind, std::string_view prompt,
                                  std::vector<store::ChatSummary> previous, std::vector<store::StoredMessage> messages, std::string rounds) {
-    const auto request = build_summary_request(prompt, previous, display_text(messages, self_name, utc_offset_minutes), rounds);
+    // The lines' pictures, the newest few, in order.
+    constexpr usize k_summary_pictures = 8;
+    std::vector<provider::ImagePart> shown;
+    for (auto &[row, parts] : chat::pictures_of(store, data_dir, messages, pictures)) std::ranges::move(parts, std::back_inserter(shown));
+    if (shown.size() > k_summary_pictures) shown.erase(shown.begin(), shown.end() - static_cast<std::ptrdiff_t>(k_summary_pictures));
+    const auto request = build_summary_request(prompt, previous, display_text(messages, self_name, utc_offset_minutes), rounds, shown);
     store::LlmCall call{.time = now(), .chat = chat, .model = summarizer_model};
     // Past the deadline the call counts as failed; a hang must not block indexing.
     const auto items = co_await call_recorded(*summarizer, request.history, request.tools, k_summary_deadline, store, call);

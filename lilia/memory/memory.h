@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -8,6 +9,7 @@
 
 #include <lighter/async/runtime/task.h>
 
+#include <lilia/chat/pictures.h>
 #include <lilia/config.h>
 #include <lilia/provider/history.h>
 #include <lilia/provider/provider.h>
@@ -86,9 +88,10 @@ struct SummaryResult {
 };
 
 /// `previous` (oldest first) are shown for context only; `rounds` are her own
-/// thoughts and actions about the lines (chat::render_rounds), when given.
+/// thoughts and actions about the lines (chat::render_rounds), when given;
+/// `pictures` are the lines' pictures in order (models see photos themselves).
 FactRequest build_summary_request(std::string_view prompt, const std::vector<store::ChatSummary> &previous, std::string_view lines,
-                                  std::string_view rounds = {});
+                                  std::string_view rounds = {}, const std::vector<provider::ImagePart> &pictures = {});
 
 /// Reads record_summary; nullopt when the tool was not called. An empty
 /// summary is a valid "nothing new" answer.
@@ -158,6 +161,9 @@ struct Memory {
     /// Writes summaries; null leaves summarizing off.
     std::optional<provider::Provider> summarizer;
     std::string summarizer_model;
+    /// Where the media archive is, so summaries see the chats' pictures.
+    std::filesystem::path data_dir;
+    chat::PictureCache pictures;
     std::vector<store::ChatKey> indexing;  ///< chats with an index() running
     std::vector<store::ChatKey> again;     ///< asked again while running
     std::vector<store::ChatKey> windowing; ///< chats with a summarize_window() running

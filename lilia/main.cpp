@@ -712,6 +712,7 @@ Task<int> run_app(const Config &config) {
         responder.memory = &memory;
         memory.summarizer = make_learner(config.model);
         memory.summarizer_model = config.model.helper();
+        memory.data_dir = config.data_dir;
         learner.retriever = &retriever;
         tasks.spawn([](retrieval::Retriever &retriever, store::Store &store, std::vector<std::string> texts) -> Task<> {
             std::ignore = co_await backfill(retriever, store, std::move(texts));

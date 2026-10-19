@@ -127,6 +127,12 @@ void test_summaries() {
                 user.find("新的聊天记录：\n[10-05 21:00] a: 定了") != std::string::npos,
             "previous non-empty summaries come first, then the new lines");
     require(request.tools.size() == 1 && request.tools[0].name == "record_summary", "record_summary tool");
+    const auto pictured = memory::build_summary_request("PROMPT", {}, "[10-05 21:00] a: [图片]\n", {},
+                                                        {provider::ImagePart{.media_type = "image/png", .data = "UE5H"}});
+    const auto &parts = pictured.history.back().parts;
+    require(parts.size() == 2 && std::get<provider::TextPart>(parts[0]).text.contains("图按出现的顺序附在下面") &&
+                std::holds_alternative<provider::ImagePart>(parts[1]),
+            "the lines' pictures follow them");
 
     provider::ToolCallItem call{.call = {.id = "t", .name = "record_summary"}};
     require(!glz::read_json(call.call.input, R"({"summary": "定了周六去成都", "recall_cues": ["聊到成都", "", "周六的安排"]})"), "parse");
