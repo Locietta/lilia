@@ -680,10 +680,6 @@ Task<int> run_app(const Config &config) {
     if (config.model.cache_keepalive_minutes > 0 && config.model.planner_model.starts_with("claude"))
         responder.warmer = make_warmer(config.model);
     archive::Archiver archiver(config.archive, data_dir, *store);
-    if (!config.model.vision_model.empty()) {
-        archiver.vision = make_vision(config.model);
-        archiver.vision_model = config.model.vision_model;
-    }
     // Also with archiving off: forwards sent by id are still fetched.
     responder.archiver = &archiver;
     learn::Learner learner(config.learning, config.chat.name, config.chat.aliases, *store, make_learner(config.model),

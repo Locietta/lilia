@@ -233,14 +233,17 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     including failures and `too_large` (default cap 50 MB).
   - **Concurrency:** at most two messages are archived at a time; media from
     other chats is never fetched.
-  - **Image reading:** after a picture or sticker is stored, one
-    `vision_model` call (DeepSeek, image block plus a short prompt) describes
-    it in a sentence or two, including any text in it. Descriptions are cached
-    by content hash in `media.description`. GIFs go whole: DeepSeek reads
-    their motion (a grid of frames scored no better, 2026-10-12). The stored
-    message text is then re-rendered as `[图片: …]` / `[表情: …]`, and a turn
-    waits up to
-    `image_wait_seconds` for descriptions of its new messages before planning.
+  - **Pictures (2026-10-19):** the models see them themselves. A stored photo
+    is not described in advance: one sentence about a picture seen once says
+    little and cost a model call before every turn. Its line reads `[图片]`
+    and the planner gets the picture as an image right before the line
+    (`chat/pictures`, sized by `image/preview` to fit 1024 px), in the cached
+    part of its log for as long as the line is shown. A sticker the
+    collection has learned reads as its learned description (`[表情: …]`);
+    one it has not learned yet goes as a picture too. A turn waits up to
+    `image_wait_seconds` for the pictures of its new messages to be fetched.
+    Before, a `vision_model` call described every picture and sticker in a
+    sentence and the models only ever saw that.
 - **`store/`**: SQLite in WAL mode. Only allow-listed chats are stored; the bot
   account is also a member of unrelated groups.
 - **`main`**:

@@ -61,7 +61,7 @@ std::string session_line(const store::StoredMessage &message, i32 utc_offset_min
 
 provider::History render_session(std::string_view prompt, const ChatInfo &info, const std::vector<store::StoredMessage> &rows,
                                  const std::deque<PlannerRecord> &records, const PlannerTail &tail, const std::vector<LineEdges> &edges,
-                                 std::string_view earlier) {
+                                 std::string_view earlier, const Pictures &pictures) {
     const auto line = [&](usize index) {
         return session_line(rows[index], tail.utc_offset_minutes, index < edges.size() ? &edges[index] : nullptr);
     };
@@ -82,14 +82,23 @@ provider::History render_session(std::string_view prompt, const ChatInfo &info, 
     };
 
     usize next = 0;
+    // A row's pictures come right before its line, so the part that ends the
+    // cached prefix is always text.
+    const auto add_row = [&] {
+        if (const auto found = pictures.find(rows[next].row_id); found != pictures.end()) {
+            flush_lines();
+            for (const auto &picture : found->second) user.parts.push_back(picture);
+        }
+        lines += line(next++);
+    };
     for (const auto &record : records) {
-        while (next < rows.size() && rows[next].row_id <= record.after_row) lines += line(next++);
+        while (next < rows.size() && rows[next].row_id <= record.after_row) add_row();
         flush_user();
         for (const auto &item : record.output) provider::append_output_item(history, item);
         // The results first: Anthropic wants them right after the calls.
         for (const auto &outcome : record.outcomes) user.parts.push_back(outcome);
     }
-    while (next < rows.size()) lines += line(next++);
+    while (next < rows.size()) add_row();
     flush_lines();
     // Everything so far is the stable part; the tail changes every round.
     if (!user.parts.empty()) {

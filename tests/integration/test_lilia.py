@@ -17,9 +17,11 @@ import hashlib
 import json
 import os
 import sqlite3
+import struct
 import subprocess
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -35,7 +37,29 @@ PLAIN_ID = 4300
 QUOTE_ID = 4301
 SELF_CARD = "莉莉娅酱"
 TOKEN = "onebot-test-token"
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
+
+
+def tiny_png():
+    """A real 1x1 red PNG, so lilia can read and show it."""
+
+    def chunk(kind, data):
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data))
+        )
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+        + chunk(b"IEND", b"")
+    )
+
+
+PNG_BYTES = tiny_png()
 VOICE_BYTES = b"#!AMR\n" + bytes(range(32))
 API_KEY = "test-key"
 
@@ -133,14 +157,6 @@ def start_model_server():
                 data = tool_answer(
                     "record_jargon", {"items": [{"content": "这也行", "source": "2"}]}
                 )
-            elif has_image(body):
-                data = sse(
-                    [
-                        message_start(6),
-                        *text_block(0, VISION_TEXT),
-                        *message_end("end_turn", 9),
-                    ]
-                )
             else:
                 data = writer_answer()
             self.send_response(200)
@@ -186,16 +202,15 @@ def planner_answer(body):
     """Replies to the line that says 你好呀, by its #number, as said to her
     (silent when there is none); after that (the round that sees the reply's
     receipt) ends the turn."""
-    first = body["messages"][-1]["content"][0]
+    content = body["messages"][-1]["content"]
+    text = "".join(
+        block.get("text", "") for block in content if block["type"] == "text"
+    )
     target = (
         None
-        if first.get("type") == "tool_result"
+        if content[0].get("type") == "tool_result"
         else next(
-            (
-                line.split(" ", 1)[0]
-                for line in first["text"].splitlines()
-                if "你好呀" in line
-            ),
+            (line.split(" ", 1)[0] for line in text.splitlines() if "你好呀" in line),
             None,
         )
     )
@@ -244,9 +259,6 @@ def planner_answer(body):
             *message_end("tool_use", 3),
         ]
     )
-
-
-VISION_TEXT = "一只橘猫趴在键盘上\n睡着了"
 
 
 def has_image(body):
@@ -643,14 +655,10 @@ def test_reply_and_reconnect(tmp_path):
     learners = [b for b in model_state["bodies"] if "record_expressions" in offered(b)]
     reviews = [b for b in model_state["bodies"] if "review_expressions" in offered(b)]
     jargons = [b for b in model_state["bodies"] if "record_jargon" in offered(b)]
-    visions = [b for b in model_state["bodies"] if has_image(b)]
     calls_in_order = [
         b
         for b in model_state["bodies"]
-        if b not in learners
-        and b not in reviews
-        and b not in jargons
-        and b not in visions
+        if b not in learners and b not in reviews and b not in jargons
     ]
     # Every planner call fails once and goes to the planner fallback.
     broken_planners = [
@@ -667,10 +675,6 @@ def test_reply_and_reconnect(tmp_path):
             "the fallback keeps the planner's tool choice"
         )
     turns = [b for b in calls_in_order if b["model"] != BROKEN_PLANNER]
-    assert len(visions) == 1, "the picture is described once; voice is not an image"
-    image = visions[0]["messages"][0]["content"][0]
-    assert image["source"]["media_type"] == "image/png"
-    assert base64.b64decode(image["source"]["data"]) == PNG_BYTES
     assert len(learners) == 1, "one learning batch from the ignored group"
     assert len(reviews) == 1, "the extracted patterns are reviewed before storing"
     assert len(jargons) == 1, "the same batch is mined for slang"
@@ -715,9 +719,21 @@ def test_reply_and_reconnect(tmp_path):
     )
     assert planner.get("thinking") == {"type": "disabled"}, "thinking is off by default"
     assert "tool_choice" not in planner, "the planner may write its analysis first"
-    log = planner["messages"][-1]["content"][0]["text"]
-    assert "你好呀" in log and "[图片: 一只橘猫趴在键盘上 睡着了][语音]" in log, (
-        "the turn waits for the description and sees it"
+    blocks = planner["messages"][-1]["content"]
+    log = "".join(b.get("text", "") for b in blocks if b["type"] == "text")
+    assert "你好呀" in log and "[图片][语音]" in log, (
+        "a picture is not described in advance"
+    )
+    images = [i for i, b in enumerate(blocks) if b["type"] == "image"]
+    assert len(images) == 1, (
+        "the turn waits for the picture and is shown it; voice is not an image"
+    )
+    image = blocks[images[0]]
+    assert image["source"]["media_type"] == "image/png"
+    assert base64.b64decode(image["source"]["data"]) == PNG_BYTES
+    assert "[图片][语音]" in blocks[images[0] + 1]["text"], "right before its line"
+    assert blocks[-2]["type"] == "text", (
+        "the stable part still ends in text (a cache breakpoint for Claude)"
     )
     assert "别理我" not in log
     assert "[回复 #2 魔王: 早] 早啊" in log, (
@@ -750,7 +766,7 @@ def test_reply_and_reconnect(tmp_path):
         "SELECT chat_id, message_id, from_self, sender_name, text FROM messages ORDER BY id"
     ).fetchall()
     assert rows == [
-        (GROUP, MEDIA_ID, 0, "魔王", "[图片: 一只橘猫趴在键盘上 睡着了][语音]"),
+        (GROUP, MEDIA_ID, 0, "魔王", "[图片][语音]"),
         (GROUP, PLAIN_ID, 0, "魔王", "[已撤回]"),
         (GROUP, QUOTE_ID, 0, "魔王", "[回复 魔王: 早] 早啊"),
         (GROUP, TRIGGER_ID, 0, "魔王", "@lilia 你好呀"),
@@ -779,7 +795,6 @@ def test_reply_and_reconnect(tmp_path):
     ).fetchall()
     assert calls == [
         # The model column is what the response reports; the fake says fake-model.
-        (GROUP, "fake-model", 6, 9, 0),
         (GROUP, BROKEN_PLANNER, 0, 0, 1),
         (GROUP, "fake-model", 5, 3, 0),
         (GROUP, BROKEN_WRITER, 0, 0, 1),
@@ -787,7 +802,7 @@ def test_reply_and_reconnect(tmp_path):
         (GROUP, BROKEN_PLANNER, 0, 0, 1),
         (GROUP, "fake-model", 5, 3, 0),
     ], (
-        "vision, failed planner, planner fallback, failed writer, fallback writer, "
+        "failed planner, planner fallback, failed writer, fallback writer, "
         "failed planner, planner fallback",
         calls,
     )
@@ -810,7 +825,7 @@ def test_reply_and_reconnect(tmp_path):
             f"media/{png_sha1[:2]}/{png_sha1}.png",
             len(PNG_BYTES),
             "",
-            "一只橘猫趴在键盘上 睡着了",
+            "",
         ),
         (
             GROUP,

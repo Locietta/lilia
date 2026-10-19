@@ -16,7 +16,6 @@
 
 #include <lilia/config.h>
 #include <lilia/onebot/session.h>
-#include <lilia/provider/provider.h>
 #include <lilia/store/store.h>
 
 namespace lilia::archive {
@@ -69,21 +68,22 @@ struct Archiver {
     Archiver(const ArchiveConfig &config, std::filesystem::path data_dir, store::Store &store);
 
     /// Marks a message whose media is about to be archived, so turns can wait
-    /// for its image descriptions. Call before spawning archive().
+    /// for its pictures. Call before spawning archive().
     void track(const store::ChatKey &chat, i64 message_id);
 
     /// Archives every media segment of one stored message (when archiving is
     /// enabled). Never fails: each outcome, including errors, becomes a row in
-    /// the media table. With a vision model, images and stickers are
-    /// described (cached by content); forwards sent without their nodes are
-    /// fetched with get_forward_msg. The stored text is then re-rendered with
-    /// the descriptions after `prefix` (the quote it was stored with); a
-    /// message recalled meanwhile stays recalled.
+    /// the media table. A sticker the collection has learned is described by
+    /// it; pictures are not described (the planner sees them, chat/pictures.h).
+    /// Forwards sent without their nodes are fetched with get_forward_msg. The
+    /// stored text is then re-rendered with the descriptions after `prefix`
+    /// (the quote it was stored with); a message recalled meanwhile stays
+    /// recalled.
     lighter::Task<> archive(std::shared_ptr<onebot::Session> session, store::StoredMessage message, onebot::Message segments,
                             std::string prefix = {});
 
     /// Waits, at most `budget` in total, until the tracked messages among
-    /// `message_ids` are archived and described.
+    /// `message_ids` are archived.
     lighter::Task<> wait_for(store::ChatKey chat, std::vector<i64> message_ids, std::chrono::milliseconds budget);
 
     const ArchiveConfig &config;
@@ -91,9 +91,6 @@ struct Archiver {
     store::Store &store;
     lighter::http::Client http;
     lighter::Semaphore slots{2};
-    /// Describes images and stickers; unset disables descriptions.
-    std::optional<provider::Provider> vision;
-    std::string vision_model;
     std::map<std::tuple<std::string, i64, i64>, std::shared_ptr<lighter::Event>> pending;
 };
 

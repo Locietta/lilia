@@ -17,7 +17,6 @@
 #include <lighter/async/runtime/timeout.h>
 #include <lighter/http/bound_client.h>
 
-#include <lilia/calls.h>
 #include <lilia/log.h>
 #include <lilia/net/codec.h>
 #include <lilia/onebot/message.h>
@@ -52,39 +51,6 @@ struct FileUrl {
 };
 
 bool is_http(std::string_view text) { return text.starts_with("http://") || text.starts_with("https://"); }
-
-/// Anthropic's limit for one inline image.
-constexpr usize k_max_vision_bytes = 5 * 1024 * 1024;
-constexpr usize k_max_description_code_points = 120;
-
-constexpr std::string_view k_vision_prompt =
-    "用一两句中文描述这张图，像跟朋友转述一样简洁。是表情包的话说它表达的情绪或者梗；图上有文字就照写出来。不要用 Markdown，不要换行。";
-
-constexpr std::chrono::seconds k_vision_deadline{60};
-
-/// Collapses whitespace and newlines and bounds the length.
-std::string one_line(std::string_view text) {
-    std::string out;
-    bool space = false;
-    for (const char c : text) {
-        if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
-            space = !out.empty();
-            continue;
-        }
-        if (space) out.push_back(' ');
-        space = false;
-        out.push_back(c);
-    }
-    usize kept = 0;
-    usize bytes = 0;
-    while (bytes < out.size() && kept < k_max_description_code_points) {
-        ++bytes;
-        while (bytes < out.size() && (static_cast<unsigned char>(out[bytes]) & 0xC0) == 0x80) ++bytes;
-        ++kept;
-    }
-    if (bytes < out.size()) out = out.substr(0, bytes) + "…";
-    return out;
-}
 
 /// Large media is read, hashed and written this much at a time, with the
 /// loop free to serve chats in between (everything runs on one thread).
@@ -204,32 +170,6 @@ Task<Result<void>> write_content(std::filesystem::path target, std::string_view 
     co_return Result<void>{};
 }
 
-/// One or two sentences about an image, cached by content hash; empty when
-/// there is no vision model, the format is unsupported or the call fails.
-Task<std::string> describe(Archiver &archiver, const store::ChatKey &chat, const std::string &sha1, const std::string &bytes,
-                           const std::string &extension) {
-    if (!archiver.vision) co_return std::string();
-    const auto media_type = image_media_type(extension);
-    if (media_type.empty() || bytes.size() > k_max_vision_bytes) co_return std::string();
-    if (auto cached = archiver.store.media_description(sha1); cached.has_value() && !cached->empty()) co_return std::move(*cached);
-
-    provider::History history;
-    history.push_back({.role = provider::Role::USER,
-                       .parts = {provider::ImagePart{.media_type = std::string(media_type), .data = net::base64_encode(bytes)},
-                                 provider::TextPart{.text = std::string(k_vision_prompt)}}});
-    store::LlmCall call{.time =
-                            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(),
-                        .chat = chat,
-                        .model = archiver.vision_model};
-    // A hung call must not hold an archive slot (and the turns waiting on it).
-    const auto items = co_await call_recorded(*archiver.vision, history, {}, k_vision_deadline, archiver.store, call);
-    if (items.has_error()) {
-        log::warn("describing an image failed: {}", call.error);
-        co_return std::string();
-    }
-    co_return one_line(answer_text(*items));
-}
-
 Task<std::string> archive_one(Archiver &archiver, const std::shared_ptr<onebot::Session> &session, const store::StoredMessage &message,
                               MediaRef ref) {
     store::MediaRecord record{
@@ -264,8 +204,11 @@ Task<std::string> archive_one(Archiver &archiver, const std::shared_ptr<onebot::
             record.bytes = static_cast<i64>(bytes.size());
         }
         record.source = std::move(fetched->source);
-        if (ref.kind == MediaKind::IMAGE || ref.kind == MediaKind::STICKER) {
-            record.description = co_await describe(archiver, message.chat, record.sha1, bytes, relative.extension().string());
+        // A sticker the collection has learned reads as its description; a
+        // picture, or a sticker not learned yet, goes to the planner as itself.
+        if (ref.kind == MediaKind::STICKER) {
+            if (auto known = archiver.store.sticker_by_hash(record.sha1); known.has_value() && *known)
+                record.description = (*known)->description;
         }
     }
     if (auto added = archiver.store.add_media(record); added.has_error()) log::error("cannot record media: {}", added.error().message());

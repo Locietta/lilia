@@ -2,6 +2,7 @@
 
 #include <deque>
 #include <expected>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,6 +33,9 @@ struct PlannerRecord {
     std::vector<ToolOutcome> outcomes;
 };
 
+/// The pictures models are shown, by row (chat/pictures.h).
+using Pictures = std::map<i64, std::vector<provider::ImagePart>>;
+
 /// What the planner is told per round and never kept: the newest lines,
 /// notes, facts about the new messages, the time.
 struct PlannerTail {
@@ -56,10 +60,11 @@ std::string session_line(const store::StoredMessage &message, i32 utc_offset_min
 /// user message, followed by the lines that came after), the last line ending
 /// a cached prefix, then `tail` as a final part. `edges` are the rows'
 /// (aligned with them; empty: none shown). `earlier`, the summaries of what
-/// scrolled out of the window (memory::render_earlier), leads the log.
+/// scrolled out of the window (memory::render_earlier), leads the log. A
+/// row's `pictures` come right before its line.
 provider::History render_session(std::string_view prompt, const ChatInfo &info, const std::vector<store::StoredMessage> &rows,
                                  const std::deque<PlannerRecord> &records, const PlannerTail &tail,
-                                 const std::vector<LineEdges> &edges = {}, std::string_view earlier = {});
+                                 const std::vector<LineEdges> &edges = {}, std::string_view earlier = {}, const Pictures &pictures = {});
 
 /// After the window's anchor moved to `anchor_row`: records about lines no
 /// longer shown go, and all but the newest `keep_cycles` turns lose their

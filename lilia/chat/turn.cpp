@@ -589,7 +589,8 @@ Task<> Responder::run_turn(store::ChatKey chat) {
         tail.hint = hint.shown;
         const i64 shown = rows.back().row_id;
         const auto earlier = memory ? memory->earlier(chat) : std::string();
-        const auto rendered = render_session(prompt, info, rows, state.records, tail, edges, earlier);
+        const auto pictures = pictures_of(store, config.data_dir, rows, picture_cache);
+        const auto rendered = render_session(prompt, info, rows, state.records, tail, edges, earlier, pictures);
         // Called, she will most likely answer the line that called her: its
         // expressions are picked while the planner decides, not after it.
         const auto called = addressed ? addressed : named;

@@ -155,7 +155,7 @@ struct ChatConfig {
     double typing_speed = 1.0;
     TypoConfig typos;
     ScheduleConfig schedule;
-    /// How long a turn waits for new images to be described.
+    /// How long a turn waits for the pictures of new messages to be fetched.
     u32 image_wait_seconds = 8;
     /// Input plus output tokens per local calendar day across all chats
     /// (calls made for them; learning has its own budget).

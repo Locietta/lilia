@@ -18,6 +18,7 @@
 #include <lilia/archive/archiver.h>
 #include <lilia/chat/context.h>
 #include <lilia/chat/flow.h>
+#include <lilia/chat/pictures.h>
 #include <lilia/chat/session.h>
 #include <lilia/config.h>
 #include <lilia/feedback/feedback.h>
@@ -196,6 +197,8 @@ struct Responder {
     sticker::Collector *stickers = nullptr;
     /// Learns expressions from every group (read-only); null when disabled.
     learn::Learner *learner = nullptr;
+    /// The chats' pictures as the models are shown them, by content.
+    PictureCache picture_cache;
     std::mt19937 rng{std::random_device{}()};
 
     std::shared_ptr<onebot::Session> session;

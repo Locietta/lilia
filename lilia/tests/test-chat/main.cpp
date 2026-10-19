@@ -222,6 +222,16 @@ void test_planner() {
                 text_part(summarised[1].parts[0]).cache,
             "earlier summaries come before the lines: " + head);
 
+    // A row's pictures come right before its line; the stable part still ends in text.
+    const chat::Pictures pictures{{105, {provider::ImagePart{.media_type = "image/png", .data = "UE5H"}}}};
+    const auto shown = chat::render_session("PLANNER", info, rows, {}, {.now = t + 20}, {}, {}, pictures);
+    const auto &shown_parts = shown.back().parts;
+    const auto picture =
+        std::ranges::find_if(shown_parts, [](const auto &part) { return std::holds_alternative<provider::ImagePart>(part); });
+    require(picture != shown_parts.end() && picture + 1 != shown_parts.end() && text_part(*(picture + 1)).text.starts_with("#105 ") &&
+                text_part(*(picture - 1)).text.ends_with("在追\n") && text_part(shown_parts[shown_parts.size() - 2]).cache,
+            "the picture sits before its line, the cached part ends in text");
+
     // What she thought and did about the lines a trim drops goes to their summary.
     require(chat::render_rounds(records, 103) == "- 看到 #103 时：c 在问新番，她在追，可以接一句 → 她回复了 #103。\n" &&
                 chat::render_rounds(records, 102).empty(),
