@@ -262,6 +262,14 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
     }
     const auto previous = std::ranges::find(state.replied, plan.target, &std::pair<i64, std::string>::first);
     const auto people = co_await known_people(r, chat, target, log_lines, found.people);
+    // The planner's description of the picture always goes; the picture too
+    // when the writer can see.
+    std::vector<provider::ImagePart> pictures;
+    if (r->config.model.writer_vision) {
+        auto shown = pictures_of(r->store, r->config.data_dir, {target}, r->picture_cache);
+        if (const auto found_pictures = shown.find(target.row_id); found_pictures != shown.end())
+            pictures = std::move(found_pictures->second);
+    }
     const auto history = build_writer_history({
         .persona = r->persona,
         .rules = situated(r->writer_rules, chat, {}, embedded(xmake::writer_group_md), embedded(xmake::writer_private_md)),
@@ -281,6 +289,7 @@ Task<Delivered> deliver(Responder *r, store::ChatKey chat, Plan plan, std::vecto
         .self_notes = std::move(found.self_notes),
         .presence = std::move(found.presence),
         .previous_reply = previous == state.replied.end() ? std::string() : previous->second,
+        .pictures = std::move(pictures),
     });
     // Emoji go unless people use them (they show up in learned expressions).
     auto styles = r->store.expression_styles();

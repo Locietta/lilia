@@ -196,7 +196,10 @@ std::vector<provider::ToolDefinition> planner_tools(const PlannerToolSet &set) {
                                         {"to_her", property("string", "那条消息是不是在对她说：called | likely | group | unsure | no")},
                                         {"quote", property("boolean", "是否引用那条消息")},
                                         {"style", property("string", "short | normal | long")},
-                                        {"intent", property("string", "一句话描述她想表达的意思，不是台词")}},
+                                        {"intent", property("string", "一句话描述她想表达的意思，不是台词")},
+                                        {"picture",
+                                         property("string",
+                                                  "那条消息带图（或者没认识的表情包）时，一两句话说图上是什么、写了什么字；没有图就不填")}},
                          .required = {"target", "to_her", "style", "intent"}},
     });
     if (set.stickers) {
@@ -313,6 +316,7 @@ std::expected<Plan, std::string> parse_call(const provider::ToolCall &call, cons
                  style == "normal" ? ReplyStyle::NORMAL :
                                      ReplyStyle::SHORT,
         .intent = string_field(input, "intent"),
+        .picture = std::string(trim(string_field(input, "picture"))),
     };
 }
 

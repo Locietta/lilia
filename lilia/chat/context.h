@@ -34,6 +34,9 @@ struct Plan {
     bool quote = false;
     ReplyStyle style = ReplyStyle::SHORT;
     std::string intent;
+    /// What the picture in the target shows, in the planner's words; the
+    /// writer always gets it (it may not see, or see well).
+    std::string picture;
     /// The send_sticker tool: the sticker to send ("s12").
     std::string sticker;
     /// The wait tool: seconds to wait before looking again (0: not waiting).
@@ -106,6 +109,8 @@ struct WriterInput {
     std::string presence;
     /// What she already said to this same target, when she answers it again.
     std::string previous_reply;
+    /// The target's pictures, for a writer that can see (model.writer_vision).
+    std::vector<provider::ImagePart> pictures;
 };
 
 /// The planner's web_search tool: one call with only the provider-hosted

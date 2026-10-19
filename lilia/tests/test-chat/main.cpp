@@ -169,6 +169,10 @@ void test_addressee() {
     require(chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#2","to_her":"maybe","style":"short","intent":"x"})"))}, rows)
                 .to_her.empty(),
             "an unknown reading is dropped");
+    require(chat::parse_plan({OutputItem(tool_call("reply", R"({"target":"#2","style":"short","intent":"x","picture":" 一只猫 "})"))}, rows)
+                        .picture == "一只猫" &&
+                reply.picture.empty(),
+            "what the picture shows, in the planner's words");
 }
 void test_planner() {
     using provider::OutputItem;
@@ -375,6 +379,22 @@ void test_writer() {
             "where, when, the style and the note come last: " + last);
     require(last.find("说在追") != std::string::npos, "the intent reaches the writer");
     require(!last.contains("刚才更早的聊天"), "no window summary, no section for it");
+    require(!last.contains("这条里的图"), "no picture, no section for it");
+    const auto pictured = chat::build_writer_history({
+        .persona = "PERSONA",
+        .rules = "RULES",
+        .info = group_info(),
+        .recent = {stored(205, t - 60, "b", "[图片] 这个怎么样")},
+        .target = stored(205, t - 60, "b", "[图片] 这个怎么样"),
+        .plan = {.reply = true, .target = 205, .intent = "夸一句", .picture = "一只橘猫趴在键盘上"},
+        .now = t,
+        .pictures = {provider::ImagePart{.media_type = "image/png", .data = "UE5H"}},
+    });
+    const auto &tail_parts = pictured.back().parts;
+    require(tail_parts.size() == 3 && std::holds_alternative<provider::ImagePart>(tail_parts[1]) &&
+                std::get<provider::TextPart>(tail_parts[0]).cache &&
+                std::get<provider::TextPart>(tail_parts[2]).text.contains("【这条里的图：一只橘猫趴在键盘上（图也附在上面）】"),
+            "the writer gets the planner's description and the picture, after the cached log");
     const auto with_earlier = text_of(chat::build_writer_history({
                                                                      .persona = "PERSONA",
                                                                      .rules = "RULES",

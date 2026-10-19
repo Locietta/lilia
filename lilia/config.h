@@ -76,6 +76,9 @@ struct ModelConfig {
     /// Tried in order when the writer call fails (outage, rate limit) or
     /// comes back empty.
     std::vector<ModelFallback> writer_fallbacks;
+    /// Show the writer the picture it answers (it always gets the planner's
+    /// description of it). Every current writer reads images.
+    bool writer_vision = true;
     /// Writer sampling temperature; unset uses the provider default.
     std::optional<double> writer_temperature;
     /// Describes images and stickers (on `base_url`); empty disables it.

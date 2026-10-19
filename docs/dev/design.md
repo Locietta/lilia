@@ -243,7 +243,11 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     one it has not learned yet goes as a picture too. A turn waits up to
     `image_wait_seconds` for the pictures of its new messages to be fetched.
     Before, a `vision_model` call described every picture and sticker in a
-    sentence and the models only ever saw that.
+    sentence and the models only ever saw that. When the planner replies to a
+    line with a picture, its `reply` call says what the picture shows
+    (`picture`); the writer always gets that, and the picture itself too with
+    `model.writer_vision` (on: every current writer reads images, though a
+    weaker one may read them less well).
 - **`store/`**: SQLite in WAL mode. Only allow-listed chats are stored; the bot
   account is also a member of unrelated groups.
 - **`main`**:
