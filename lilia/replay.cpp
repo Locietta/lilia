@@ -57,6 +57,11 @@ struct ReplayLine {
     bool self = false;           ///< her own earlier line, stored as hers
     std::string scenario;        ///< probes see only their scenario's lines
     std::optional<ReplayExpect> expect;
+    /// From export-group-chats.py: the line as she would see it live (photos
+    /// as [图片]), and the pictures she would be shown, files in img/ beside
+    /// the log.
+    std::string live;
+    std::vector<std::string> pictures;
 };
 
 void print(std::string_view line) {
@@ -418,12 +423,35 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     for (const auto &line : lines) {
         if (!line.self) uids.emplace(line.name, line.uid);
     }
+    // A line's pictures, copied into the replay's media archive, so the
+    // planner is shown them as it would be live.
+    const auto attach = [&](i64 id, const std::vector<std::string> &pictures) {
+        for (usize i = 0; i < pictures.size(); ++i) {
+            const auto &name = pictures[i];
+            const auto relative = std::filesystem::path("media") / name.substr(0, 2) / name;
+            const auto target = std::filesystem::path(config.data_dir) / relative;
+            std::error_code ec;
+            std::filesystem::create_directories(target.parent_path(), ec);
+            std::filesystem::copy_file(log.parent_path() / "img" / name, target, std::filesystem::copy_options::skip_existing, ec);
+            if (ec) continue;
+            std::ignore = store->add_media({.chat = {.type = "group", .id = k_replay_group},
+                                            .message_id = id,
+                                            .segment_index = static_cast<i64>(i),
+                                            .kind = "image",
+                                            .status = "stored",
+                                            .sha1 = name.substr(0, name.find('.')),
+                                            .path = relative.generic_string(),
+                                            .time = base + sim});
+        }
+    };
     // One line of the log arrives: printed, then ingested (hers are stored as
     // said before). Returns the chat when the planner should look.
     const auto feed = [&](const ReplayLine &line) -> std::optional<store::ChatKey> {
         sim = std::max(sim, line.t);
         const i64 id = ++message_id;
-        auto message = line_segments(line, names, ids, uids);
+        ReplayLine shown = line;
+        if (!line.live.empty()) shown.text = line.live;
+        auto message = line_segments(shown, names, ids, uids);
         ids["#" + std::to_string(++fed)] = id;
         if (!line.id.empty()) ids[line.id] = id;
         if (line.self) {
@@ -450,7 +478,9 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             .sender = {.user_id = line.uid, .nickname = line.name},
             .message = std::move(message),
         };
-        return responder.ingest(event);
+        const auto ready = responder.ingest(event);
+        attach(id, line.pictures);
+        return ready;
     }; // A planner wait: the clock moves on, and the lines of that time arrive.
     responder.pause = [&](const store::ChatKey &, i64 seconds) -> Task<> {
         sim += seconds;
