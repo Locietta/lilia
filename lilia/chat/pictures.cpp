@@ -29,7 +29,6 @@ Pictures pictures_of(store::Store &store, const std::filesystem::path &data_dir,
                      PictureCache &cache) {
     Pictures out;
     for (const auto &row : rows) {
-        if (row.from_self) continue;
         auto media = store.message_media(row.chat, row.message_id);
         if (!media.has_value()) continue;
         for (const auto &record : *media) {

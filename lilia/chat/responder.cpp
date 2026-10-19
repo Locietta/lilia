@@ -212,7 +212,8 @@ store::StoredMessage record_event(Responder *r, const onebot::MessageEvent &mess
     } else if (r->memory) {
         r->spawn(r->memory->index(stored.chat));
     }
-    if (r->archiver && r->session && archive::needs_enrichment(message.message, r->archiver->config.enabled)) {
+    // Without a session (replay) pictures with a local path still archive.
+    if (r->archiver && archive::needs_enrichment(message.message, r->archiver->config.enabled)) {
         r->archiver->track(stored.chat, stored.message_id);
         r->spawn(r->archiver->archive(r->session, stored, message.message, quote));
     }

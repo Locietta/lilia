@@ -57,11 +57,11 @@ struct ReplayLine {
     bool self = false;           ///< her own earlier line, stored as hers
     std::string scenario;        ///< probes see only their scenario's lines
     std::optional<ReplayExpect> expect;
-    /// From export-group-chats.py: the line as she would see it live (photos
-    /// as [图片]), and the pictures she would be shown, files in img/ beside
-    /// the log.
-    std::string live;
-    std::vector<std::string> pictures;
+    /// From export-group-chats.py: the message as QQ sent it (anonymised), so
+    /// lilia renders it herself as live. Quotes name a line `id`; an @ of
+    /// "self" is of her; pictures have a path under /replay-media, the img/
+    /// directory beside the log. `text` is then only shown, not ingested.
+    std::optional<onebot::Message> segments;
 };
 
 void print(std::string_view line) {
@@ -289,7 +289,7 @@ std::unique_ptr<chat::Responder> probe_responder(const Config &config, store::St
 
 Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
                      std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt,
-                     std::optional<std::filesystem::path> stickers, std::optional<usize> continue_at) {
+                     std::optional<std::filesystem::path> stickers, std::optional<usize> continue_at, bool forced) {
     auto parsed = read_log(log);
     if (!parsed) co_return 1;
     auto lines = *std::move(parsed);
@@ -298,6 +298,10 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     config.chat.private_users.clear();
     config.chat.admins.clear();
     config.feedback.enabled = false; // the prior is shown, nothing is judged
+    // Logged pictures come from the files beside the log, through the archiver as live.
+    config.archive.enabled = true;
+    config.archive.container_qq_dir = "/replay-media";
+    config.archive.host_qq_dir = (log.parent_path() / "img").string();
     auto store = store::Store::open_memory();
     if (store.has_error()) {
         std::fprintf(stderr, "%s\n", store.error().message().c_str());
@@ -354,6 +358,13 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             std::fprintf(stderr, "%s\n", pool.error().message().c_str());
             co_return 1;
         }
+        // The rest of the collection too: a sticker someone posts reads as its
+        // learned description whatever its status, as live.
+        for (const auto status : {"spare", "pending", "rejected"}) {
+            if (auto others = source->stickers(status); others.has_value()) {
+                for (auto &sticker : *others) std::ignore = store->add_sticker(sticker);
+            }
+        }
         std::vector<std::string> hashes;
         for (auto sticker : *pool) {
             sticker.path = (stickers->parent_path() / sticker.path).string(); // absolute: read from the live data dir
@@ -369,6 +380,8 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     }
     responder.self = {.user_id = k_replay_self, .nickname = config.chat.name};
     responder.realtime = false;
+    archive::Archiver archiver(config.archive, config.data_dir, *store);
+    responder.archiver = &archiver;
 
     // Logs keep only relative times: the chat plays out from 20:00 local time
     // today, the same whenever the replay runs (a run at 3 am had her remark
@@ -424,47 +437,48 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     for (const auto &line : lines) {
         if (!line.self) uids.emplace(line.name, line.uid);
     }
-    // A line's pictures, copied into the replay's media archive, so the
-    // planner is shown them as it would be live.
-    const auto attach = [&](i64 id, const std::vector<std::string> &pictures) {
-        for (usize i = 0; i < pictures.size(); ++i) {
-            const auto &name = pictures[i];
-            const auto relative = std::filesystem::path("media") / name.substr(0, 2) / name;
-            const auto target = std::filesystem::path(config.data_dir) / relative;
-            std::error_code ec;
-            std::filesystem::create_directories(target.parent_path(), ec);
-            std::filesystem::copy_file(log.parent_path() / "img" / name, target, std::filesystem::copy_options::skip_existing, ec);
-            if (ec) continue;
-            std::ignore = store->add_media({.chat = {.type = "group", .id = k_replay_group},
-                                            .message_id = id,
-                                            .segment_index = static_cast<i64>(i),
-                                            .kind = "image",
-                                            .status = "stored",
-                                            .sha1 = name.substr(0, name.find('.')),
-                                            .path = relative.generic_string(),
-                                            .time = base + sim});
+    // A logged message as it came, its quote and @s pointed at this replay's ids.
+    const auto remap = [&ids](onebot::Message segments) {
+        for (auto &segment : segments) {
+            if (segment.type == "reply") {
+                const auto found = ids.find(onebot::data_string(segment, "id").value_or(""));
+                segment = onebot::reply_segment(found == ids.end() ? -1 : found->second);
+            } else if (segment.type == "at" && onebot::data_string(segment, "qq") == "self") {
+                segment = onebot::at_segment(k_replay_self);
+            }
         }
+        return segments;
     };
+    const store::ChatKey replay_chat{.type = "group", .id = k_replay_group};
     // One line of the log arrives: printed, then ingested (hers are stored as
     // said before). Returns the chat when the planner should look.
     const auto feed = [&](const ReplayLine &line) -> std::optional<store::ChatKey> {
         sim = std::max(sim, line.t);
         const i64 id = ++message_id;
-        ReplayLine shown = line;
-        if (!line.live.empty()) shown.text = line.live;
-        auto message = line_segments(shown, names, ids, uids);
+        auto message = line.segments ? remap(*line.segments) : line_segments(line, names, ids, uids);
         ids["#" + std::to_string(++fed)] = id;
         if (!line.id.empty()) ids[line.id] = id;
         if (line.self) {
             print(std::format("[{}]   {}: {}", clock(line.t), config.chat.name, line.text));
-            std::ignore = store->add_message({.chat = {.type = "group", .id = k_replay_group},
+            // Her quote rendered as anyone's would be.
+            std::string quote;
+            if (const auto target = onebot::reply_target(message)) {
+                auto quoted = store->message(replay_chat, *target);
+                quote = chat::quote_prefix(quoted.has_value() && *quoted ? &**quoted : nullptr, config.chat.name);
+            }
+            const store::StoredMessage stored{.chat = replay_chat,
                                               .message_id = id,
                                               .sender_id = k_replay_self,
                                               .sender_name = config.chat.name,
                                               .time = base + sim,
                                               .segments_json = glz::write_json(message).value_or("[]"),
-                                              .text = onebot::render_plain(message),
-                                              .from_self = true});
+                                              .text = quote + onebot::render_plain(message),
+                                              .from_self = true};
+            std::ignore = store->add_message(stored);
+            if (archive::needs_enrichment(message, true)) {
+                archiver.track(replay_chat, id);
+                tasks.spawn(archiver.archive(nullptr, stored, message, quote));
+            }
             return std::nullopt;
         }
         print(std::format("[{}] {}: {}", clock(line.t), line.name, line.text));
@@ -479,9 +493,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             .sender = {.user_id = line.uid, .nickname = line.name},
             .message = std::move(message),
         };
-        const auto ready = responder.ingest(event);
-        attach(id, line.pictures);
-        return ready;
+        return responder.ingest(event);
     }; // A planner wait: the clock moves on, and the lines of that time arrive.
     responder.pause = [&](const store::ChatKey &, i64 seconds) -> Task<> {
         sim += seconds;
@@ -512,7 +524,8 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
             sim += seconds;
             co_return;
         };
-        responder.must_speak = true;
+        // Forced (blind comparisons) she must say something; free, she may stay silent as live.
+        responder.must_speak = forced;
         const store::ChatKey chat{.type = "group", .id = k_replay_group};
         const usize stop = std::min(*continue_at, lines.size());
         for (usize i = 0; i < stop; ++i) {
@@ -523,6 +536,18 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
                 state.flow.named.reset();
             }
             std::ignore = feed(lines[i]);
+        }
+        // As live by the time she looks: every picture archived, the chat
+        // indexed for search, what lies above her window summarised.
+        std::vector<i64> fed_ids;
+        for (i64 id = 1; id <= message_id; ++id) fed_ids.push_back(id);
+        co_await archiver.wait_for(chat, std::move(fed_ids), std::chrono::seconds(60));
+        if (responder.memory) {
+            co_await memory.index(chat);
+            responder.memory = nullptr; // the window without the summary log_window would spawn
+            const auto window = responder.log_window(chat);
+            responder.memory = &memory;
+            if (!window.empty()) co_await memory.summarize_window(chat, window.front().row_id - 1, 2 * config.chat.context_messages);
         }
         if (!responder.chats[chat].flow.unseen.empty()) co_await responder.run_turn(chat);
         co_await tasks.join();
@@ -567,6 +592,10 @@ Task<int> run_probes(Config config, std::filesystem::path log, std::optional<std
     config.chat.private_users.clear();
     config.chat.admins.clear();
     config.feedback.enabled = false; // the prior is shown, nothing is judged
+    // Logged pictures come from the files beside the log, through the archiver as live.
+    config.archive.enabled = true;
+    config.archive.container_qq_dir = "/replay-media";
+    config.archive.host_qq_dir = (log.parent_path() / "img").string();
     std::vector<std::string> names = config.chat.aliases;
     names.push_back(config.chat.name);
     std::map<std::string, i64> uids;

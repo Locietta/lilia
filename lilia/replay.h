@@ -43,12 +43,17 @@ provider::Provider make_judge(const ModelConfig &model);
 /// built-in writer.md, for comparing prompt variants. `stickers`: a lilia.db
 /// whose registered stickers she may send (read-only; files from its data dir).
 /// `continue_at`: only what she would say right before that (0-based) line,
-/// after the log up to it; she must say something (the planner still picks
-/// whom and what). Printed last as "RESULT {json}" (replied, messages,
-/// decisions), for blind comparisons with what people really said.
+/// after the log up to it (its pictures archived, with memory the chat
+/// indexed and what lies above her window summarised, as live). `forced`, she
+/// must say something (the planner still picks whom and what); otherwise she
+/// may stay silent. Printed last as "RESULT {json}" (replied, messages,
+/// decisions), for blind comparisons with what people really said. A log
+/// line may carry `segments`, the message as QQ sent it (export-group-chats.py),
+/// which lilia then renders herself as live.
 lighter::Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std::filesystem::path> persona,
                               std::optional<std::filesystem::path> habits, std::optional<std::filesystem::path> writer_prompt = {},
-                              std::optional<std::filesystem::path> stickers = {}, std::optional<usize> continue_at = {});
+                              std::optional<std::filesystem::path> stickers = {}, std::optional<usize> continue_at = {},
+                              bool forced = true);
 
 /// `lilia replay <log> --probe`: for every line with an `expect`, a fresh chat
 /// of its scenario's lines up to it (the last three new) and one turn, then

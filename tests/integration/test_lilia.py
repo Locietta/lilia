@@ -990,3 +990,113 @@ def test_probe_db(tmp_path):
     assert "早上好" in json.dumps(first_rounds[0]["messages"], ensure_ascii=False), (
         "the line's stored context comes along"
     )
+
+
+def test_replay_segments(tmp_path):
+    """`lilia replay --continue-at --free` on a log of real QQ segments: lilia
+    renders them herself as live. Her own line's picture is archived from the
+    file beside the log, a quote points at it, an @ of "self" is of her, a
+    face reads by its name."""
+    model, model_state = start_model_server()
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "onebot": {"access_token": "$LILIA_TEST_ONEBOT_TOKEN"},
+                "model": {
+                    "base_url": f"http://127.0.0.1:{model.server_port}",
+                    "model": "fake-model",
+                    "planner_model": "fake-model",
+                    "helper_model": "fake-model",
+                    "api_key": "$LILIA_TEST_KEY",
+                },
+                "chat": {"groups": [GROUP]},
+                "data_dir": str(tmp_path / "data"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "img").mkdir()
+    (tmp_path / "img" / "card.png").write_bytes(PNG_BYTES)
+    lines = [
+        {
+            "t": 0,
+            "uid": 3001,
+            "name": "群友1",
+            "id": "m1",
+            "self": True,
+            "text": "[图片]",
+            "segments": [
+                {
+                    "type": "image",
+                    "data": {
+                        "file": "card.png",
+                        "path": "/replay-media/card.png",
+                        "sub_type": 0,
+                    },
+                }
+            ],
+        },
+        {
+            "t": 5,
+            "uid": 3002,
+            "name": "群友2",
+            "id": "m2",
+            "text": "好漂亮",
+            "segments": [
+                {"type": "reply", "data": {"id": "m1"}},
+                {"type": "at", "data": {"qq": "self"}},
+                {"type": "text", "data": {"text": " 好漂亮"}},
+                {"type": "face", "data": {"id": "14"}},
+            ],
+        },
+        {
+            "t": 8,
+            "uid": 3003,
+            "name": "群友3",
+            "id": "m3",
+            "text": "你好呀",
+            "segments": [{"type": "text", "data": {"text": "你好呀"}}],
+        },
+    ]
+    log = tmp_path / "log.jsonl"
+    log.write_text(
+        "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines),
+        encoding="utf-8",
+    )
+    env = dict(os.environ, LILIA_TEST_ONEBOT_TOKEN=TOKEN, LILIA_TEST_KEY=API_KEY)
+    try:
+        ran = subprocess.run(
+            [
+                str(find_binary()),
+                "replay",
+                str(log),
+                "--continue-at",
+                "3",
+                "--free",
+                "--config",
+                str(config),
+            ],
+            env=env,
+            capture_output=True,
+            timeout=120,
+        )
+    finally:
+        model.shutdown()
+    stdout = ran.stdout.decode("utf-8", errors="replace")
+    stderr = ran.stderr.decode("utf-8", errors="replace")
+    assert ran.returncode == 0, f"{stdout}\n{stderr}"
+    assert not model_state["errors"], model_state["errors"]
+    planner = next(
+        b
+        for b in model_state["bodies"]
+        if "reply" in [t.get("name") for t in b.get("tools", [])]
+    )
+    blocks = planner["messages"][-1]["content"]
+    text = "".join(b.get("text", "") for b in blocks if b["type"] == "text")
+    assert "莉莉娅(她自己): [图片]" in text, text
+    assert "→她: [回复 #1 莉莉娅: [图片]] @莉莉娅 好漂亮[表情: 微笑]" in text, text
+    images = [b for b in blocks if b["type"] == "image"]
+    assert (
+        len(images) == 1 and base64.b64decode(images[0]["source"]["data"]) == PNG_BYTES
+    ), "her picture, archived from beside the log"

@@ -25,7 +25,8 @@ struct PictureCache {
 };
 
 /// The pictures of `rows` models should be shown, by row: the stored photos,
-/// and stickers stored without a description; none for her own lines. Read
+/// and stickers stored without a description (hers have none: what she
+/// sends is not archived, but a replay may give her lines with pictures). Read
 /// from the archive under `data_dir`, sized by image::for_model.
 Pictures pictures_of(store::Store &store, const std::filesystem::path &data_dir, const std::vector<store::StoredMessage> &rows,
                      PictureCache &cache);

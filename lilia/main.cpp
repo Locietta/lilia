@@ -43,7 +43,7 @@ using namespace std::chrono_literals;
 void print_usage(FILE *output) {
     std::fputs("usage: lilia [--config <path>] [--check-config]\n"
                "       lilia replay <chat.jsonl> [--config <path>] [--persona <persona.md>] [--habits <lilia.db>]\n"
-               "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>] [--continue-at <line>]\n"
+               "                    [--writer-prompt <writer.md>] [--stickers <lilia.db>] [--continue-at <line> [--free]]\n"
                "       lilia replay <probes.jsonl> --probe [--repeat <n>] [--planner-prompt <planner.md>] [--config <path>]\n"
                "       lilia replay --probe-db <copy.db> [--repeat <n>] [--limit <n>] [--planner-prompt <planner.md>] [--config <path>]\n"
                "       lilia learn <chat.jsonl> [--config <path>]\n"
@@ -743,6 +743,7 @@ int main(int argc, char **argv) {
     std::optional<std::filesystem::path> writer_prompt;
     std::optional<std::filesystem::path> stickers_db;
     std::optional<usize> continue_at;
+    bool free_turn = false;
     bool probe = false;
     std::optional<std::filesystem::path> planner_prompt;
     usize probe_repeat = 1;
@@ -834,6 +835,8 @@ int main(int argc, char **argv) {
             probe_repeat = static_cast<usize>(std::max(1, std::atoi(argv[++i])));
         } else if (arg == "--continue-at" && replay_log && i + 1 < argc) {
             continue_at = static_cast<usize>(std::max(0, std::atoi(argv[++i])));
+        } else if (arg == "--free" && replay_log) {
+            free_turn = true;
         } else if (arg == "--query" && retrieval_check && i + 1 < argc) {
             queries.emplace_back(argv[++i]);
         } else if (arg == "--db" && (retrieval_check || sticker_tool || feedback_tool) && i + 1 < argc) {
@@ -937,14 +940,14 @@ int main(int argc, char **argv) {
     auto app = lighter::with_token(
         probe_db            ? run_db_probes(*config, *probe_db, persona_path, probe_repeat, probe_limit, planner_prompt) :
         replay_log && probe ? run_probes(*config, *replay_log, persona_path, probe_repeat, planner_prompt) :
-        replay_log          ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at) :
-        learn_log           ? run_learn(*config, *learn_log) :
-        learn_history       ? run_learn_history(*config, history_groups, history_count) :
-        review              ? review_expressions(*config, apply, keep) :
-        retrieval_check     ? run_retrieval(*config, database_path.value_or(database), queries, labels_path) :
-        sticker_tool        ? run_stickers(*config, database_path, stickers) :
-        feedback_tool       ? run_feedback(*config, database_path, database, feedback_options) :
-                              run_app(*config),
+        replay_log      ? run_replay(*config, *replay_log, persona_path, habits_db, writer_prompt, stickers_db, continue_at, !free_turn) :
+        learn_log       ? run_learn(*config, *learn_log) :
+        learn_history   ? run_learn_history(*config, history_groups, history_count) :
+        review          ? review_expressions(*config, apply, keep) :
+        retrieval_check ? run_retrieval(*config, database_path.value_or(database), queries, labels_path) :
+        sticker_tool    ? run_stickers(*config, database_path, stickers) :
+        feedback_tool   ? run_feedback(*config, database_path, database, feedback_options) :
+                          run_app(*config),
         interrupts->token());
     loop.schedule(app);
     loop.run();
