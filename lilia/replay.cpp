@@ -302,6 +302,11 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     config.archive.enabled = true;
     config.archive.container_qq_dir = "/replay-media";
     config.archive.host_qq_dir = (log.parent_path() / "img").string();
+    // The replay chat stands in for the groups she lives in: it shares what
+    // they learned (a live config lists only real groups).
+    for (auto *groups : {&config.learning.expression_groups, &config.learning.jargon_groups}) {
+        for (auto &group : *groups) group.push_back(k_replay_group);
+    }
     auto store = store::Store::open_memory();
     if (store.has_error()) {
         std::fprintf(stderr, "%s\n", store.error().message().c_str());
@@ -327,6 +332,28 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         const auto profile = retrieval::profile_of(config.memory);
         if (auto vectors = source->embeddings(profile, hashes); vectors.has_value()) std::ignore = store->add_embeddings(profile, *vectors);
         print(std::format("(载入 {} 条学来的说法)", rows->size()));
+        // The slang she knows, in the chats it is known in, and the fitted
+        // addressee prior, as live.
+        usize slang = 0;
+        if (auto terms = source->jargon_terms(); terms.has_value()) {
+            for (const auto &term : *terms) {
+                if (term.is_jargon != 1 || term.meaning.empty()) continue;
+                auto chats = source->jargon_chats(term.id);
+                if (!chats.has_value() || chats->empty()) continue;
+                i64 id = 0;
+                for (const auto chat_id : *chats) {
+                    if (auto copy = store->add_jargon_hit(term.content, {.type = "group", .id = chat_id}, "", term.last_seen, 0);
+                        copy.has_value()) {
+                        id = copy->id;
+                    }
+                }
+                if (id != 0 && store->set_jargon_inference(id, term.meaning, term.is_jargon, term.count, true).has_value()) ++slang;
+            }
+        }
+        if (auto models = source->addressee_models(); models.has_value()) {
+            for (const auto &model : *models) std::ignore = store->save_addressee_model(model);
+        }
+        print(std::format("(载入 {} 条黑话)", slang));
     }
 
     lighter::TaskGroup tasks(lighter::EventLoop::current());
@@ -345,9 +372,10 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     responder.writer_fallbacks = make_writer_fallbacks(config.model);
     responder.planner_fallbacks = make_planner_fallbacks(config.model);
     responder.selector = make_selector(config.model);
-    // The addressee prior as live, from its hand-set weights.
+    // The addressee prior as live: the fitted models copied above, else its hand-set weights.
     feedback::Feedback feedback(config.feedback, config.chat, *store, make_judge(config.model),
                                 [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
+    feedback.load();
     responder.feedback = &feedback;
     sticker::Collector collector(config.stickers, config.data_dir, *store, [&tasks](Task<> task) { tasks.spawn(std::move(task)); });
     if (stickers) {
