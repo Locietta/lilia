@@ -221,7 +221,15 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
       than a miss through the gateway: this saves money, not time.
   - `lilia replay <chat.jsonl>` runs the same ingest and turn code on a
     recorded or synthetic log without NapCat and prints every decision;
-    `scripts/replay-remote.sh` runs it on cachy with the live keys.
+    `scripts/replay-remote.sh` runs it on cachy with the live keys. A
+    recorded line carries the message as QQ sent it, anonymised (2026-10-19:
+    before, an export script rendered it to text and lost quotes, @s and
+    more), so lilia renders it as live: quotes and @s point at the replay's
+    ids, pictures go through the archiver from files beside the log. With
+    `--continue-at <n>` she gets one turn right before line n, after its
+    pictures are archived and, with memory, the chat indexed and what lies
+    above her window summarised; she must reply, or with `--free` may stay
+    silent. Synthetic logs stay text (`tests/replay/*.jsonl`).
 - **`archive/`**: copies the media of allowed chats (pictures, stickers,
   voice, video, files) into `<data_dir>/media/<sha1[:2]>/<sha1><ext>`.
   - **Why:** the QQ client cache on the host is pruned after a few days, and
