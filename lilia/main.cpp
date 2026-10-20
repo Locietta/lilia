@@ -710,7 +710,7 @@ Task<int> run_app(const Config &config) {
     memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store, retriever);
     if (config.memory.enabled) {
         responder.memory = &memory;
-        memory.summarizer = make_learner(config.model);
+        memory.summarizer = make_summarizer(config.model);
         memory.summarizer_model = config.model.helper();
         memory.data_dir = config.data_dir;
         learner.retriever = &retriever;

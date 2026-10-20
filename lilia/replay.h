@@ -32,6 +32,8 @@ provider::Provider make_vision(const ModelConfig &model);
 provider::Provider make_learner(const ModelConfig &model);
 /// The hindsight judge: the helper model, tool forced, room for a verdict per line.
 provider::Provider make_judge(const ModelConfig &model);
+/// Chat summaries: the helper model, tool forced, room for a window's summary.
+provider::Provider make_summarizer(const ModelConfig &model);
 
 /// Feeds a JSONL chat log through the real gate, planner and writer (no
 /// NapCat, in-memory store, no delays) and prints every decision. Each line:

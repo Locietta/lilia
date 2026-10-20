@@ -193,6 +193,12 @@ provider::Provider make_judge(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.helper(), 6'000, true);
 }
 
+provider::Provider make_summarizer(const ModelConfig &model) {
+    // A window of 40 to 80 lines with pictures and her stances ran past the
+    // learner's 1000 tokens, and the cut tool call failed to parse.
+    return make_client(model, model.base_url, model.api_key, model.helper(), 2'000, true);
+}
+
 provider::Provider make_searcher(const ModelConfig &model) {
     return make_client(model, model.base_url, model.api_key, model.helper(), 1'200);
 }
@@ -426,7 +432,7 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
     memory::Memory memory(config.memory, config.chat.name, config.chat.utc_offset_minutes, *store, retriever);
     if (config.memory.enabled) {
         memory.now = [&sim, base] { return base + sim; };
-        memory.summarizer = make_learner(config.model);
+        memory.summarizer = make_summarizer(config.model);
         memory.summarizer_model = config.model.helper();
         memory.data_dir = config.data_dir;
         responder.memory = &memory;
