@@ -13,6 +13,7 @@
 
 #include <glaze/json.hpp>
 
+#include <lighter/async/io/watcher.h>
 #include <lighter/async/runtime/task_group.h>
 
 #include <lilia/chat/responder.h>
@@ -580,7 +581,10 @@ Task<int> run_replay(Config config, std::filesystem::path log, std::optional<std
         for (i64 id = 1; id <= message_id; ++id) fed_ids.push_back(id);
         co_await archiver.wait_for(chat, std::move(fed_ids), std::chrono::seconds(60));
         if (responder.memory) {
+            // index() only asks again while the one ingest started still runs;
+            // live, the history is indexed and summarised long before.
             co_await memory.index(chat);
+            while (std::ranges::contains(memory.indexing, chat)) co_await lighter::sleep(std::chrono::milliseconds(100));
             responder.memory = nullptr; // the window without the summary log_window would spawn
             const auto window = responder.log_window(chat);
             responder.memory = &memory;
