@@ -148,14 +148,17 @@ Task<FetchResult> fetch(Archiver &archiver, const std::shared_ptr<onebot::Sessio
 }
 
 /// Writes `bytes` to `target` atomically unless an identical file exists, a
-/// chunk at a time; `bytes` must outlive it.
+/// chunk at a time; `bytes` must outlive it. The same picture may arrive in
+/// two messages at once (a sticker sent again): each copy is written to its
+/// own temporary file, and whichever lands last replaces identical bytes.
 Task<Result<void>> write_content(std::filesystem::path target, std::string_view bytes) {
+    static u64 writes = 0;
     std::error_code ec;
     if (std::filesystem::exists(target, ec)) co_return Result<void>{};
     std::filesystem::create_directories(target.parent_path(), ec);
     if (ec) co_return lighter::outcome_error(Error::storage("cannot create " + target.parent_path().string() + ": " + ec.message()));
     auto temporary = target;
-    temporary += ".partial";
+    temporary += std::format(".partial-{}", ++writes);
     {
         std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
         for (usize at = 0; file && at < bytes.size(); at += k_io_chunk) {
@@ -166,7 +169,13 @@ Task<Result<void>> write_content(std::filesystem::path target, std::string_view 
         if (!file) co_return lighter::outcome_error(Error::storage("cannot write " + temporary.string()));
     }
     std::filesystem::rename(temporary, target, ec);
-    if (ec) co_return lighter::outcome_error(Error::storage("cannot rename into " + target.string() + ": " + ec.message()));
+    if (ec) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        // Windows cannot replace a file being read: the other copy is there.
+        if (std::filesystem::exists(target, ignored)) co_return Result<void>{};
+        co_return lighter::outcome_error(Error::storage("cannot rename into " + target.string() + ": " + ec.message()));
+    }
     co_return Result<void>{};
 }
 

@@ -1,7 +1,14 @@
 #include <array>
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <string>
 #include <vector>
+
+#include <lighter/async/io/loop.h>
+#include <lighter/async/runtime/task_group.h>
 
 #include <lilia/archive/archiver.h>
 #include <lilia/image/preview.h>
@@ -185,6 +192,47 @@ void test_media_rows() {
     require((*rows)[0].segment_index == 1 && (*rows)[1].status == "stored" && (*rows)[1].path == "media/ab/ab.amr", "rows in order");
 }
 
+/// The same picture in two messages at once (a sticker sent again, a replay
+/// of one): both are stored, as one file. Large enough that the writes
+/// interleave a chunk at a time.
+lighter::Task<> test_same_picture_twice() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      std::format("lilia-archive-{}", std::chrono::steady_clock::now().time_since_epoch().count());
+    std::filesystem::create_directories(root / "qq");
+    const std::string bytes = "GIF89a" + std::string(3 << 20, 'x');
+    std::ofstream(root / "qq" / "same.gif", std::ios::binary) << bytes;
+    const ArchiveConfig config{.container_qq_dir = "/qq", .host_qq_dir = (root / "qq").string()};
+    auto db = store::Store::open_memory();
+    require(db.has_value(), "open");
+    archive::Archiver archiver(config, root / "data", *db);
+    const store::ChatKey chat{.type = "group", .id = 7};
+    {
+        lighter::TaskGroup<> tasks(lighter::EventLoop::current());
+        for (const i64 id : {1, 2}) {
+            const store::StoredMessage message{.chat = chat, .message_id = id, .text = "[图片]"};
+            require(db->add_message(message).has_value(), "message");
+            archiver.track(chat, id);
+            tasks.spawn(archiver.archive({}, message, {segment("image", {{"file", "same.gif"}, {"path", "/qq/same.gif"}})}));
+        }
+        co_await tasks.join();
+    }
+    std::string path;
+    for (const i64 id : {1, 2}) {
+        const auto rows = db->message_media(chat, id);
+        require(rows.has_value() && rows->size() == 1 && rows->front().status == "stored", "both copies are stored");
+        require(path.empty() || rows->front().path == path, "as one file");
+        path = rows->front().path;
+    }
+    usize files = 0;
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(root / "data" / "media")) files += entry.is_regular_file();
+    require(files == 1, "no temporary file left");
+    {
+        std::ifstream stored(root / "data" / path, std::ios::binary);
+        require(std::string(std::istreambuf_iterator<char>(stored), {}) == bytes, "the bytes intact");
+    }
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 int main() {
@@ -195,6 +243,11 @@ int main() {
         test_paths();
         test_media_rows();
         test_descriptions();
+        lighter::EventLoop loop;
+        auto task = test_same_picture_twice();
+        loop.schedule(task);
+        loop.run();
+        std::ignore = task.value();
         return 0;
     } catch (const std::exception &e) {
         std::fputs(e.what(), stderr);
