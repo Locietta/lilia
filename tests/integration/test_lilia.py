@@ -996,7 +996,7 @@ def test_replay_segments(tmp_path):
     """`lilia replay --continue-at --free` on a log of real QQ segments: lilia
     renders them herself as live. Her own line's picture is archived from the
     file beside the log, a quote points at it, an @ of "self" is of her, a
-    face reads by its name."""
+    face reads by its name. The chat plays out at the time of day it was said."""
     model, model_state = start_model_server()
     config = tmp_path / "config.json"
     config.write_text(
@@ -1021,6 +1021,7 @@ def test_replay_segments(tmp_path):
     lines = [
         {
             "t": 0,
+            "time": 1791522420,  # 13:07 at UTC+8
             "uid": 3001,
             "name": "群友1",
             "id": "m1",
@@ -1096,6 +1097,7 @@ def test_replay_segments(tmp_path):
     text = "".join(b.get("text", "") for b in blocks if b["type"] == "text")
     assert "莉莉娅(她自己): [图片]" in text, text
     assert "→她: [回复 #1 莉莉娅: [图片]] @莉莉娅 好漂亮[表情: 微笑]" in text, text
+    assert "[13:07] 群友3" in text, text
     images = [b for b in blocks if b["type"] == "image"]
     assert (
         len(images) == 1 and base64.b64decode(images[0]["source"]["data"]) == PNG_BYTES

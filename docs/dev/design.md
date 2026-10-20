@@ -225,7 +225,9 @@ net::WebSocket ── onebot::Session ── chat::Responder ── provider::an
     recorded line carries the message as QQ sent it, anonymised (2026-10-19:
     before, an export script rendered it to text and lost quotes, @s and
     more), so lilia renders it as live: quotes and @s point at the replay's
-    ids, pictures go through the archiver from files beside the log. With
+    ids, pictures go through the archiver from files beside the log. A line's
+    `time` (when it was said) has the chat play out today at that time of day,
+    as every line shows its time; without it the log starts at 20:00. With
     `--continue-at <n>` she gets one turn right before line n, after its
     pictures are archived and, with memory, the chat indexed and what lies
     above her window summarised; she must reply, or with `--free` may stay
